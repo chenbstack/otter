@@ -3,11 +3,14 @@
 use std::mem;
 
 use super::*;
+use crate::files::{Files, Target};
 
 /// 标签类型。P1 逐步增加终端、文件、日志。
 pub enum TabKind {
     /// 节点标签:二级导航 + 页面。每个节点最多一个。
     Node(NodeId),
+    /// 文件标签:全尺寸文件管理。可以同一节点开多个。
+    Files(NodeId),
 }
 
 pub struct Tab {
@@ -16,12 +19,14 @@ pub struct Tab {
     pub page: Page,
     /// 该标签的列表滚动句柄,存取方式同 `page`。
     pub scroll: VirtualListScrollHandle,
+    /// 该标签的文件视图状态:节点标签里是抽屉的,文件标签里是主体的。存取方式同 `page`。
+    pub files: Files,
 }
 
 impl Tab {
     pub fn node(&self) -> NodeId {
         match self.kind {
-            TabKind::Node(id) => id,
+            TabKind::Node(id) | TabKind::Files(id) => id,
         }
     }
 }
@@ -42,9 +47,23 @@ impl Home {
         let ix = self.workspace.active.map_or(self.workspace.tabs.len(), |a| a + 1);
         self.workspace.tabs.insert(
             ix,
-            Tab { kind: TabKind::Node(id), page: Page::Stacks, scroll: VirtualListScrollHandle::new() },
+            Tab { kind: TabKind::Node(id), page: Page::Stacks, scroll: VirtualListScrollHandle::new(), files: Files::new() },
         );
         self.activate(ix);
+    }
+
+    /// 打开文件标签:总是新开一个,插在当前标签右边。
+    pub(crate) fn open_files_tab(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.sel;
+        let mut files = Files::for_tab(id, target);
+        files.init_search(window, cx);
+        let ix = self.workspace.active.map_or(self.workspace.tabs.len(), |a| a + 1);
+        self.workspace.tabs.insert(
+            ix,
+            Tab { kind: TabKind::Files(id), page: Page::Stacks, scroll: VirtualListScrollHandle::new(), files },
+        );
+        self.activate(ix);
+        cx.notify();
     }
 
     /// 激活标签:把当前标签的页面状态存回去,载入目标标签的,并让节点选中跟随。
@@ -56,9 +75,11 @@ impl Home {
         if let Some(a) = ws.active {
             ws.tabs[a].page = self.page;
             mem::swap(&mut self.scroll, &mut ws.tabs[a].scroll);
+            mem::swap(&mut self.files, &mut ws.tabs[a].files);
         }
         self.page = ws.tabs[ix].page;
         mem::swap(&mut self.scroll, &mut ws.tabs[ix].scroll);
+        mem::swap(&mut self.files, &mut ws.tabs[ix].files);
         ws.active = Some(ix);
         self.sel = ws.tabs[ix].node();
     }
@@ -92,11 +113,12 @@ impl Home {
         let active = self.workspace.active;
         let tabs = self.workspace.tabs.iter().enumerate().map(|(ix, tab)| {
             let on = active == Some(ix);
-            let (title, online) = match tab.kind {
-                TabKind::Node(id) => {
-                    let (g, n) = self.locate(id);
-                    let node = &self.groups[g].nodes[n];
-                    (node.name.clone(), node.online())
+            let (title, online, kind_icon) = {
+                let (g, n) = self.locate(tab.node());
+                let node = &self.groups[g].nodes[n];
+                match tab.kind {
+                    TabKind::Node(_) => (node.name.clone(), node.online(), None),
+                    TabKind::Files(_) => (format!("{} · 文件", node.name), node.online(), Some(IconName::FolderOpen)),
                 }
             };
             let group: SharedString = format!("tab-{ix}").into();
@@ -119,7 +141,10 @@ impl Home {
                 .cursor_pointer()
                 .when(on, |d| d.bg(c::bg()).text_color(c::text()).font_weight(FontWeight::MEDIUM))
                 .when(!on, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
-                .child(status_dot(if online { c::online() } else { c::ghost() }, online))
+                .child(match kind_icon {
+                    Some(ic) => div().size(px(14.0)).flex_shrink_0().flex().items_center().justify_center().child(icon(ic, 13.0, if on { c::online() } else { c::ghost() })),
+                    None => status_dot(if online { c::online() } else { c::ghost() }, online),
+                })
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 .child(
                     div()

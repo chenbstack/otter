@@ -401,6 +401,18 @@ fn dir_size(p: &Path) -> u64 {
 }
 
 // ---- 状态 --------------------------------------------------------------------
+/// 各文件视图(抽屉、文件标签)共享的 mock 状态:同一节点同一目录在哪里看到的都一样。
+#[derive(Default)]
+pub struct Store {
+    /// 新增的条目(上传 / 新建),key = 节点|目标|目录
+    extra: HashMap<String, Vec<Entry>>,
+    /// 删掉的条目,key = 节点|目标|目录/名字
+    deleted: HashSet<String>,
+    ticking: bool,
+    batch: usize,
+}
+
+/// 一个文件视图的状态(浏览位置、选中、筛选)。每个标签各有一份,抽屉用所在标签的那份。
 pub struct Files {
     pub open: bool,
     /// 打开时所属的节点,换节点后重置到本机主目录
@@ -410,12 +422,6 @@ pub struct Files {
     back: Vec<String>,
     fwd: Vec<String>,
     selected: Option<String>,
-    /// 新增的条目(上传 / 新建),key = 目标|目录
-    extra: HashMap<String, Vec<Entry>>,
-    /// 删掉的条目,key = 目标|目录/名字
-    deleted: HashSet<String>,
-    ticking: bool,
-    batch: usize,
     picker: bool,
     search: Option<Entity<InputState>>,
     notice: Option<SharedString>,
@@ -431,13 +437,18 @@ impl Files {
             back: vec![],
             fwd: vec![],
             selected: None,
-            extra: HashMap::new(),
-            deleted: HashSet::new(),
-            ticking: false,
-            batch: 0,
             picker: false,
             search: None,
             notice: None,
+        }
+    }
+
+    /// 创建筛选输入框(需要 window 和 cx,所以不放在 `new` 里)
+    pub fn init_search(&mut self, window: &mut Window, cx: &mut Context<Home>) {
+        if self.search.is_none() {
+            let s = cx.new(|cx| InputState::new(window, cx).placeholder("筛选当前目录"));
+            cx.observe(&s, |_, _, cx| cx.notify()).detach();
+            self.search = Some(s);
         }
     }
 
@@ -454,7 +465,17 @@ impl Files {
     }
 
     fn dir_key(&self) -> String {
-        format!("{}|{}", self.target.key(), self.path)
+        format!("{}|{}|{}", self.node.0, self.target.key(), self.path)
+    }
+
+    /// 全尺寸文件标签用的初始状态
+    pub fn for_tab(node: NodeId, target: Target) -> Self {
+        let mut f = Self::new();
+        f.path = Self::home_of(&target).into();
+        f.node = node;
+        f.target = target;
+        f.open = true;
+        f
     }
 
     fn home_of(target: &Target) -> &'static str {
@@ -469,11 +490,7 @@ impl Files {
 // ---- 交互 --------------------------------------------------------------------
 impl Home {
     pub fn open_files(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
-        if self.files.search.is_none() {
-            let s = cx.new(|cx| InputState::new(window, cx).placeholder("筛选当前目录"));
-            cx.observe(&s, |_, _, cx| cx.notify()).detach();
-            self.files.search = Some(s);
-        }
+        self.files.init_search(window, cx);
         let sel = self.sel;
         let fs = &mut self.files;
         if !fs.open || fs.target != target || fs.node != sel {
@@ -540,13 +557,13 @@ impl Home {
         let fs = &self.files;
         let key = fs.dir_key();
         let mut v = base(&fs.target, &fs.path, self.node());
-        if let Some(extra) = fs.extra.get(&key) {
+        if let Some(extra) = self.fstore.extra.get(&key) {
             for e in extra {
                 v.retain(|o| o.name != e.name);
                 v.push(e.clone());
             }
         }
-        v.retain(|e| !fs.deleted.contains(&format!("{key}/{}", e.name)));
+        v.retain(|e| !self.fstore.deleted.contains(&format!("{key}/{}", e.name)));
         v.sort_by(|a, b| b.is_dir().cmp(&a.is_dir()).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
         v
     }
@@ -571,18 +588,19 @@ impl Home {
             return;
         }
         let fs = &mut self.files;
-        fs.batch += new.len();
+        let st = &mut self.fstore;
+        st.batch += new.len();
         fs.selected = new.last().map(|e| e.name.clone());
         let key = fs.dir_key();
-        let list = fs.extra.entry(key.clone()).or_default();
+        let list = st.extra.entry(key.clone()).or_default();
         for e in new {
-            fs.deleted.remove(&format!("{key}/{}", e.name));
+            st.deleted.remove(&format!("{key}/{}", e.name));
             list.retain(|o| o.name != e.name);
             list.push(e);
         }
         fs.notice = None;
-        if !fs.ticking {
-            fs.ticking = true;
+        if !st.ticking {
+            st.ticking = true;
             cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(Duration::from_millis(50)).await;
@@ -605,9 +623,9 @@ impl Home {
 
     /// 推进一帧上传进度(约 50 MB/s),返回是否还有没传完的
     fn step_uploads(&mut self) -> bool {
-        let fs = &mut self.files;
+        let st = &mut self.fstore;
         let mut more = false;
-        for e in fs.extra.values_mut().flatten() {
+        for e in st.extra.values_mut().flatten() {
             if let Some(p) = &mut e.progress {
                 *p += (2.5 * M as f32 / e.size as f32).clamp(0.012, 0.34);
                 if *p >= 1.0 {
@@ -618,9 +636,9 @@ impl Home {
             }
         }
         if !more {
-            fs.ticking = false;
-            fs.notice = Some(format!("已上传 {} 项", fs.batch).into());
-            fs.batch = 0;
+            st.ticking = false;
+            let n = std::mem::take(&mut st.batch);
+            self.files.notice = Some(format!("已上传 {n} 项").into());
         }
         more
     }
@@ -649,7 +667,7 @@ impl Home {
         let mut e = B { path: &dir, owner: "root" }.d(&name);
         e.modified = "刚刚".into();
         let key = self.files.dir_key();
-        self.files.extra.entry(key).or_default().push(e);
+        self.fstore.extra.entry(key).or_default().push(e);
         self.files.selected = Some(name);
         cx.notify();
     }
@@ -658,10 +676,10 @@ impl Home {
         let fs = &mut self.files;
         let Some(name) = fs.selected.take() else { return };
         let key = fs.dir_key();
-        if let Some(list) = fs.extra.get_mut(&key) {
+        if let Some(list) = self.fstore.extra.get_mut(&key) {
             list.retain(|e| e.name != name);
         }
-        fs.deleted.insert(format!("{key}/{name}"));
+        self.fstore.deleted.insert(format!("{key}/{name}"));
         fs.notice = Some(format!("已删除 {name}").into());
         cx.notify();
     }
@@ -758,6 +776,7 @@ fn progress_bar(p: f32, w: f32) -> Div {
 }
 
 impl Home {
+    /// 右侧文件抽屉(盖在节点标签的内容区上)
     pub fn files_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.files.open {
             return None;
@@ -774,6 +793,17 @@ impl Home {
         let max = Self::max_w(window);
         let want = if self.files.target == Target::Host { HOST_W } else { CT_W };
         let w = want.clamp(MIN_W.min(max), max);
+        Some(self.files_panel(window, cx, w, false))
+    }
+
+    /// 文件标签页:占满整个标签内容区
+    pub fn files_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let w = f32::from(window.viewport_size().width) - SIDEBAR_W;
+        self.files_panel(window, cx, w, true)
+    }
+
+    /// 文件管理的完整界面;`tab_mode` 为真时作为标签内容铺满,否则作为抽屉。
+    fn files_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>, w: f32, tab_mode: bool) -> AnyElement {
         let show_places = w >= PLACES_MIN;
         let show_preview = w >= PREVIEW_MIN;
 
@@ -915,7 +945,9 @@ impl Home {
                     ),
             )
             .child(div().flex_1())
-            .child(tool_btn("files-close", IconName::X, true).on_click(cx.listener(|this, _, _, cx| this.close_files(cx))));
+            .when(!tab_mode, |d| {
+                d.child(tool_btn("files-close", IconName::X, true).on_click(cx.listener(|this, _, _, cx| this.close_files(cx))))
+            });
 
         // ---- 工具栏:前进后退 / 面包屑 / 筛选 / 新建 / 上传 ----
         let path = fs.path.clone();
@@ -1388,7 +1420,7 @@ impl Home {
         });
 
         // ---- 状态栏 ----
-        let uploading: Vec<&Entry> = fs.extra.values().flatten().filter(|e| e.progress.is_some()).collect();
+        let uploading: Vec<&Entry> = self.fstore.extra.values().flatten().filter(|e| e.progress.is_some()).collect();
         let up_info = (!uploading.is_empty()).then(|| {
             let total: f32 = uploading.iter().map(|e| e.size as f32).sum();
             let done: f32 = uploading.iter().map(|e| e.size as f32 * e.progress.unwrap_or(0.0)).sum();
@@ -1477,46 +1509,48 @@ impl Home {
             .child(table)
             .children(preview);
 
-        Some(
-            div()
-                .id("files-drawer")
-                .absolute()
-                .top(px(TITLEBAR_H + TABBAR_H))
-                .right_0()
-                .bottom_0()
-                .w(px(w))
-                .flex()
-                .flex_col()
-                .bg(c::bg())
-                .border_l_1()
-                .border_color(c::border_strong())
-                .shadow(vec![BoxShadow {
-                    color: hsla(0.0, 0.0, 0.0, 0.45),
-                    offset: point(px(-14.0), px(0.0)),
-                    blur_radius: px(36.0),
-                    spread_radius: px(0.0),
-                    inset: false,
-                }])
-                .occlude()
-                .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.upload(paths.paths().to_vec(), cx)))
-                .child(header)
-                .child(toolbar)
-                .children(warn)
-                .child(body)
-                .child(status)
-                .child(overlay)
-                .when(picker_open, |d| {
-                    // 点下拉以外任何地方都收起
-                    d.child(div().id("picker-backdrop").absolute().inset_0().occlude().on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.files.picker = false;
-                            cx.notify();
-                        }),
-                    ))
-                })
-                .into_any_element(),
-        )
+        div()
+            .id(if tab_mode { "files-tab" } else { "files-drawer" })
+            .relative()
+            .flex()
+            .flex_col()
+            .bg(c::bg())
+            .occlude()
+            .when(tab_mode, |d| d.flex_1().min_w_0().min_h_0())
+            .when(!tab_mode, |d| {
+                d.absolute()
+                    .top(px(TITLEBAR_H + TABBAR_H))
+                    .right_0()
+                    .bottom_0()
+                    .w(px(w))
+                    .border_l_1()
+                    .border_color(c::border_strong())
+                    .shadow(vec![BoxShadow {
+                        color: hsla(0.0, 0.0, 0.0, 0.45),
+                        offset: point(px(-14.0), px(0.0)),
+                        blur_radius: px(36.0),
+                        spread_radius: px(0.0),
+                        inset: false,
+                    }])
+            })
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.upload(paths.paths().to_vec(), cx)))
+            .child(header)
+            .child(toolbar)
+            .children(warn)
+            .child(body)
+            .child(status)
+            .child(overlay)
+            .when(picker_open, |d| {
+                // 点下拉以外任何地方都收起
+                d.child(div().id("picker-backdrop").absolute().inset_0().occlude().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.files.picker = false;
+                        cx.notify();
+                    }),
+                ))
+            })
+            .into_any_element()
     }
 }
 

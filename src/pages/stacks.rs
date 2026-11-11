@@ -120,7 +120,7 @@ impl Home {
                     })),
             );
         }
-        // 文件管理不是页面,是盖在内容区上的抽屉:这里只是开关
+        // 点「文件」开一个文件标签页;右侧小图标开关快速抽屉
         let files_on = self.files.open && self.files.is_host();
         col.child(div().h(px(1.0)).mx(px(10.0)).my(px(8.0)).bg(c::border()))
             .child(
@@ -139,8 +139,22 @@ impl Home {
                     .when(!files_on, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
                     .child(icon(IconName::FolderOpen, 15.0, if files_on { c::online() } else { c::ghost() }))
                     .child(div().flex_1().child("文件"))
-                    .child(icon(IconName::PanelRightOpen, 13.0, c::ghost()))
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_host_files(window, cx))),
+                    .child(
+                        div()
+                            .id("m-files-drawer")
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(t::RADIUS_SM))
+                            .hover(|s| s.bg(c::selected()))
+                            .child(icon(IconName::PanelRightOpen, 13.0, c::ghost()))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.toggle_host_files(window, cx)
+                            })),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.open_files_tab(crate::files::Target::Host, window, cx))),
             )
     }
 

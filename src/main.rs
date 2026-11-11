@@ -94,8 +94,10 @@ struct Home {
     shot: Option<(String, u32)>,
     /// 添加 / 编辑节点弹窗
     form: Option<node_form::NodeForm>,
-    /// 右侧文件管理抽屉
+    /// 当前标签的文件视图状态(节点标签里是抽屉,文件标签里是主体),随标签切换
     files: files::Files,
+    /// 各文件视图共享的 mock 上传/新建/删除状态
+    fstore: files::Store,
 }
 
 impl Home {
@@ -118,6 +120,7 @@ impl Home {
             shot: None,
             form: None,
             files: files::Files::new(),
+            fstore: files::Store::default(),
         };
         h.open_node(sel);
         h
@@ -188,14 +191,17 @@ impl Render for Home {
         let titlebar = self.titlebar();
         let sidebar = self.sidebar(cx);
         let tabbar = self.tab_bar(cx);
-        let body = if self.workspace.active.is_some() {
+        let is_files_tab = self.workspace.active.is_some_and(|a| matches!(self.workspace.tabs[a].kind, workspace::TabKind::Files(_)));
+        let body = if is_files_tab {
+            div().flex_1().min_h_0().flex().flex_col().child(self.files_tab(window, cx))
+        } else if self.workspace.active.is_some() {
             let menu = self.menu(cx);
             let content = self.content(window, cx);
             div().flex_1().min_h_0().flex().flex_row().child(menu).child(content)
         } else {
             div().flex_1().min_h_0().flex().flex_col().child(empty_state(IconName::PanelTop, "没有打开的标签", "从左侧节点树选一个节点"))
         };
-        let drawer = self.files_drawer(window, cx);
+        let drawer = if is_files_tab { None } else { self.files_drawer(window, cx) };
         let dialog = self.node_dialog(window, cx);
         div()
             .size_full()
@@ -220,7 +226,7 @@ impl Render for Home {
 }
 
 fn main() {
-    // 调试参数:--shot <png> --node <g>,<n> --tabs n:<节点名>,... --active <k> --expand <k> --plain --page <0..6> --add(打开添加节点弹窗) --files <host|堆栈/服务> --fcd <目录> --fsel <名字>
+    // 调试参数:--shot <png> --node <g>,<n> --tabs n:<节点名>,f:<节点名>[@堆栈/服务],... --active <k> --expand <k> --plain --page <0..6> --add(打开添加节点弹窗) --files <host|堆栈/服务> --fcd <目录> --fsel <名字>
     let args: Vec<String> = std::env::args().collect();
     let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let shot = arg("--shot");
@@ -229,7 +235,7 @@ fn main() {
     let plain = args.iter().any(|a| a == "--plain");
     let page: Option<usize> = arg("--page").and_then(|v| v.parse().ok());
     let add = args.iter().any(|a| a == "--add");
-    // --tabs n:节点名,n:节点名  清空后依次打开标签;--active k 激活第 k 个(从 0 起)
+    // --tabs n:节点名,f:节点名[@堆栈/服务]  清空后依次打开标签;--active k 激活第 k 个(从 0 起)
     let tabs_arg = arg("--tabs");
     let active_arg: Option<usize> = arg("--active").and_then(|v| v.parse().ok());
     // --files host | <堆栈>/<服务>  打开文件抽屉;--fsel <名字> 选中一项;--fcd <路径> 进入目录
@@ -265,11 +271,25 @@ fn main() {
                 if let Some(spec) = &tabs_arg {
                     h.workspace = Workspace::default();
                     for item in spec.split(',') {
-                        if let Some(("n", name)) = item.split_once(':') {
-                            let id = h.all_nodes().find(|n| n.name == name).map(|n| n.id);
-                            if let Some(id) = id {
-                                h.open_node(id);
+                        let Some((kind, rest)) = item.split_once(':') else { continue };
+                        let (name, ct) = match rest.split_once('@') {
+                            Some((n, ct)) => (n, Some(ct)),
+                            None => (rest, None),
+                        };
+                        let Some(id) = h.all_nodes().find(|n| n.name == name).map(|n| n.id) else { continue };
+                        match kind {
+                            "n" => h.open_node(id),
+                            "f" => {
+                                // f:节点名 = 服务器文件;f:节点名@堆栈/服务 = 容器文件
+                                h.sel = id;
+                                let target = match ct.and_then(|c| c.split_once('/')) {
+                                    Some((stack, svc)) => files::Target::Container { stack: stack.into(), svc: svc.into() },
+                                    None => files::Target::Host,
+                                };
+                                h.open_files_tab(target, window, cx);
+                                h.files.debug_jump(fcd.clone(), fsel.clone());
                             }
+                            _ => {}
                         }
                     }
                     if let Some(k) = active_arg.filter(|k| *k < h.workspace.tabs.len()) {
