@@ -73,7 +73,7 @@ impl Home {
                     .px(px(10.0))
                     .pt(px(4.0))
                     .pb(px(8.0))
-                    .text_size(px(11.0))
+                    .text_size(px(t::TYPE_CAPTION))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(c::ghost())
                     .child("节点详情"),
@@ -90,9 +90,9 @@ impl Home {
                     .gap(px(10.0))
                     .h(px(34.0))
                     .px(px(10.0))
-                    .rounded(px(8.0))
+                    .rounded(px(t::RADIUS_MD))
                     .cursor_pointer()
-                    .text_size(px(13.0))
+                    .text_size(px(t::TYPE_BODY))
                     .when(active, |d| d.bg(c::selected()).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
                     .when(!active, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
                     .child(icon(p.icon(), 15.0, if active { c::online() } else { c::ghost() }))
@@ -108,7 +108,7 @@ impl Home {
                                 .justify_center()
                                 .rounded_full()
                                 .bg(if active { c::online_soft() } else { c::idle_soft() })
-                                .text_size(px(10.5))
+                                .text_size(px(t::TYPE_MICRO))
                                 .font_family(MONO)
                                 .text_color(if active { c::online() } else { c::muted() })
                                 .child(n.to_string()),
@@ -132,9 +132,9 @@ impl Home {
                     .gap(px(10.0))
                     .h(px(34.0))
                     .px(px(10.0))
-                    .rounded(px(8.0))
+                    .rounded(px(t::RADIUS_MD))
                     .cursor_pointer()
-                    .text_size(px(13.0))
+                    .text_size(px(t::TYPE_BODY))
                     .when(files_on, |d| d.bg(c::selected()).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
                     .when(!files_on, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
                     .child(icon(IconName::FolderOpen, 15.0, if files_on { c::online() } else { c::ghost() }))
@@ -196,7 +196,7 @@ impl Home {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(10.0))
+                    .rounded(px(t::RADIUS_LG))
                     .bg(c::raised_hi())
                     .border_1()
                     .border_color(c::border())
@@ -207,10 +207,10 @@ impl Home {
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .child(div().text_size(px(18.0)).font_weight(FontWeight::BOLD).child(self.page.label()))
+                    .child(div().text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).child(self.page.label()))
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(t::TYPE_CONTROL))
                             .text_color(c::muted())
                             .child(format!("{} 上的 Compose 项目", node.name)),
                     ),
@@ -258,7 +258,7 @@ impl Home {
                 .items_end()
                 .gap(px(12.0))
                 .p(px(14.0))
-                .rounded(px(12.0))
+                .rounded(px(t::RADIUS_XL))
                 .border_1()
                 .border_color(c::border())
                 .bg(c::raised())
@@ -275,7 +275,7 @@ impl Home {
                                 .flex_row()
                                 .items_center()
                                 .gap(px(6.0))
-                                .text_size(px(11.0))
+                                .text_size(px(t::TYPE_CAPTION))
                                 .text_color(c::muted())
                                 .child(icon(ic, 12.0, c::ghost()))
                                 .child(label),
@@ -288,7 +288,7 @@ impl Home {
                                 .gap(px(6.0))
                                 .child(
                                     div()
-                                        .text_size(px(20.0))
+                                        .text_size(px(t::TYPE_DISPLAY))
                                         .font_family(MONO)
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child(value),
@@ -299,7 +299,7 @@ impl Home {
                 .children(chart.map(|c| div().w(px(84.0)).flex_shrink_0().child(c)))
         };
 
-        let small = |s: String, color: Rgba| div().text_size(px(11.0)).text_color(color).child(s);
+        let small = |s: String, color: Rgba| div().text_size(px(t::TYPE_CAPTION)).text_color(color).child(s);
         let mem = mock::fmt_mem(agg.mem_mb);
         let (mem_v, mem_u) = mem.split_once(' ').unwrap_or((&mem, ""));
 
@@ -389,7 +389,7 @@ impl Home {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(7.0))
+                    .rounded(px(t::RADIUS_MD))
                     .bg(bg)
                     .child(icon(IconName::Layers, 14.0, fg)),
             )
@@ -406,12 +406,12 @@ impl Home {
                             .flex_row()
                             .items_center()
                             .gap(px(8.0))
-                            .child(div().text_size(px(13.5)).font_weight(FontWeight::BOLD).child(s.name.clone()))
+                            .child(div().text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::BOLD).child(s.name.clone()))
                             .child(pips),
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(px(t::TYPE_CAPTION))
                             .font_family(MONO)
                             .text_color(c::ghost())
                             .truncate()
@@ -428,7 +428,7 @@ impl Home {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.0))
+                    .rounded(px(t::RADIUS_SM))
                     .hover(|st| st.bg(c::hover()))
                     .child(icon(IconName::Ellipsis, 15.0, c::muted())),
             )
@@ -441,7 +441,7 @@ impl Home {
 
         let mut card = div()
             .w_full()
-            .rounded(px(12.0))
+            .rounded(px(t::RADIUS_XL))
             .border_1()
             .border_color(if s.expanded { c::border_strong() } else { c::border() })
             .bg(c::raised())
@@ -492,10 +492,10 @@ pub(crate) fn metric_col(label: &'static str, value: String, s: &[f32; SPARK_N],
                 .flex_row()
                 .items_baseline()
                 .justify_between()
-                .child(div().text_size(px(10.5)).text_color(c::ghost()).child(label))
+                .child(div().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(label))
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(px(t::TYPE_CONTROL))
                         .font_family(MONO)
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(c::secondary())
@@ -527,7 +527,7 @@ pub(crate) fn service_card(
                     .flex_row()
                     .items_center()
                     .gap(px(5.0))
-                    .text_size(px(10.5))
+                    .text_size(px(t::TYPE_MICRO))
                     .text_color(c::ghost())
                     .child(div().size(px(6.0)).rounded(px(1.5)).bg(color))
                     .child(label),
@@ -535,7 +535,7 @@ pub(crate) fn service_card(
             .child(
                 div()
                     .truncate()
-                    .text_size(px(12.0))
+                    .text_size(px(t::TYPE_CONTROL))
                     .font_family(MONO)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(c::secondary())
@@ -556,7 +556,7 @@ pub(crate) fn service_card(
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(7.0))
+                .rounded(px(t::RADIUS_MD))
                 .bg(if up { c::online_soft() } else { c::idle_soft() })
                 .child(icon(IconName::Box, 14.0, if up { c::online() } else { c::ghost() })),
         )
@@ -567,14 +567,14 @@ pub(crate) fn service_card(
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(div().truncate().text_size(px(13.5)).font_weight(FontWeight::BOLD).child(svc.name.clone()))
+                .child(div().truncate().text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::BOLD).child(svc.name.clone()))
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap(px(8.0))
-                        .text_size(px(11.0))
+                        .text_size(px(t::TYPE_CAPTION))
                         .text_color(c::ghost())
                         .child(div().flex_1().min_w_0().truncate().font_family(MONO).child(svc.image.clone()))
                         .child(
@@ -584,7 +584,7 @@ pub(crate) fn service_card(
                                 .flex_row()
                                 .items_center()
                                 .gap(px(4.0))
-                                .text_size(px(10.5))
+                                .text_size(px(t::TYPE_MICRO))
                                 .child(icon(IconName::Clock, 11.0, c::ghost()))
                                 .child(svc.uptime.clone()),
                         ),
@@ -619,14 +619,14 @@ pub(crate) fn service_card(
         .h(px(22.0))
         .overflow_hidden()
         .child(icon(IconName::Plug, 12.0, c::ghost()))
-        .children(svc.ports[..shown].iter().map(|p| tag(p.clone()).font_family(MONO).text_size(px(10.5))))
+        .children(svc.ports[..shown].iter().map(|p| tag(p.clone()).font_family(MONO).text_size(px(t::TYPE_MICRO))))
         .when(shown < svc.ports.len(), |d| {
             let all = svc.ports.clone();
             d.child(
                 tag(format!("+{}", svc.ports.len() - shown))
                     .id(("more-ports", key))
                     .font_family(MONO)
-                    .text_size(px(10.5))
+                    .text_size(px(t::TYPE_MICRO))
                     .text_color(c::muted())
                     .cursor_default()
                     .hover(|s| s.bg(c::selected()).text_color(c::text()))
@@ -643,9 +643,9 @@ pub(crate) fn service_card(
             .flex_row()
             .items_center()
             .gap(px(5.0))
-            .rounded(px(6.0))
+            .rounded(px(t::RADIUS_SM))
             .cursor_pointer()
-            .text_size(px(11.0))
+            .text_size(px(t::TYPE_CAPTION))
             .text_color(c::muted())
             .hover(|s| s.bg(c::hover()).text_color(c::text()))
             .child(icon(ic, 14.0, color))
@@ -678,7 +678,7 @@ pub(crate) fn service_card(
         .flex_col()
         .justify_between()
         .p(px(12.0))
-        .rounded(px(10.0))
+        .rounded(px(t::RADIUS_LG))
         .border_1()
         .border_color(c::border())
         .bg(c::bg())

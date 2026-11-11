@@ -10,7 +10,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{Home, MONO, c, icon};
+use super::{Home, MONO, c, icon, t};
 use crate::mock::Node;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -158,22 +158,8 @@ impl Home {
 
 // ---- 渲染 --------------------------------------------------------------------
 /// 弹窗专用色:输入框、按钮都用"半透明白叠加",比主界面的 sunken 黑底柔和。
-mod f {
-    use gpui_kit::{Rgba, rgb, rgba};
-    pub fn surface() -> Rgba { rgb(0x1E1E22) }
-    pub fn footer() -> Rgba { rgb(0x1A1A1E) }
-    pub fn line() -> Rgba { rgba(0xFFFFFF0F) }
-    pub fn field() -> Rgba { rgba(0xFFFFFF08) }
-    pub fn field_hover() -> Rgba { rgba(0xFFFFFF0C) }
-    pub fn field_border() -> Rgba { rgba(0xFFFFFF14) }
-    pub fn field_focus_bg() -> Rgba { rgba(0x4ce3a00A) }
-    pub fn label() -> Rgba { rgb(0xA0A0A8) }
-    pub fn seg_on() -> Rgba { rgba(0xFFFFFF14) }
-    pub fn on_accent() -> Rgba { rgb(0x06140D) }
-}
-
 fn label(text: &'static str) -> Div {
-    div().text_size(px(12.0)).font_weight(FontWeight::MEDIUM).text_color(f::label()).child(text)
+    div().text_size(px(t::TYPE_CONTROL)).font_weight(FontWeight::MEDIUM).text_color(c::label()).child(text)
 }
 
 fn field_box(state: &Entity<InputState>, error: bool, mono: bool, window: &Window, cx: &App) -> Div {
@@ -183,15 +169,15 @@ fn field_box(state: &Entity<InputState>, error: bool, mono: bool, window: &Windo
         .px(px(3.0))
         .flex()
         .items_center()
-        .rounded(px(8.0))
+        .rounded(px(t::RADIUS_MD))
         .border_1()
         .when(error, |d| d.bg(c::danger().opacity(0.06)).border_color(c::danger().opacity(0.6)))
-        .when(!error && focused, |d| d.bg(f::field_focus_bg()).border_color(c::online().opacity(0.55)))
+        .when(!error && focused, |d| d.bg(c::field_focus_bg()).border_color(c::online().opacity(0.55)))
         .when(!error && !focused, |d| {
-            d.bg(f::field()).border_color(f::field_border()).hover(|s| s.bg(f::field_hover()))
+            d.bg(c::field()).border_color(c::field_border()).hover(|s| s.bg(c::field_hover()))
         })
         .text_color(c::text())
-        .text_size(px(13.0))
+        .text_size(px(t::TYPE_BODY))
         .when(mono, |d| d.font_family(MONO))
         .child(
             div()
@@ -213,7 +199,7 @@ fn field(name: &'static str, hint: Option<&'static str>, body: impl IntoElement)
                 .items_baseline()
                 .gap(px(6.0))
                 .child(label(name))
-                .when_some(hint, |d, h| d.child(div().text_size(px(11.0)).text_color(c::ghost()).child(h))),
+                .when_some(hint, |d, h| d.child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(h))),
         )
         .child(body)
 }
@@ -227,14 +213,14 @@ fn ghost_btn(id: &'static str, ic: Option<IconName>, text: &'static str) -> Stat
         .gap(px(6.0))
         .h(px(32.0))
         .px(px(12.0))
-        .rounded(px(8.0))
+        .rounded(px(t::RADIUS_MD))
         .border_1()
-        .border_color(f::field_border())
-        .bg(f::field())
-        .text_size(px(12.5))
+        .border_color(c::field_border())
+        .bg(c::field())
+        .text_size(px(t::TYPE_BODY))
         .text_color(c::secondary())
         .cursor_pointer()
-        .hover(|s| s.bg(f::field_hover()).text_color(c::text()))
+        .hover(|s| s.bg(c::field_hover()).text_color(c::text()))
         .when_some(ic, |d, ic| d.child(icon(ic, 13.0, c::muted())))
         .child(text)
 }
@@ -257,10 +243,10 @@ impl Home {
                 .justify_center()
                 .gap(px(6.0))
                 .h(px(28.0))
-                .rounded(px(6.0))
-                .text_size(px(12.0))
+                .rounded(px(t::RADIUS_SM))
+                .text_size(px(t::TYPE_CONTROL))
                 .cursor_pointer()
-                .when(on, |d| d.bg(f::seg_on()).text_color(c::text()).font_weight(FontWeight::SEMIBOLD).shadow_xs())
+                .when(on, |d| d.bg(c::seg_on()).text_color(c::text()).font_weight(FontWeight::SEMIBOLD).shadow_xs())
                 .when(!on, |d| d.text_color(c::muted()).hover(|s| s.text_color(c::secondary())))
                 .child(icon(ic, 13.0, if on { c::online() } else { c::ghost() }))
                 .child(text)
@@ -275,10 +261,10 @@ impl Home {
             .flex()
             .flex_row()
             .p(px(3.0))
-            .rounded(px(8.0))
-            .bg(f::field())
+            .rounded(px(t::RADIUS_MD))
+            .bg(c::field())
             .border_1()
-            .border_color(f::field_border())
+            .border_color(c::field_border())
             .child(seg("auth-key", "私钥", IconName::KeyRound, Auth::Key, cx))
             .child(seg("auth-pwd", "密码", IconName::LockKeyhole, Auth::Password, cx))
             .child(seg("auth-agent", "SSH Agent", IconName::FingerprintPattern, Auth::Agent, cx));
@@ -312,9 +298,9 @@ impl Home {
                 .gap(px(8.0))
                 .px(px(12.0))
                 .py(px(10.0))
-                .rounded(px(8.0))
+                .rounded(px(t::RADIUS_MD))
                 .bg(c::idle_soft())
-                .text_size(px(12.0))
+                .text_size(px(t::TYPE_CONTROL))
                 .text_color(c::muted())
                 .child(icon(IconName::Info, 14.0, c::ghost()))
                 .child("使用本机 ssh-agent 中已加载的密钥,无需在这里填写凭据。")
@@ -335,9 +321,9 @@ impl Home {
                 .rounded_full()
                 .border_1()
                 .cursor_pointer()
-                .text_size(px(12.0))
+                .text_size(px(t::TYPE_CONTROL))
                 .when(on, |d| d.border_color(rgb(g.color).opacity(0.7)).bg(rgb(g.color).opacity(0.12)).text_color(c::text()))
-                .when(!on, |d| d.border_color(f::field_border()).bg(f::field()).text_color(c::muted()).hover(|s| s.bg(f::field_hover())))
+                .when(!on, |d| d.border_color(c::field_border()).bg(c::field()).text_color(c::muted()).hover(|s| s.bg(c::field_hover())))
                 .child(div().size(px(7.0)).rounded(px(2.0)).bg(rgb(g.color)))
                 .child(g.name.clone())
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -354,11 +340,11 @@ impl Home {
                 .flex_row()
                 .items_center()
                 .gap(px(10.0))
-                .text_size(px(11.0))
+                .text_size(px(t::TYPE_CAPTION))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(c::ghost())
                 .child(title)
-                .child(div().flex_1().h(px(1.0)).bg(f::line()))
+                .child(div().flex_1().h(px(1.0)).bg(c::line()))
         };
 
         let body = div()
@@ -400,8 +386,8 @@ impl Home {
             .px(px(22.0))
             .py(px(14.0))
             .border_t_1()
-            .border_color(f::line())
-            .bg(f::footer())
+            .border_color(c::line())
+            .bg(c::dialog_footer())
             .child(
                 ghost_btn("test-conn", Some(IconName::Zap), "测试连接")
                     .on_click(cx.listener(|this, _, _, cx| this.test_connection(cx))),
@@ -413,7 +399,7 @@ impl Home {
                         .flex_row()
                         .items_center()
                         .gap(px(5.0))
-                        .text_size(px(12.0))
+                        .text_size(px(t::TYPE_CONTROL))
                         .text_color(color)
                         .child(icon(ic, 13.0, color))
                         .child(text),
@@ -430,13 +416,13 @@ impl Home {
                     .gap(px(6.0))
                     .h(px(32.0))
                     .px(px(14.0))
-                    .rounded(px(8.0))
-                    .text_size(px(12.5))
+                    .rounded(px(t::RADIUS_MD))
+                    .text_size(px(t::TYPE_BODY))
                     .font_weight(FontWeight::SEMIBOLD)
                     .cursor_pointer()
-                    .when(can_submit, |d| d.bg(c::online()).text_color(f::on_accent()).hover(|s| s.opacity(0.88)))
-                    .when(!can_submit, |d| d.bg(f::field()).border_1().border_color(f::field_border()).text_color(c::ghost()).cursor_default())
-                    .child(icon(IconName::Plus, 13.0, if can_submit { f::on_accent() } else { c::ghost() }))
+                    .when(can_submit, |d| d.bg(c::online()).text_color(c::on_accent()).hover(|s| s.opacity(0.88)))
+                    .when(!can_submit, |d| d.bg(c::field()).border_1().border_color(c::field_border()).text_color(c::ghost()).cursor_default())
+                    .child(icon(IconName::Plus, 13.0, if can_submit { c::on_accent() } else { c::ghost() }))
                     .child(if f.editing.is_some() { "保存" } else { "添加节点" })
                     .on_click(cx.listener(|this, _, _, cx| this.submit_form(cx))),
             );
@@ -451,14 +437,14 @@ impl Home {
             .pt(px(20.0))
             .pb(px(16.0))
             .border_b_1()
-            .border_color(f::line())
+            .border_color(c::line())
             .child(
                 div()
                     .size(px(36.0))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(10.0))
+                    .rounded(px(t::RADIUS_LG))
                     .bg(c::online_soft())
                     .child(icon(IconName::Server, 18.0, c::online())),
             )
@@ -470,11 +456,11 @@ impl Home {
                     .gap(px(2.0))
                     .child(
                         div()
-                            .text_size(px(15.0))
+                            .text_size(px(t::TYPE_TITLE))
                             .font_weight(FontWeight::BOLD)
                             .child(if f.editing.is_some() { "编辑节点" } else { "添加节点" }),
                     )
-                    .child(div().text_size(px(12.0)).text_color(c::muted()).child("通过 SSH 连接一台运行 Docker 的服务器")),
+                    .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child("通过 SSH 连接一台运行 Docker 的服务器")),
             );
 
         let close = div()
@@ -486,7 +472,7 @@ impl Home {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(7.0))
+            .rounded(px(t::RADIUS_MD))
             .cursor_pointer()
             .hover(|s| s.bg(c::hover()))
             .child(icon(IconName::X, 14.0, c::muted()))
@@ -498,10 +484,10 @@ impl Home {
             .max_h_full()
             .flex()
             .flex_col()
-            .rounded(px(14.0))
+            .rounded(px(t::RADIUS_2XL))
             .border_1()
-            .border_color(rgba(0xFFFFFF1A))
-            .bg(f::surface())
+            .border_color(c::dialog_border())
+            .bg(c::dialog())
             .shadow_2xl()
             .overflow_hidden()
             .relative()
@@ -523,7 +509,7 @@ impl Home {
                 .items_center()
                 .justify_center()
                 .p(px(24.0))
-                .bg(rgba(0x0000008C))
+                .bg(c::scrim_dialog())
                 // 遮罩不响应点击关闭(拖动窗口、误触都不会丢掉已填内容);只拦住后面的界面
                 .occlude()
                 // Esc 关闭、Enter 提交:捕获阶段拦截,输入框里按也生效
@@ -553,20 +539,20 @@ impl Render for PortsTip {
             .flex_col()
             .gap(px(6.0))
             .p(px(10.0))
-            .rounded(px(8.0))
+            .rounded(px(t::RADIUS_MD))
             .border_1()
             .border_color(c::border_strong())
             .bg(c::raised_hi())
             .shadow_lg()
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(t::TYPE_CAPTION))
                     .text_color(c::ghost())
                     .child(format!("全部端口 · {}", self.0.len())),
             )
             .children(self.0.iter().map(|p| {
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(t::TYPE_CAPTION))
                     .font_family(MONO)
                     .text_color(c::secondary())
                     .child(p.clone())

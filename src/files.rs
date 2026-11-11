@@ -16,7 +16,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{Home, MENU_W, MONO, SIDEBAR_W, TITLEBAR_H, c, icon};
+use super::{Home, MENU_W, MONO, SIDEBAR_W, TITLEBAR_H, c, icon, t};
 use crate::mock::Node;
 
 /// 服务器文件:三栏,通常正好盖满内容区
@@ -671,7 +671,7 @@ impl Home {
 fn file_icon(e: &Entry) -> (IconName, Rgba) {
     match e.kind {
         Kind::Dir if e.mount.is_some() => (IconName::HardDrive, c::online()),
-        Kind::Dir => (IconName::Folder, rgb(0x7fa8f0)),
+        Kind::Dir => (IconName::Folder, c::folder()),
         Kind::Link => (IconName::Link, c::muted()),
         Kind::File => {
             let n = e.name.as_str();
@@ -702,7 +702,7 @@ fn tool_btn(id: &'static str, ic: IconName, enabled: bool) -> Stateful<Div> {
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(7.0))
+        .rounded(px(t::RADIUS_MD))
         .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(c::hover())))
         .child(icon(ic, 15.0, if enabled { c::secondary() } else { c::ghost().opacity(0.6) }))
 }
@@ -717,15 +717,15 @@ fn text_btn(id: &'static str, ic: IconName, label: &'static str, accent: bool) -
         .gap(px(6.0))
         .h(px(30.0))
         .px(px(if label.is_empty() { 8.0 } else { 10.0 }))
-        .rounded(px(8.0))
-        .text_size(px(12.0))
+        .rounded(px(t::RADIUS_MD))
+        .text_size(px(t::TYPE_CONTROL))
         .cursor_pointer()
         .when(accent, |d| {
             d.bg(c::online())
-                .text_color(rgb(0x06140D))
+                .text_color(c::on_accent())
                 .font_weight(FontWeight::SEMIBOLD)
                 .hover(|s| s.bg(c::online().opacity(0.88)))
-                .child(icon(ic, 13.0, rgb(0x06140D)))
+                .child(icon(ic, 13.0, c::on_accent()))
         })
         .when(!accent, |d| {
             d.border_1()
@@ -743,7 +743,7 @@ fn meta_row(k: &'static str, v: impl Into<SharedString>, mono: bool) -> Div {
         .flex()
         .flex_row()
         .gap(px(10.0))
-        .text_size(px(11.5))
+        .text_size(px(t::TYPE_CAPTION))
         .child(div().w(px(52.0)).flex_shrink_0().text_color(c::ghost()).child(k))
         .child(div().flex_1().min_w_0().text_color(c::secondary()).when(mono, |d| d.font_family(MONO)).child(v.into()))
 }
@@ -800,8 +800,8 @@ impl Home {
                 .gap(px(6.0))
                 .h(px(26.0))
                 .px(px(10.0))
-                .rounded(px(6.0))
-                .text_size(px(12.0))
+                .rounded(px(t::RADIUS_SM))
+                .text_size(px(t::TYPE_CONTROL))
                 .cursor_pointer()
                 .when(on, |d| d.bg(c::selected()).text_color(c::text()).font_weight(FontWeight::MEDIUM))
                 .when(!on, |d| d.text_color(c::muted()).hover(|s| s.text_color(c::secondary())))
@@ -818,7 +818,7 @@ impl Home {
                 .max_h(px(380.0))
                 .overflow_y_scroll()
                 .p(px(6.0))
-                .rounded(px(10.0))
+                .rounded(px(t::RADIUS_LG))
                 .border_1()
                 .border_color(c::border_strong())
                 .bg(c::raised_hi())
@@ -831,11 +831,11 @@ impl Home {
                 }])
                 .occlude();
             if node.stacks.is_empty() {
-                list = list.child(div().p(px(10.0)).text_size(px(12.0)).text_color(c::ghost()).child("这个节点上没有容器"));
+                list = list.child(div().p(px(10.0)).text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child("这个节点上没有容器"));
             }
             for (si, st) in node.stacks.iter().enumerate() {
                 list = list.child(
-                    div().px(px(8.0)).pt(px(if si == 0 { 4.0 } else { 10.0 })).pb(px(4.0)).text_size(px(10.5)).text_color(c::ghost()).child(st.name.clone()),
+                    div().px(px(8.0)).pt(px(if si == 0 { 4.0 } else { 10.0 })).pb(px(4.0)).text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(st.name.clone()),
                 );
                 for (vi, svc) in st.services.iter().enumerate() {
                     let up = svc.state == crate::mock::Running::Up;
@@ -850,13 +850,13 @@ impl Home {
                             .gap(px(8.0))
                             .h(px(30.0))
                             .px(px(8.0))
-                            .rounded(px(6.0))
+                            .rounded(px(t::RADIUS_SM))
                             .cursor_pointer()
                             .when(on, |d| d.bg(c::selected()))
                             .hover(|s| s.bg(c::hover()))
                             .child(div().size(px(6.0)).flex_shrink_0().rounded_full().bg(if up { c::online() } else { c::ghost() }))
-                            .child(div().text_size(px(12.5)).text_color(if on { c::text() } else { c::secondary() }).child(svc.name.clone()))
-                            .child(div().flex_1().min_w_0().truncate().text_size(px(11.0)).font_family(MONO).text_color(c::ghost()).child(svc.image.clone()))
+                            .child(div().text_size(px(t::TYPE_BODY)).text_color(if on { c::text() } else { c::secondary() }).child(svc.name.clone()))
+                            .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::ghost()).child(svc.image.clone()))
                             .on_click(cx.listener(move |this, _, window, cx| this.open_files(target.clone(), window, cx))),
                     );
                 }
@@ -881,11 +881,11 @@ impl Home {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(8.0))
+                    .rounded(px(t::RADIUS_MD))
                     .bg(c::online_soft())
                     .child(icon(IconName::FolderOpen, 15.0, c::online())),
             )
-            .child(div().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).child("文件"))
+            .child(div().text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::SEMIBOLD).child("文件"))
             .child(
                 div()
                     .flex()
@@ -893,7 +893,7 @@ impl Home {
                     .items_center()
                     .gap(px(2.0))
                     .p(px(2.0))
-                    .rounded(px(8.0))
+                    .rounded(px(t::RADIUS_MD))
                     .bg(c::sunken())
                     .border_1()
                     .border_color(c::border())
@@ -930,12 +930,12 @@ impl Home {
             .items_center()
             .gap(px(2.0))
             .px(px(6.0))
-            .rounded(px(8.0))
+            .rounded(px(t::RADIUS_MD))
             .bg(c::sunken())
             .border_1()
             .border_color(c::border())
             .overflow_hidden()
-            .text_size(px(12.0))
+            .text_size(px(t::TYPE_CONTROL))
             .font_family(MONO)
             .child(
                 div()
@@ -946,7 +946,7 @@ impl Home {
                     .gap(px(5.0))
                     .h(px(22.0))
                     .px(px(6.0))
-                    .rounded(px(5.0))
+                    .rounded(px(t::RADIUS_SM))
                     .cursor_pointer()
                     .hover(|s| s.bg(c::hover()))
                     .child(icon(if is_host { IconName::Server } else { IconName::Box }, 12.0, c::muted()))
@@ -965,7 +965,7 @@ impl Home {
                     .px(px(5.0))
                     .flex()
                     .items_center()
-                    .rounded(px(5.0))
+                    .rounded(px(t::RADIUS_SM))
                     .cursor_pointer()
                     .text_color(if last { c::text() } else { c::muted() })
                     .hover(|s| s.bg(c::hover()).text_color(c::text()))
@@ -985,9 +985,9 @@ impl Home {
                     .gap(px(5.0))
                     .h(px(20.0))
                     .px(px(7.0))
-                    .rounded(px(5.0))
+                    .rounded(px(t::RADIUS_SM))
                     .bg(c::online_soft())
-                    .text_size(px(10.5))
+                    .text_size(px(t::TYPE_MICRO))
                     .text_color(c::online())
                     .child(icon(IconName::HardDrive, 11.0, c::online()))
                     .child("挂载卷")
@@ -1003,11 +1003,11 @@ impl Home {
                 .flex_row()
                 .items_center()
                 .pl(px(9.0))
-                .rounded(px(8.0))
+                .rounded(px(t::RADIUS_MD))
                 .bg(c::sunken())
                 .border_1()
                 .border_color(c::border())
-                .text_size(px(12.0))
+                .text_size(px(t::TYPE_CONTROL))
                 .child(icon(IconName::Search, 13.0, c::ghost()))
                 .child(div().flex_1().child(Input::new(&s).appearance(false).with_size(px(12.0 / 0.875))))
         });
@@ -1047,9 +1047,9 @@ impl Home {
                 .mb(px(8.0))
                 .px(px(10.0))
                 .py(px(7.0))
-                .rounded(px(8.0))
+                .rounded(px(t::RADIUS_MD))
                 .bg(c::warn_soft())
-                .text_size(px(11.5))
+                .text_size(px(t::TYPE_CONTROL))
                 .text_color(c::warn())
                 .child(icon(IconName::TriangleAlert, 13.0, c::warn()))
                 .child(format!("这里是容器层,重建容器后改动会丢失;需要保留的文件请放进挂载卷 {mounts}"))
@@ -1069,7 +1069,7 @@ impl Home {
                     .min_h(px(30.0))
                     .py(px(4.0))
                     .px(px(9.0))
-                    .rounded(px(7.0))
+                    .rounded(px(t::RADIUS_MD))
                     .cursor_pointer()
                     .when(active, |d| d.bg(c::selected()))
                     .when(!active, |d| d.hover(|s| s.bg(c::hover())))
@@ -1080,12 +1080,12 @@ impl Home {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(div().text_size(px(12.5)).text_color(if active { c::text() } else { c::secondary() }).child(label))
-                            .when_some(sub, |d, s| d.child(div().truncate().text_size(px(10.5)).font_family(MONO).text_color(c::ghost()).child(s))),
+                            .child(div().text_size(px(t::TYPE_BODY)).text_color(if active { c::text() } else { c::secondary() }).child(label))
+                            .when_some(sub, |d, s| d.child(div().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(s))),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.go(to.clone(), cx)))
             };
-            let title = |t: &'static str| div().px(px(9.0)).pt(px(10.0)).pb(px(4.0)).text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(c::ghost()).child(t);
+            let title = |t: &'static str| div().px(px(9.0)).pt(px(10.0)).pb(px(4.0)).text_size(px(t::TYPE_MICRO)).font_weight(FontWeight::SEMIBOLD).text_color(c::ghost()).child(t);
             let mut col = div().w(px(PLACES_W)).flex_shrink_0().flex().flex_col().gap(px(1.0)).px(px(8.0)).border_r_1().border_color(c::border());
             if is_host {
                 col = col
@@ -1125,7 +1125,7 @@ impl Home {
                 .when(show_mode, |d| d.child(div().w(px(82.0)).flex_shrink_0().child(mode)))
                 .when(show_owner, |d| d.child(div().w(px(48.0)).flex_shrink_0().child(owner)))
         };
-        let th = |t: &'static str| div().text_size(px(11.0)).text_color(c::ghost()).child(t).into_any_element();
+        let th = |t: &'static str| div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(t).into_any_element();
         let thead = cols(th("名称"), th("大小"), th("修改时间"), th("权限"), th("所有者"))
             .h(px(30.0))
             .flex_shrink_0()
@@ -1148,24 +1148,24 @@ impl Home {
                 .items_center()
                 .gap(px(9.0))
                 .child(icon(ic, 15.0, color))
-                .child(div().min_w_0().truncate().text_size(px(12.5)).text_color(if on { c::text() } else { c::secondary() }).child(e.name.clone()))
-                .when_some(e.link.clone(), |d, l| d.child(div().flex_shrink_0().text_size(px(11.0)).font_family(MONO).text_color(c::ghost()).child(format!("→ {l}"))))
+                .child(div().min_w_0().truncate().text_size(px(t::TYPE_BODY)).text_color(if on { c::text() } else { c::secondary() }).child(e.name.clone()))
+                .when_some(e.link.clone(), |d, l| d.child(div().flex_shrink_0().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::ghost()).child(format!("→ {l}"))))
                 .when(e.mount.is_some(), |d| {
-                    d.child(div().flex_shrink_0().px(px(5.0)).rounded(px(4.0)).bg(c::online_soft()).text_size(px(10.0)).text_color(c::online()).child("挂载"))
+                    d.child(div().flex_shrink_0().px(px(5.0)).rounded(px(t::RADIUS_XS)).bg(c::online_soft()).text_size(px(t::TYPE_MICRO)).text_color(c::online()).child("挂载"))
                 })
                 .into_any_element();
             let size_el = match e.progress {
                 Some(p) => div().flex().flex_row().items_center().gap(px(6.0)).child(progress_bar(p, 38.0)).child(
-                    div().text_size(px(10.5)).font_family(MONO).text_color(c::online()).child(format!("{:.0}%", p * 100.0)),
+                    div().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::online()).child(format!("{:.0}%", p * 100.0)),
                 ),
                 None => div()
-                    .text_size(px(11.5))
+                    .text_size(px(t::TYPE_CAPTION))
                     .font_family(MONO)
                     .text_color(c::muted())
                     .child(if e.is_dir() { "—".to_string() } else { fmt_size(e.size) }),
             }
             .into_any_element();
-            let mono = |t: String, color: Rgba| div().truncate().text_size(px(11.5)).font_family(MONO).text_color(color).child(t).into_any_element();
+            let mono = |t: String, color: Rgba| div().truncate().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(color).child(t).into_any_element();
             let name = e.name.clone();
             let enter = e.is_dir().then(|| join(&path, &e.name));
             rows = rows.child(
@@ -1174,7 +1174,7 @@ impl Home {
                     .h(px(32.0))
                     .flex_shrink_0()
                     .px(px(10.0))
-                    .rounded(px(7.0))
+                    .rounded(px(t::RADIUS_MD))
                     .cursor_pointer()
                     .when(on, |d| d.bg(c::selected()))
                     .when(!on, |d| d.hover(|s| s.bg(c::hover())))
@@ -1214,8 +1214,8 @@ impl Home {
                                 .flex()
                                 .flex_col()
                                 .gap(px(4.0))
-                                .child(div().text_size(px(11.0)).text_color(c::ghost()).child("当前目录"))
-                                .child(div().text_size(px(13.0)).font_family(MONO).text_color(c::text()).child(path.clone())),
+                                .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child("当前目录"))
+                                .child(div().text_size(px(t::TYPE_BODY)).font_family(MONO).text_color(c::text()).child(path.clone())),
                         )
                         .child(
                             div()
@@ -1236,13 +1236,13 @@ impl Home {
                                 .gap(px(8.0))
                                 .py(px(26.0))
                                 .px(px(12.0))
-                                .rounded(px(10.0))
+                                .rounded(px(t::RADIUS_LG))
                                 .border_1()
                                 .border_dashed()
                                 .border_color(c::border_strong())
                                 .child(icon(IconName::CloudUpload, 22.0, c::ghost()))
-                                .child(div().text_size(px(12.0)).text_color(c::secondary()).child("拖文件到抽屉里上传"))
-                                .child(div().text_size(px(11.0)).text_color(c::ghost()).child("支持多个文件和文件夹")),
+                                .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::secondary()).child("拖文件到抽屉里上传"))
+                                .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child("支持多个文件和文件夹")),
                         );
                 }
                 Some(e) => {
@@ -1266,7 +1266,7 @@ impl Home {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded(px(10.0))
+                                    .rounded(px(t::RADIUS_LG))
                                     .bg(color.opacity(0.12))
                                     .child(icon(ic, 19.0, color)),
                             )
@@ -1277,8 +1277,8 @@ impl Home {
                                     .flex()
                                     .flex_col()
                                     .gap(px(2.0))
-                                    .child(div().truncate().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child(e.name.clone()))
-                                    .child(div().text_size(px(11.5)).text_color(c::muted()).child(kind)),
+                                    .child(div().truncate().text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::SEMIBOLD).child(e.name.clone()))
+                                    .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(kind)),
                             ),
                     );
                     // 预览区
@@ -1286,7 +1286,7 @@ impl Home {
                         .id("preview")
                         .flex_1()
                         .min_h(px(120.0))
-                        .rounded(px(9.0))
+                        .rounded(px(t::RADIUS_LG))
                         .border_1()
                         .border_color(c::border())
                         .bg(c::sunken())
@@ -1301,7 +1301,7 @@ impl Home {
                             .justify_center()
                             .gap(px(8.0))
                             .child(icon(ic, 22.0, c::ghost()))
-                            .child(div().text_size(px(11.5)).text_color(c::ghost()).child(t))
+                            .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(t))
                     };
                     let pv = if let Some(p) = e.progress {
                         pv.child(
@@ -1321,7 +1321,7 @@ impl Home {
                         let text = text_for(e, &fs.target, &path, node);
                         let lines: Vec<&str> = text.lines().take(200).collect();
                         let n_w = 14.0 + lines.len().to_string().len() as f32 * 7.0;
-                        pv.child(div().flex().flex_col().py(px(8.0)).font_family(MONO).text_size(px(11.0)).children(lines.iter().enumerate().map(
+                        pv.child(div().flex().flex_col().py(px(8.0)).font_family(MONO).text_size(px(t::TYPE_CAPTION)).children(lines.iter().enumerate().map(
                             |(i, l)| {
                                 let color = if l.trim_start().starts_with('#') || l.trim_start().starts_with("<?") {
                                     c::ghost()
@@ -1374,7 +1374,7 @@ impl Home {
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .rounded(px(8.0))
+                                        .rounded(px(t::RADIUS_MD))
                                         .cursor_pointer()
                                         .hover(|s| s.bg(c::danger().opacity(0.12)))
                                         .child(icon(IconName::Trash, 14.0, c::danger().opacity(0.85)))
@@ -1419,7 +1419,7 @@ impl Home {
             .border_t_1()
             .border_color(c::border())
             .bg(c::chrome())
-            .text_size(px(11.0))
+            .text_size(px(t::TYPE_CAPTION))
             .text_color(c::ghost())
             .child(if query.is_empty() { format!("{} 项", all.len()) } else { format!("{} / {} 项", entries.len(), all.len()) })
             .when_some(selected.as_ref(), |d, e| d.child(div().truncate().text_color(c::muted()).child(format!("已选 {}", e.name))))
@@ -1448,11 +1448,11 @@ impl Home {
                     .items_center()
                     .justify_center()
                     .gap(px(10.0))
-                    .rounded(px(12.0))
+                    .rounded(px(t::RADIUS_XL))
                     .border_2()
                     .border_dashed()
                     .border_color(c::online().opacity(0.7))
-                    .bg(rgba(0x141416E6))
+                    .bg(c::scrim_drop())
                     .child(
                         div()
                             .size(px(54.0))
@@ -1463,8 +1463,8 @@ impl Home {
                             .bg(c::online_soft())
                             .child(icon(IconName::CloudUpload, 24.0, c::online())),
                     )
-                    .child(div().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).child("松开即可上传"))
-                    .child(div().text_size(px(12.0)).font_family(MONO).text_color(c::muted()).child(format!("→ {drop_path}"))),
+                    .child(div().text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::SEMIBOLD).child("松开即可上传"))
+                    .child(div().text_size(px(t::TYPE_CONTROL)).font_family(MONO).text_color(c::muted()).child(format!("→ {drop_path}"))),
             );
 
         let picker_open = fs.picker;
@@ -1528,11 +1528,11 @@ impl Render for Tip {
         div()
             .px(px(8.0))
             .py(px(4.0))
-            .rounded(px(6.0))
+            .rounded(px(t::RADIUS_SM))
             .bg(c::raised_hi())
             .border_1()
             .border_color(c::border_strong())
-            .text_size(px(11.5))
+            .text_size(px(t::TYPE_CAPTION))
             .font_family(MONO)
             .text_color(c::secondary())
             .child(self.0.clone())

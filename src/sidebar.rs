@@ -33,11 +33,11 @@ impl Home {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(6.0))
+                            .rounded(px(t::RADIUS_SM))
                             .bg(c::online_soft())
                             .child(icon(IconName::Server, 12.0, c::online())),
                     )
-                    .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).child("DeskPanel")),
+                    .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).child("DeskPanel")),
             )
             // 面包屑:分组 / 节点 · 地址
             .child(
@@ -49,7 +49,7 @@ impl Home {
                     .items_center()
                     .gap(px(8.0))
                     .px(px(16.0))
-                    .text_size(px(12.0))
+                    .text_size(px(t::TYPE_CONTROL))
                     .child(div().size(px(6.0)).rounded_full().bg(rgb(self.groups[g].color)))
                     .child(div().text_color(c::muted()).child(self.groups[g].name.clone()))
                     .child(icon(IconName::ChevronRight, 12.0, c::ghost()))
@@ -57,7 +57,7 @@ impl Home {
                     .child(
                         div()
                             .ml(px(4.0))
-                            .text_size(px(11.0))
+                            .text_size(px(t::TYPE_CAPTION))
                             .font_family(MONO)
                             .text_color(c::ghost())
                             .child(node.user_host.clone()),
@@ -75,7 +75,7 @@ impl Home {
                     .rounded_full()
                     .border_1()
                     .border_color(c::border())
-                    .text_size(px(11.0))
+                    .text_size(px(t::TYPE_CAPTION))
                     .text_color(c::muted())
                     .child(div().size(px(6.0)).rounded_full().bg(c::online()))
                     .child(
@@ -96,21 +96,21 @@ impl Home {
             .gap(px(8.0))
             .h(px(32.0))
             .px(px(10.0))
-            .rounded(px(8.0))
+            .rounded(px(t::RADIUS_MD))
             .border_1()
             .border_color(c::border())
             .bg(c::sunken())
-            .text_size(px(12.0))
+            .text_size(px(t::TYPE_CONTROL))
             .text_color(c::ghost())
             .child(icon(IconName::Search, 14.0, c::ghost()))
             .child(div().flex_1().child("搜索节点"))
             .child(
                 div()
                     .px(px(5.0))
-                    .rounded(px(4.0))
+                    .rounded(px(t::RADIUS_XS))
                     .border_1()
                     .border_color(c::border_strong())
-                    .text_size(px(10.0))
+                    .text_size(px(t::TYPE_MICRO))
                     .font_family(MONO)
                     .text_color(c::ghost())
                     .child("⌘K"),
@@ -127,8 +127,8 @@ impl Home {
                 .justify_center()
                 .gap(px(5.0))
                 .h(px(26.0))
-                .rounded(px(6.0))
-                .text_size(px(12.0))
+                .rounded(px(t::RADIUS_SM))
+                .text_size(px(t::TYPE_CONTROL))
                 .cursor_pointer()
                 .when(active, |d| {
                     d.bg(c::selected())
@@ -140,7 +140,7 @@ impl Home {
                 .child(label)
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(px(t::TYPE_CAPTION))
                         .font_family(MONO)
                         .text_color(if active { c::muted() } else { c::ghost() })
                         .child(self.count(f).to_string()),
@@ -155,7 +155,7 @@ impl Home {
             .flex()
             .flex_row()
             .p(px(3.0))
-            .rounded(px(8.0))
+            .rounded(px(t::RADIUS_MD))
             .bg(c::sunken())
             .border_1()
             .border_color(c::border())
@@ -189,7 +189,7 @@ impl Home {
                     .h(px(28.0))
                     .px(px(8.0))
                     .mt(px(if gi == 0 { 2.0 } else { 10.0 }))
-                    .rounded(px(6.0))
+                    .rounded(px(t::RADIUS_SM))
                     .cursor_pointer()
                     .hover(|s| s.bg(c::hover()))
                     .child(icon(
@@ -201,14 +201,14 @@ impl Home {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(11.0))
+                            .text_size(px(t::TYPE_CAPTION))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(c::muted())
                             .child(g.name.clone()),
                     )
                     .child(
                         div()
-                            .text_size(px(10.5))
+                            .text_size(px(t::TYPE_MICRO))
                             .font_family(MONO)
                             .text_color(c::ghost())
                             .child(g.nodes.len().to_string()),
@@ -236,7 +236,7 @@ impl Home {
                         .px(px(10.0))
                         .py(px(4.0))
                         .ml(px(6.0))
-                        .rounded(px(8.0))
+                        .rounded(px(t::RADIUS_MD))
                         .cursor_pointer()
                         .border_1()
                         .when(selected, |d| d.bg(c::raised_hi()).border_color(c::border_strong()))
@@ -250,14 +250,14 @@ impl Home {
                                 .flex_col()
                                 .child(
                                     div()
-                                        .text_size(px(12.5))
+                                        .text_size(px(t::TYPE_BODY))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(if n.online() { c::text() } else { c::muted() })
                                         .child(n.name.clone()),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(10.5))
+                                        .text_size(px(t::TYPE_MICRO))
                                         .font_family(MONO)
                                         .text_color(c::ghost())
                                         .truncate()
@@ -266,11 +266,11 @@ impl Home {
                         )
                         .child(match n.latency_ms {
                             Some(ms) => div()
-                                .text_size(px(10.5))
+                                .text_size(px(t::TYPE_MICRO))
                                 .font_family(MONO)
                                 .text_color(latency_color(ms))
                                 .child(format!("{ms}ms")),
-                            None => div().text_size(px(10.5)).text_color(c::ghost()).child("离线"),
+                            None => div().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child("离线"),
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.sel = (gi, ni);
@@ -289,11 +289,11 @@ impl Home {
             .justify_center()
             .gap(px(8.0))
             .h(px(34.0))
-            .rounded(px(8.0))
+            .rounded(px(t::RADIUS_MD))
             .border_1()
             .border_dashed()
             .border_color(c::border_strong())
-            .text_size(px(12.5))
+            .text_size(px(t::TYPE_BODY))
             .text_color(c::muted())
             .cursor_pointer()
             .hover(|s| s.bg(c::hover()).text_color(c::text()))

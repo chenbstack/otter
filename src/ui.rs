@@ -33,6 +33,42 @@ pub mod c {
     pub fn mem() -> Rgba { rgb(0xb18cf2) }
     pub fn net() -> Rgba { rgb(0x3fd0c9) }
     pub fn disk() -> Rgba { rgb(0xe8964c) }
+    // 弹窗
+    pub fn dialog() -> Rgba { rgb(0x1E1E22) }
+    pub fn dialog_footer() -> Rgba { rgb(0x1A1A1E) }
+    pub fn dialog_border() -> Rgba { rgba(0xFFFFFF1A) }
+    pub fn line() -> Rgba { rgba(0xFFFFFF0F) }
+    pub fn field() -> Rgba { rgba(0xFFFFFF08) }
+    pub fn field_hover() -> Rgba { rgba(0xFFFFFF0C) }
+    pub fn field_border() -> Rgba { rgba(0xFFFFFF14) }
+    pub fn field_focus_bg() -> Rgba { rgba(0x4ce3a00A) }
+    pub fn seg_on() -> Rgba { rgba(0xFFFFFF14) }
+    pub fn label() -> Rgba { rgb(0xA0A0A8) }
+    pub fn on_accent() -> Rgba { rgb(0x06140D) }
+    // 遮罩
+    pub fn scrim_dialog() -> Rgba { rgba(0x0000008C) }
+    pub fn scrim_drop() -> Rgba { rgba(0x141416E6) }
+    // 文件类型
+    pub fn folder() -> Rgba { rgb(0x7fa8f0) }
+}
+
+/// 字号与圆角 token,标准值见 docs/design/tokens.md
+pub mod t {
+    pub const TYPE_DISPLAY: f32 = 20.0;
+    pub const TYPE_TITLE_LG: f32 = 18.0;
+    pub const TYPE_TITLE: f32 = 15.0;
+    pub const TYPE_TITLE_SM: f32 = 14.0;
+    pub const TYPE_BODY: f32 = 13.0;
+    pub const TYPE_CONTROL: f32 = 12.0;
+    pub const TYPE_CAPTION: f32 = 11.0;
+    pub const TYPE_MICRO: f32 = 10.5;
+
+    pub const RADIUS_XS: f32 = 4.0;
+    pub const RADIUS_SM: f32 = 6.0;
+    pub const RADIUS_MD: f32 = 8.0;
+    pub const RADIUS_LG: f32 = 10.0;
+    pub const RADIUS_XL: f32 = 12.0;
+    pub const RADIUS_2XL: f32 = 14.0;
 }
 
 pub const MONO: &str = "Menlo";
@@ -74,7 +110,7 @@ pub fn pill(label: impl Into<SharedString>, fg: Rgba, bg: Rgba) -> Div {
         .rounded_full()
         .bg(bg)
         .text_color(fg)
-        .text_size(px(11.0))
+        .text_size(px(t::TYPE_CAPTION))
         .font_weight(FontWeight::MEDIUM)
         .child(div().size(px(6.0)).rounded_full().bg(fg))
         .child(label.into())
@@ -86,9 +122,9 @@ pub fn tag(label: impl Into<SharedString>) -> Div {
         .flex_shrink_0()
         .px(px(7.0))
         .py(px(2.0))
-        .rounded(px(5.0))
+        .rounded(px(t::RADIUS_SM))
         .bg(c::idle_soft())
-        .text_size(px(11.0))
+        .text_size(px(t::TYPE_CAPTION))
         .text_color(c::secondary())
         .child(label.into())
 }
@@ -144,14 +180,14 @@ pub fn empty_state(ic: IconName, title: &'static str, sub: &'static str) -> Div 
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(14.0))
+                .rounded(px(t::RADIUS_2XL))
                 .border_1()
                 .border_color(c::border())
                 .bg(c::raised())
                 .child(icon(ic, 22.0, c::ghost())),
         )
-        .child(div().mt(px(4.0)).text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(c::secondary()).child(title))
-        .child(div().text_size(px(12.0)).text_color(c::ghost()).child(sub))
+        .child(div().mt(px(4.0)).text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::SEMIBOLD).text_color(c::secondary()).child(title))
+        .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child(sub))
 }
 
 pub fn button(id: &'static str, ic: IconName, label: &'static str) -> Stateful<Div> {
@@ -163,11 +199,11 @@ pub fn button(id: &'static str, ic: IconName, label: &'static str) -> Stateful<D
         .gap(px(6.0))
         .h(px(30.0))
         .px(px(11.0))
-        .rounded(px(8.0))
+        .rounded(px(t::RADIUS_MD))
         .border_1()
         .border_color(c::border_strong())
         .bg(c::raised())
-        .text_size(px(12.0))
+        .text_size(px(t::TYPE_CONTROL))
         .text_color(c::secondary())
         .cursor_pointer()
         .hover(|s| s.bg(c::raised_hi()).text_color(c::text()))
