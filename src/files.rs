@@ -17,7 +17,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{Home, MENU_W, MONO, SIDEBAR_W, TITLEBAR_H, c, icon, t};
-use crate::mock::Node;
+use crate::mock::{Node, NodeId};
 
 /// 服务器文件:三栏,通常正好盖满内容区
 const HOST_W: f32 = 1100.0;
@@ -404,7 +404,7 @@ fn dir_size(p: &Path) -> u64 {
 pub struct Files {
     pub open: bool,
     /// 打开时所属的节点,换节点后重置到本机主目录
-    node: (usize, usize),
+    node: NodeId,
     target: Target,
     path: String,
     back: Vec<String>,
@@ -425,7 +425,7 @@ impl Files {
     pub fn new() -> Self {
         Self {
             open: false,
-            node: (0, 0),
+            node: NodeId(0),
             target: Target::Host,
             path: "/root".into(),
             back: vec![],

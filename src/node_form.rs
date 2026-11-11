@@ -11,7 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{Home, MONO, c, icon, t};
-use crate::mock::Node;
+use crate::mock::{Node, NodeId};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Auth {
@@ -30,7 +30,7 @@ pub enum TestState {
 
 pub struct NodeForm {
     /// Some((分组, 节点)) = 编辑已有节点;None = 新增
-    pub editing: Option<(usize, usize)>,
+    pub editing: Option<NodeId>,
     name: Entity<InputState>,
     host: Entity<InputState>,
     port: Entity<InputState>,
@@ -77,7 +77,7 @@ impl NodeForm {
 // ---- 交互 --------------------------------------------------------------------
 impl Home {
     pub fn open_add_node(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let group = self.sel.0;
+        let (group, _) = self.locate(self.sel);
         self.form = Some(NodeForm::new(group, window, cx));
         cx.notify();
     }
@@ -105,8 +105,10 @@ impl Home {
             _ => 40 + (host.len() as u32 * 13) % 300,
         };
         let g = f.group;
-        self.groups[g].nodes.push(Node { name, user_host, latency_ms: Some(latency), stacks: vec![] });
-        self.sel = (g, self.groups[g].nodes.len() - 1);
+        let id = NodeId(self.next_id);
+        self.next_id += 1;
+        self.groups[g].nodes.push(Node { id, name, user_host, latency_ms: Some(latency), stacks: vec![] });
+        self.sel = id;
         self.collapsed.remove(&g);
         self.scroll = gpui_kit::component::VirtualListScrollHandle::new();
         self.close_form(cx);

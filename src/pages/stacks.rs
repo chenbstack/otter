@@ -433,8 +433,7 @@ impl Home {
                     .child(icon(IconName::Ellipsis, 15.0, c::muted())),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
-                let (g, n) = this.sel;
-                let st = &mut this.groups[g].nodes[n].stacks[ix];
+                let st = &mut this.node_mut().stacks[ix];
                 st.expanded = !st.expanded;
                 cx.notify();
             }));

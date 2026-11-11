@@ -39,7 +39,12 @@ impl Stack {
     }
 }
 
+/// 节点稳定 id:标签、选中、文件状态都用它引用节点,不用(分组下标, 节点下标)。0 保留为"无"。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct NodeId(pub u32);
+
 pub struct Node {
+    pub id: NodeId,
     pub name: String,
     pub user_host: String,
     /// None = 离线
@@ -178,26 +183,33 @@ pub fn groups() -> Vec<Group> {
     let docker_host = big(&mut r, 6);
     let cluster = big(&mut r, 60);
     let sg = big(&mut r, 4);
-    vec![
+    let mut groups = vec![
         Group {
             name: "开发分组".into(),
             color: 0x6b9dff,
-            nodes: vec![Node { name: "test".into(), user_host: "dev@192.0.2.30".into(), latency_ms: Some(538), stacks: test }],
+            nodes: vec![Node { id: NodeId(0), name: "test".into(), user_host: "dev@192.0.2.30".into(), latency_ms: Some(538), stacks: test }],
         },
         Group {
             name: "生产分组".into(),
             color: 0x4ce3a0,
             nodes: vec![
-                Node { name: "emby".into(), user_host: "deploy@192.0.2.22".into(), latency_ms: Some(863), stacks: emby_stacks },
-                Node { name: "docker-host".into(), user_host: "deploy@192.0.2.21".into(), latency_ms: Some(4094), stacks: docker_host },
-                Node { name: "big-cluster".into(), user_host: "ops@198.51.100.21".into(), latency_ms: Some(96), stacks: cluster },
-                Node { name: "hk-edge-01".into(), user_host: "root@198.51.100.8".into(), latency_ms: None, stacks: vec![] },
+                Node { id: NodeId(0), name: "emby".into(), user_host: "deploy@192.0.2.22".into(), latency_ms: Some(863), stacks: emby_stacks },
+                Node { id: NodeId(0), name: "docker-host".into(), user_host: "deploy@192.0.2.21".into(), latency_ms: Some(4094), stacks: docker_host },
+                Node { id: NodeId(0), name: "big-cluster".into(), user_host: "ops@198.51.100.21".into(), latency_ms: Some(96), stacks: cluster },
+                Node { id: NodeId(0), name: "hk-edge-01".into(), user_host: "root@198.51.100.8".into(), latency_ms: None, stacks: vec![] },
             ],
         },
         Group {
             name: "未分组".into(),
             color: 0x7d8ea6,
-            nodes: vec![Node { name: "sg-gateway".into(), user_host: "ubuntu@203.0.113.2".into(), latency_ms: Some(212), stacks: sg }],
+            nodes: vec![Node { id: NodeId(0), name: "sg-gateway".into(), user_host: "ubuntu@203.0.113.2".into(), latency_ms: Some(212), stacks: sg }],
         },
-    ]
+    ];
+    // 按出现顺序分配 id,从 1 开始
+    let mut next = 1;
+    for n in groups.iter_mut().flat_map(|g| g.nodes.iter_mut()) {
+        n.id = NodeId(next);
+        next += 1;
+    }
+    groups
 }

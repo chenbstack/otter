@@ -6,7 +6,7 @@ impl Home {
     pub(crate) fn titlebar(&self) -> Div {
         let online = self.count(Filter::Online);
         let total = self.count(Filter::All);
-        let (g, _) = self.sel;
+        let (g, _) = self.locate(self.sel);
         let node = self.node();
         div()
             .flex()
@@ -224,7 +224,8 @@ impl Home {
                 continue;
             }
             for (ni, n) in nodes {
-                let selected = self.sel == (gi, ni);
+                let id = n.id;
+                let selected = self.sel == id;
                 tree = tree.child(
                     div()
                         .id(("n", gi * 100 + ni))
@@ -273,7 +274,7 @@ impl Home {
                             None => div().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child("离线"),
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.sel = (gi, ni);
+                            this.sel = id;
                             this.scroll = VirtualListScrollHandle::new();
                             cx.notify();
                         })),

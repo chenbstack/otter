@@ -18,7 +18,7 @@ use gpui_kit::component::{VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use ui::*;
-use mock::{Group, Node, Running, SPARK_N, Service, Stack};
+use mock::{Group, Node, NodeId, Running, SPARK_N, Service, Stack};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Filter {
@@ -74,8 +74,10 @@ impl Page {
 
 struct Home {
     groups: Vec<Group>,
-    /// (group index, node index)
-    sel: (usize, usize),
+    /// 当前选中的节点
+    sel: NodeId,
+    /// 下一个新节点的 id
+    next_id: u32,
     filter: Filter,
     collapsed: HashSet<usize>,
     page: Page,
@@ -94,9 +96,13 @@ struct Home {
 
 impl Home {
     fn new() -> Self {
+        let groups = mock::groups();
+        let sel = groups[1].nodes[0].id;
+        let next_id = groups.iter().flat_map(|g| g.nodes.iter()).map(|n| n.id.0).max().unwrap_or(0) + 1;
         Self {
-            groups: mock::groups(),
-            sel: (1, 0),
+            groups,
+            sel,
+            next_id,
             filter: Filter::All,
             collapsed: HashSet::new(),
             page: Page::Stacks,
@@ -110,8 +116,24 @@ impl Home {
         }
     }
 
+    /// 节点所在的 (分组下标, 节点下标)。id 不存在时退回第一个节点。
+    fn locate(&self, id: NodeId) -> (usize, usize) {
+        for (gi, g) in self.groups.iter().enumerate() {
+            if let Some(ni) = g.nodes.iter().position(|n| n.id == id) {
+                return (gi, ni);
+            }
+        }
+        (0, 0)
+    }
+
     fn node(&self) -> &Node {
-        &self.groups[self.sel.0].nodes[self.sel.1]
+        let (g, n) = self.locate(self.sel);
+        &self.groups[g].nodes[n]
+    }
+
+    fn node_mut(&mut self) -> &mut Node {
+        let (g, n) = self.locate(self.sel);
+        &mut self.groups[g].nodes[n]
     }
 
     fn all_nodes(&self) -> impl Iterator<Item = &Node> {
@@ -209,11 +231,12 @@ fn main() {
                 if let Some(n) = &node {
                     let mut it = n.split(',').filter_map(|x| x.parse::<usize>().ok());
                     if let (Some(g), Some(n)) = (it.next(), it.next()) {
-                        h.sel = (g, n);
+                        if let Some(node) = h.groups.get(g).and_then(|g| g.nodes.get(n)) {
+                            h.sel = node.id;
+                        }
                     }
                 }
-                let (g, n) = h.sel;
-                for st in h.groups[g].nodes[n].stacks.iter_mut().take(expand) {
+                for st in h.node_mut().stacks.iter_mut().take(expand) {
                     st.expanded = true;
                 }
                 h.hide_charts = plain;
