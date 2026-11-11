@@ -11,6 +11,10 @@ pub enum TabKind {
     Node(NodeId),
     /// 文件标签:全尺寸文件管理。可以同一节点开多个。
     Files(NodeId),
+    /// 终端标签:可以同一目标开多个。`container` 为空表示服务器本机。P1 只放占位内容。
+    Terminal { node: NodeId, container: Option<(String, String)>, n: usize },
+    /// 日志标签:每个容器一个。
+    Logs { node: NodeId, stack: String, svc: String },
 }
 
 pub struct Tab {
@@ -21,12 +25,20 @@ pub struct Tab {
     pub scroll: VirtualListScrollHandle,
     /// 该标签的文件视图状态:节点标签里是抽屉的,文件标签里是主体的。存取方式同 `page`。
     pub files: Files,
+    /// 日志标签:是否跟随最新,以及日志列表的滚动句柄(只在日志标签里用,不随标签切换交换)
+    pub follow: bool,
+    pub log_scroll: ScrollHandle,
 }
 
 impl Tab {
+    fn new(kind: TabKind, files: Files) -> Self {
+        Self { kind, page: Page::Stacks, scroll: VirtualListScrollHandle::new(), files, follow: true, log_scroll: ScrollHandle::new() }
+    }
+
     pub fn node(&self) -> NodeId {
-        match self.kind {
-            TabKind::Node(id) | TabKind::Files(id) => id,
+        match &self.kind {
+            TabKind::Node(id) | TabKind::Files(id) => *id,
+            TabKind::Terminal { node, .. } | TabKind::Logs { node, .. } => *node,
         }
     }
 }
@@ -45,10 +57,7 @@ impl Home {
             return;
         }
         let ix = self.workspace.active.map_or(self.workspace.tabs.len(), |a| a + 1);
-        self.workspace.tabs.insert(
-            ix,
-            Tab { kind: TabKind::Node(id), page: Page::Stacks, scroll: VirtualListScrollHandle::new(), files: Files::new() },
-        );
+        self.workspace.tabs.insert(ix, Tab::new(TabKind::Node(id), Files::new()));
         self.activate(ix);
     }
 
@@ -58,11 +67,42 @@ impl Home {
         let mut files = Files::for_tab(id, target);
         files.init_search(window, cx);
         let ix = self.workspace.active.map_or(self.workspace.tabs.len(), |a| a + 1);
-        self.workspace.tabs.insert(
-            ix,
-            Tab { kind: TabKind::Files(id), page: Page::Stacks, scroll: VirtualListScrollHandle::new(), files },
-        );
+        self.workspace.tabs.insert(ix, Tab::new(TabKind::Files(id), files));
         self.activate(ix);
+        cx.notify();
+    }
+
+    /// 打开终端标签:总是新开一个,编号按同一目标已有的终端数递增。
+    pub(crate) fn open_terminal(&mut self, container: Option<(String, String)>, cx: &mut Context<Self>) {
+        let node = self.sel;
+        let n = 1 + self
+            .workspace
+            .tabs
+            .iter()
+            .filter(|t| matches!(&t.kind, TabKind::Terminal { node: nn, container: cc, .. } if *nn == node && *cc == container))
+            .count();
+        let ix = self.workspace.active.map_or(self.workspace.tabs.len(), |a| a + 1);
+        self.workspace.tabs.insert(ix, Tab::new(TabKind::Terminal { node, container, n }, Files::new()));
+        self.activate(ix);
+        cx.notify();
+    }
+
+    /// 打开日志标签:每个容器一个,已有就激活。
+    pub(crate) fn open_logs(&mut self, stack: String, svc: String, cx: &mut Context<Self>) {
+        let node = self.sel;
+        let found = self
+            .workspace
+            .tabs
+            .iter()
+            .position(|t| matches!(&t.kind, TabKind::Logs { node: nn, stack: ss, svc: vv } if *nn == node && *ss == stack && *vv == svc));
+        match found {
+            Some(ix) => self.activate(ix),
+            None => {
+                let ix = self.workspace.active.map_or(self.workspace.tabs.len(), |a| a + 1);
+                self.workspace.tabs.insert(ix, Tab::new(TabKind::Logs { node, stack, svc }, Files::new()));
+                self.activate(ix);
+            }
+        }
         cx.notify();
     }
 
@@ -116,9 +156,15 @@ impl Home {
             let (title, online, kind_icon) = {
                 let (g, n) = self.locate(tab.node());
                 let node = &self.groups[g].nodes[n];
-                match tab.kind {
+                match &tab.kind {
                     TabKind::Node(_) => (node.name.clone(), node.online(), None),
                     TabKind::Files(_) => (format!("{} · 文件", node.name), node.online(), Some(IconName::FolderOpen)),
+                    TabKind::Terminal { container, n, .. } => {
+                        let who = container.as_ref().map_or(node.name.clone(), |(_, svc)| svc.clone());
+                        let title = if *n > 1 { format!("{who} · 终端 {n}") } else { format!("{who} · 终端") };
+                        (title, node.online(), Some(IconName::SquareTerminal))
+                    }
+                    TabKind::Logs { svc, .. } => (format!("{svc} · 日志"), node.online(), Some(IconName::ScrollText)),
                 }
             };
             let group: SharedString = format!("tab-{ix}").into();

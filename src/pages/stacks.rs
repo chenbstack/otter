@@ -125,6 +125,24 @@ impl Home {
         col.child(div().h(px(1.0)).mx(px(10.0)).my(px(8.0)).bg(c::border()))
             .child(
                 div()
+                    .id("m-term")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .h(px(34.0))
+                    .px(px(10.0))
+                    .rounded(px(t::RADIUS_MD))
+                    .cursor_pointer()
+                    .text_size(px(t::TYPE_BODY))
+                    .text_color(c::muted())
+                    .hover(|s| s.bg(c::hover()).text_color(c::secondary()))
+                    .child(icon(IconName::SquareTerminal, 15.0, c::ghost()))
+                    .child(div().flex_1().child("终端"))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_terminal(None, cx))),
+            )
+            .child(
+                div()
                     .id("m-files")
                     .flex()
                     .flex_row()
@@ -477,7 +495,11 @@ impl Home {
                 for (ci, svc) in row.iter().enumerate() {
                     let target = files::Target::Container { stack: s.name.clone(), svc: svc.name.clone() };
                     let on_files = cx.listener(move |this, _, window, cx| this.open_files(target.clone(), window, cx));
-                    r = r.child(service_card(ix * 1000 + ri * 10 + ci, svc, svc_h, self.svc_w, hide, on_files));
+                    let (st, sv) = (s.name.clone(), svc.name.clone());
+                    let on_term = cx.listener(move |this, _, _, cx| this.open_terminal(Some((st.clone(), sv.clone())), cx));
+                    let (st, sv) = (s.name.clone(), svc.name.clone());
+                    let on_logs = cx.listener(move |this, _, _, cx| this.open_logs(st.clone(), sv.clone(), cx));
+                    r = r.child(service_card(ix * 1000 + ri * 10 + ci, svc, svc_h, self.svc_w, hide, on_files, on_term, on_logs));
                 }
                 for _ in row.len()..self.cols {
                     r = r.child(div().flex_1());
@@ -525,6 +547,8 @@ pub(crate) fn service_card(
     w: f32,
     hide_charts: bool,
     on_files: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_term: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_logs: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Div {
     let up = svc.state == Running::Up;
     let metric = |label: &'static str, value: &str, s: &[f32; SPARK_N], color: Rgba| {
@@ -674,8 +698,8 @@ pub(crate) fn service_card(
         .border_t_1()
         .border_color(c::border())
         .child(ports)
-        .child(action(0, IconName::SquareTerminal, c::muted(), "终端"))
-        .child(action(1, IconName::ScrollText, c::muted(), "日志"))
+        .child(action(0, IconName::SquareTerminal, c::muted(), "终端").on_click(on_term))
+        .child(action(1, IconName::ScrollText, c::muted(), "日志").on_click(on_logs))
         .child(action(6, IconName::FolderOpen, c::muted(), "").on_click(on_files))
         .child(action(2, IconName::ExternalLink, c::muted(), ""))
         .child(div().w(px(1.0)).h(px(14.0)).mx(px(4.0)).bg(c::border()))

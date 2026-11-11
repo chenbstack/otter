@@ -192,7 +192,20 @@ impl Render for Home {
         let sidebar = self.sidebar(cx);
         let tabbar = self.tab_bar(cx);
         let is_files_tab = self.workspace.active.is_some_and(|a| matches!(self.workspace.tabs[a].kind, workspace::TabKind::Files(_)));
-        let body = if is_files_tab {
+        let other_view = self.workspace.active.and_then(|a| {
+            let (g, n) = self.locate(self.workspace.tabs[a].node());
+            let node = &self.groups[g].nodes[n];
+            match &self.workspace.tabs[a].kind {
+                workspace::TabKind::Terminal { container, .. } => {
+                    Some(self.terminal_view(&node.name, &node.user_host, container.as_ref()))
+                }
+                workspace::TabKind::Logs { stack, svc, .. } => Some(self.logs_view(a, stack, svc, cx)),
+                _ => None,
+            }
+        });
+        let body = if let Some(v) = other_view {
+            div().flex_1().min_h_0().flex().flex_col().child(v)
+        } else if is_files_tab {
             div().flex_1().min_h_0().flex().flex_col().child(self.files_tab(window, cx))
         } else if self.workspace.active.is_some() {
             let menu = self.menu(cx);
@@ -279,6 +292,18 @@ fn main() {
                         let Some(id) = h.all_nodes().find(|n| n.name == name).map(|n| n.id) else { continue };
                         match kind {
                             "n" => h.open_node(id),
+                            "t" => {
+                                // t:节点名 = 服务器终端;t:节点名@堆栈/服务 = 容器终端
+                                h.sel = id;
+                                let c = ct.and_then(|c| c.split_once('/')).map(|(a, b)| (a.to_string(), b.to_string()));
+                                h.open_terminal(c, cx);
+                            }
+                            "l" => {
+                                h.sel = id;
+                                if let Some((a, b)) = ct.and_then(|c| c.split_once('/')) {
+                                    h.open_logs(a.into(), b.into(), cx);
+                                }
+                            }
                             "f" => {
                                 // f:节点名 = 服务器文件;f:节点名@堆栈/服务 = 容器文件
                                 h.sel = id;
