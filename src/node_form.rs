@@ -108,7 +108,7 @@ impl Home {
         let id = NodeId(self.next_id);
         self.next_id += 1;
         self.groups[g].nodes.push(Node { id, name, user_host, latency_ms: Some(latency), stacks: vec![] });
-        self.sel = id;
+        self.open_node(id);
         self.collapsed.remove(&g);
         self.scroll = gpui_kit::component::VirtualListScrollHandle::new();
         self.close_form(cx);

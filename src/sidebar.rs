@@ -40,7 +40,9 @@ impl Home {
                     .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).child("DeskPanel")),
             )
             // 面包屑:分组 / 节点 · 地址
-            .child(
+            .child(if self.workspace.active.is_none() {
+                div().flex_1().into_any_element()
+            } else {
                 div()
                     .flex_1()
                     .h_full()
@@ -61,8 +63,9 @@ impl Home {
                             .font_family(MONO)
                             .text_color(c::ghost())
                             .child(node.user_host.clone()),
-                    ),
-            )
+                    )
+                    .into_any_element()
+            })
             .child(
                 div()
                     .mr(px(CONTENT_PAD))
@@ -225,7 +228,7 @@ impl Home {
             }
             for (ni, n) in nodes {
                 let id = n.id;
-                let selected = self.sel == id;
+                let selected = self.workspace.active.is_some() && self.sel == id;
                 tree = tree.child(
                     div()
                         .id(("n", gi * 100 + ni))
@@ -274,8 +277,7 @@ impl Home {
                             None => div().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child("离线"),
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.sel = id;
-                            this.scroll = VirtualListScrollHandle::new();
+                            this.open_node(id);
                             cx.notify();
                         })),
                 );

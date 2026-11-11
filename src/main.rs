@@ -9,6 +9,7 @@ mod node_form;
 mod pages;
 mod sidebar;
 mod ui;
+mod workspace;
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -18,6 +19,7 @@ use gpui_kit::component::{VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use ui::*;
+use workspace::Workspace;
 use mock::{Group, Node, NodeId, Running, SPARK_N, Service, Stack};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -74,7 +76,9 @@ impl Page {
 
 struct Home {
     groups: Vec<Group>,
-    /// 当前选中的节点
+    /// 标签页
+    workspace: Workspace,
+    /// 当前选中的节点(跟随当前标签)
     sel: NodeId,
     /// 下一个新节点的 id
     next_id: u32,
@@ -99,8 +103,9 @@ impl Home {
         let groups = mock::groups();
         let sel = groups[1].nodes[0].id;
         let next_id = groups.iter().flat_map(|g| g.nodes.iter()).map(|n| n.id.0).max().unwrap_or(0) + 1;
-        Self {
+        let mut h = Self {
             groups,
+            workspace: Workspace::default(),
             sel,
             next_id,
             filter: Filter::All,
@@ -113,7 +118,9 @@ impl Home {
             shot: None,
             form: None,
             files: files::Files::new(),
-        }
+        };
+        h.open_node(sel);
+        h
     }
 
     /// 节点所在的 (分组下标, 节点下标)。id 不存在时退回第一个节点。
@@ -180,8 +187,14 @@ impl Render for Home {
         }
         let titlebar = self.titlebar();
         let sidebar = self.sidebar(cx);
-        let menu = self.menu(cx);
-        let content = self.content(window, cx);
+        let tabbar = self.tab_bar(cx);
+        let body = if self.workspace.active.is_some() {
+            let menu = self.menu(cx);
+            let content = self.content(window, cx);
+            div().flex_1().min_h_0().flex().flex_row().child(menu).child(content)
+        } else {
+            div().flex_1().min_h_0().flex().flex_col().child(empty_state(IconName::PanelTop, "没有打开的标签", "从左侧节点树选一个节点"))
+        };
         let drawer = self.files_drawer(window, cx);
         let dialog = self.node_dialog(window, cx);
         div()
@@ -192,14 +205,22 @@ impl Render for Home {
             .bg(c::bg())
             .text_color(c::text())
             .child(titlebar)
-            .child(div().flex_1().min_h_0().flex().flex_row().child(sidebar).child(menu).child(content))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .child(sidebar)
+                    .child(div().flex_1().min_w_0().flex().flex_col().child(tabbar).child(body)),
+            )
             .children(drawer)
             .children(dialog)
     }
 }
 
 fn main() {
-    // 调试参数:--shot <png> --node <g>,<n> --expand <k> --plain --page <0..6> --add(打开添加节点弹窗) --files <host|堆栈/服务> --fcd <目录> --fsel <名字>
+    // 调试参数:--shot <png> --node <g>,<n> --tabs n:<节点名>,... --active <k> --expand <k> --plain --page <0..6> --add(打开添加节点弹窗) --files <host|堆栈/服务> --fcd <目录> --fsel <名字>
     let args: Vec<String> = std::env::args().collect();
     let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let shot = arg("--shot");
@@ -208,6 +229,9 @@ fn main() {
     let plain = args.iter().any(|a| a == "--plain");
     let page: Option<usize> = arg("--page").and_then(|v| v.parse().ok());
     let add = args.iter().any(|a| a == "--add");
+    // --tabs n:节点名,n:节点名  清空后依次打开标签;--active k 激活第 k 个(从 0 起)
+    let tabs_arg = arg("--tabs");
+    let active_arg: Option<usize> = arg("--active").and_then(|v| v.parse().ok());
     // --files host | <堆栈>/<服务>  打开文件抽屉;--fsel <名字> 选中一项;--fcd <路径> 进入目录
     let files_arg = arg("--files");
     let fsel = arg("--fsel");
@@ -232,8 +256,24 @@ fn main() {
                     let mut it = n.split(',').filter_map(|x| x.parse::<usize>().ok());
                     if let (Some(g), Some(n)) = (it.next(), it.next()) {
                         if let Some(node) = h.groups.get(g).and_then(|g| g.nodes.get(n)) {
-                            h.sel = node.id;
+                            let id = node.id;
+                            h.workspace = Workspace::default();
+                            h.open_node(id);
                         }
+                    }
+                }
+                if let Some(spec) = &tabs_arg {
+                    h.workspace = Workspace::default();
+                    for item in spec.split(',') {
+                        if let Some(("n", name)) = item.split_once(':') {
+                            let id = h.all_nodes().find(|n| n.name == name).map(|n| n.id);
+                            if let Some(id) = id {
+                                h.open_node(id);
+                            }
+                        }
+                    }
+                    if let Some(k) = active_arg.filter(|k| *k < h.workspace.tabs.len()) {
+                        h.activate(k);
                     }
                 }
                 for st in h.node_mut().stacks.iter_mut().take(expand) {

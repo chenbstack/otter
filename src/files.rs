@@ -16,7 +16,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{Home, MENU_W, MONO, SIDEBAR_W, TITLEBAR_H, c, icon, t};
+use super::{Home, MENU_W, MONO, SIDEBAR_W, TABBAR_H, TITLEBAR_H, c, icon, t};
 use crate::mock::{Node, NodeId};
 
 /// 服务器文件:三栏,通常正好盖满内容区
@@ -1481,7 +1481,7 @@ impl Home {
             div()
                 .id("files-drawer")
                 .absolute()
-                .top(px(TITLEBAR_H))
+                .top(px(TITLEBAR_H + TABBAR_H))
                 .right_0()
                 .bottom_0()
                 .w(px(w))

@@ -77,6 +77,7 @@ pub const MONO: &str = "Menlo";
 pub const SIDEBAR_W: f32 = 260.0;
 pub const MENU_W: f32 = 200.0;
 pub const TITLEBAR_H: f32 = 46.0;
+pub const TABBAR_H: f32 = 36.0;
 pub const CONTENT_PAD: f32 = 20.0;
 
 pub const STACK_HEADER_H: f32 = 50.0;
