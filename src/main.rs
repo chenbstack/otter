@@ -1,0 +1,1414 @@
+//! dockyard 首页外观原型(mock 数据)。
+//!
+//! 三栏:节点树 / 节点菜单 / 内容区(堆栈页)。只为看外观和交互手感,没有任何真实连接。
+//! 色板沿用旧版 DeskPanel 的 theme.ts。
+
+mod files;
+mod mock;
+mod node_form;
+
+use std::collections::HashSet;
+use std::rc::Rc;
+
+use gpui_kit::assets::IconName;
+use gpui_kit::component::{Icon, VirtualListScrollHandle, v_virtual_list};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+use mock::{Group, Node, Running, SPARK_N, Service, Stack};
+
+// ---- 色板(来自 theme.ts,略微拉开层次)---------------------------------------
+mod c {
+    use gpui_kit::{Rgba, rgb, rgba};
+    pub fn bg() -> Rgba { rgb(0x141416) }
+    pub fn chrome() -> Rgba { rgb(0x101012) }
+    pub fn raised() -> Rgba { rgb(0x1A1A1D) }
+    pub fn raised_hi() -> Rgba { rgb(0x1F1F23) }
+    pub fn sunken() -> Rgba { rgb(0x0C0C0E) }
+    pub fn selected() -> Rgba { rgb(0x26262B) }
+    pub fn hover() -> Rgba { rgba(0xFFFFFF0A) }
+    pub fn border() -> Rgba { rgb(0x222226) }
+    pub fn border_strong() -> Rgba { rgb(0x34343B) }
+    pub fn text() -> Rgba { rgb(0xECECEE) }
+    pub fn secondary() -> Rgba { rgb(0xC6C6CA) }
+    pub fn muted() -> Rgba { rgb(0x8A8A90) }
+    pub fn ghost() -> Rgba { rgb(0x5A5A63) }
+    pub fn online() -> Rgba { rgb(0x4ce3a0) }
+    pub fn warn() -> Rgba { rgb(0xe3b34c) }
+    pub fn danger() -> Rgba { rgb(0xe35c5c) }
+    pub fn online_soft() -> Rgba { rgba(0x4ce3a01F) }
+    pub fn warn_soft() -> Rgba { rgba(0xe3b34c1F) }
+    pub fn idle_soft() -> Rgba { rgba(0xFFFFFF0F) }
+    pub fn cpu() -> Rgba { rgb(0x7f89f0) }
+    pub fn mem() -> Rgba { rgb(0xb18cf2) }
+    pub fn net() -> Rgba { rgb(0x3fd0c9) }
+    pub fn disk() -> Rgba { rgb(0xe8964c) }
+}
+
+const MONO: &str = "Menlo";
+
+// ---- 尺寸 --------------------------------------------------------------------
+const SIDEBAR_W: f32 = 260.0;
+const MENU_W: f32 = 200.0;
+const TITLEBAR_H: f32 = 46.0;
+const CONTENT_PAD: f32 = 20.0;
+
+const STACK_HEADER_H: f32 = 50.0;
+const STACK_BODY_PAD: f32 = 14.0;
+const STACK_GAP: f32 = 10.0;
+const SVC_GAP: f32 = 12.0;
+const SVC_H_CHART: f32 = 180.0;
+const SVC_H_PLAIN: f32 = 154.0;
+/// 服务卡片最小宽度:放得下几张就分几列,卡片再均分剩余宽度(宽度落在 [MIN, 2*MIN+GAP) 内)。
+const SVC_MIN_W: f32 = 300.0;
+/// 服务卡片底栏右侧操作按钮总宽(终端/日志/打开/分隔/停止/重启/删除)
+const ACTIONS_W: f32 = 258.0;
+/// 10.5px Menlo 单字符宽度,以及 "+N" 标签宽度
+const PORT_CHAR_W: f32 = 6.4;
+const PORT_MORE_W: f32 = 34.0;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Filter {
+    All,
+    Online,
+    Offline,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Page {
+    Overview,
+    Containers,
+    Stacks,
+    Images,
+    Volumes,
+    Databases,
+    Websites,
+}
+
+impl Page {
+    const ALL: [Page; 7] = [
+        Page::Overview,
+        Page::Containers,
+        Page::Stacks,
+        Page::Images,
+        Page::Volumes,
+        Page::Databases,
+        Page::Websites,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            Page::Overview => "概览",
+            Page::Containers => "容器",
+            Page::Stacks => "堆栈",
+            Page::Images => "镜像",
+            Page::Volumes => "存储卷",
+            Page::Databases => "数据库",
+            Page::Websites => "网站",
+        }
+    }
+    fn icon(self) -> IconName {
+        match self {
+            Page::Overview => IconName::Activity,
+            Page::Containers => IconName::Box,
+            Page::Stacks => IconName::Layers,
+            Page::Images => IconName::Image,
+            Page::Volumes => IconName::HardDrive,
+            Page::Databases => IconName::Database,
+            Page::Websites => IconName::Globe,
+        }
+    }
+}
+
+struct Home {
+    groups: Vec<Group>,
+    /// (group index, node index)
+    sel: (usize, usize),
+    filter: Filter,
+    collapsed: HashSet<usize>,
+    page: Page,
+    hide_charts: bool,
+    cols: usize,
+    /// 当前每张服务卡片的宽度,用来估算端口能显示几个
+    svc_w: f32,
+    scroll: VirtualListScrollHandle,
+    /// 离屏截图:(输出路径, 已渲染帧数)。仅用于 `--shot`。
+    shot: Option<(String, u32)>,
+    /// 添加 / 编辑节点弹窗
+    form: Option<node_form::NodeForm>,
+    /// 右侧文件管理抽屉
+    files: files::Files,
+}
+
+impl Home {
+    fn new() -> Self {
+        Self {
+            groups: mock::groups(),
+            sel: (1, 0),
+            filter: Filter::All,
+            collapsed: HashSet::new(),
+            page: Page::Stacks,
+            hide_charts: false,
+            cols: 2,
+            svc_w: SVC_MIN_W,
+            scroll: VirtualListScrollHandle::new(),
+            shot: None,
+            form: None,
+            files: files::Files::new(),
+        }
+    }
+
+    fn node(&self) -> &Node {
+        &self.groups[self.sel.0].nodes[self.sel.1]
+    }
+
+    fn all_nodes(&self) -> impl Iterator<Item = &Node> {
+        self.groups.iter().flat_map(|g| g.nodes.iter())
+    }
+
+    fn count(&self, f: Filter) -> usize {
+        self.all_nodes()
+            .filter(|n| match f {
+                Filter::All => true,
+                Filter::Online => n.online(),
+                Filter::Offline => !n.online(),
+            })
+            .count()
+    }
+
+    fn stack_height(&self, s: &Stack) -> f32 {
+        let mut h = STACK_HEADER_H;
+        if s.expanded {
+            let rows = s.services.len().div_ceil(self.cols) as f32;
+            let svc_h = if self.hide_charts { SVC_H_PLAIN } else { SVC_H_CHART };
+            h += STACK_BODY_PAD * 2.0 + rows * svc_h + (rows - 1.0).max(0.0) * SVC_GAP;
+        }
+        h + STACK_GAP
+    }
+}
+
+// ---- 小部件 ------------------------------------------------------------------
+fn icon(name: IconName, size: f32, color: Rgba) -> Icon {
+    Icon::new(name).size(px(size)).text_color(color)
+}
+
+/// 状态药丸:带圆点的软底色标签。
+fn pill(label: impl Into<SharedString>, fg: Rgba, bg: Rgba) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(22.0))
+        .px(px(9.0))
+        .rounded_full()
+        .bg(bg)
+        .text_color(fg)
+        .text_size(px(11.0))
+        .font_weight(FontWeight::MEDIUM)
+        .child(div().size(px(6.0)).rounded_full().bg(fg))
+        .child(label.into())
+}
+
+/// 中性小标签(节点名、端口等)。
+fn tag(label: impl Into<SharedString>) -> Div {
+    div()
+        .flex_shrink_0()
+        .px(px(7.0))
+        .py(px(2.0))
+        .rounded(px(5.0))
+        .bg(c::idle_soft())
+        .text_size(px(11.0))
+        .text_color(c::secondary())
+        .child(label.into())
+}
+
+/// 状态圆点 + 一圈柔光。
+fn status_dot(color: Rgba, on: bool) -> Div {
+    div()
+        .size(px(14.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .when(on, |d| d.bg(color.opacity(0.16)))
+        .child(div().size(px(6.0)).rounded_full().bg(color))
+}
+
+/// 迷你柱状图:越旧越淡,最新一根满色,读起来有"时间往右走"的方向感。
+fn spark(values: &[f32; SPARK_N], color: Rgba, h: f32, gap: f32) -> Div {
+    let n = values.len() as f32;
+    div()
+        .flex()
+        .flex_row()
+        .items_end()
+        .gap(px(gap))
+        .h(px(h))
+        .children(values.iter().enumerate().map(move |(i, v)| {
+            let alpha = 0.45 + 0.55 * (i as f32 + 1.0) / n;
+            div()
+                .flex_1()
+                .h(px((h * *v).max(2.0)))
+                .rounded_t(px(1.5))
+                .bg(color.opacity(alpha))
+        }))
+}
+
+fn latency_color(ms: u32) -> Rgba {
+    if ms >= 2000 { c::warn() } else { c::muted() }
+}
+
+fn menu_count(node: &Node, page: Page) -> Option<usize> {
+    match page {
+        Page::Overview => None,
+        Page::Containers => Some(node.service_count()),
+        Page::Stacks => Some(node.stacks.len()),
+        Page::Images => Some(if node.online() { 12 } else { 0 }),
+        Page::Volumes => Some(0),
+        Page::Databases => Some(0),
+        Page::Websites => Some(0),
+    }
+}
+
+/// 若干服务的合计:CPU 求和、内存求和、两条曲线取均值。
+struct Agg {
+    cpu: f32,
+    mem_mb: f32,
+    cpu_s: [f32; SPARK_N],
+    mem_s: [f32; SPARK_N],
+}
+
+fn aggregate<'a>(svcs: impl Iterator<Item = &'a Service>) -> Agg {
+    let mut a = Agg { cpu: 0.0, mem_mb: 0.0, cpu_s: [0.0; SPARK_N], mem_s: [0.0; SPARK_N] };
+    let mut n = 0.0;
+    for s in svcs {
+        n += 1.0;
+        a.cpu += s.cpu_v;
+        a.mem_mb += s.mem_mb;
+        for i in 0..SPARK_N {
+            a.cpu_s[i] += s.cpu_s[i];
+            a.mem_s[i] += s.mem_s[i];
+        }
+    }
+    if n > 0.0 {
+        for i in 0..SPARK_N {
+            a.cpu_s[i] /= n;
+            a.mem_s[i] /= n;
+        }
+    }
+    a
+}
+
+fn status_of(up: usize, total: usize) -> (&'static str, Rgba, Rgba) {
+    if up == total {
+        ("运行中", c::online(), c::online_soft())
+    } else if up == 0 {
+        ("已停止", c::muted(), c::idle_soft())
+    } else {
+        ("部分运行", c::warn(), c::warn_soft())
+    }
+}
+
+// ---- 渲染 --------------------------------------------------------------------
+impl Home {
+    fn titlebar(&self) -> Div {
+        let online = self.count(Filter::Online);
+        let total = self.count(Filter::All);
+        let (g, _) = self.sel;
+        let node = self.node();
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(TITLEBAR_H))
+            .flex_shrink_0()
+            .bg(c::chrome())
+            .border_b_1()
+            .border_color(c::border())
+            // 品牌:紧跟红绿灯
+            .child(
+                div()
+                    .w(px(SIDEBAR_W))
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .pl(px(84.0))
+                    .child(
+                        div()
+                            .size(px(20.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.0))
+                            .bg(c::online_soft())
+                            .child(icon(IconName::Server, 12.0, c::online())),
+                    )
+                    .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).child("DeskPanel")),
+            )
+            // 面包屑:分组 / 节点 · 地址
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(16.0))
+                    .text_size(px(12.0))
+                    .child(div().size(px(6.0)).rounded_full().bg(rgb(self.groups[g].color)))
+                    .child(div().text_color(c::muted()).child(self.groups[g].name.clone()))
+                    .child(icon(IconName::ChevronRight, 12.0, c::ghost()))
+                    .child(div().text_color(c::text()).font_weight(FontWeight::SEMIBOLD).child(node.name.clone()))
+                    .child(
+                        div()
+                            .ml(px(4.0))
+                            .text_size(px(11.0))
+                            .font_family(MONO)
+                            .text_color(c::ghost())
+                            .child(node.user_host.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .mr(px(CONTENT_PAD))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(7.0))
+                    .h(px(24.0))
+                    .px(px(10.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(c::border())
+                    .text_size(px(11.0))
+                    .text_color(c::muted())
+                    .child(div().size(px(6.0)).rounded_full().bg(c::online()))
+                    .child(
+                        div()
+                            .font_family(MONO)
+                            .text_color(c::secondary())
+                            .child(format!("{online}/{total}")),
+                    )
+                    .child("节点在线"),
+            )
+    }
+
+    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
+        let search = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .h(px(32.0))
+            .px(px(10.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(c::border())
+            .bg(c::sunken())
+            .text_size(px(12.0))
+            .text_color(c::ghost())
+            .child(icon(IconName::Search, 14.0, c::ghost()))
+            .child(div().flex_1().child("搜索节点"))
+            .child(
+                div()
+                    .px(px(5.0))
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(c::border_strong())
+                    .text_size(px(10.0))
+                    .font_family(MONO)
+                    .text_color(c::ghost())
+                    .child("⌘K"),
+            );
+
+        let tab = |id: &'static str, label: &'static str, f: Filter, cx: &mut Context<Self>| {
+            let active = self.filter == f;
+            div()
+                .id(id)
+                .flex_1()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap(px(5.0))
+                .h(px(26.0))
+                .rounded(px(6.0))
+                .text_size(px(12.0))
+                .cursor_pointer()
+                .when(active, |d| {
+                    d.bg(c::selected())
+                        .text_color(c::text())
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .shadow_xs()
+                })
+                .when(!active, |d| d.text_color(c::muted()).hover(|s| s.text_color(c::secondary())))
+                .child(label)
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_family(MONO)
+                        .text_color(if active { c::muted() } else { c::ghost() })
+                        .child(self.count(f).to_string()),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.filter = f;
+                    cx.notify();
+                }))
+        };
+
+        let tabs = div()
+            .flex()
+            .flex_row()
+            .p(px(3.0))
+            .rounded(px(8.0))
+            .bg(c::sunken())
+            .border_1()
+            .border_color(c::border())
+            .child(tab("f-all", "全部", Filter::All, cx))
+            .child(tab("f-on", "在线", Filter::Online, cx))
+            .child(tab("f-off", "离线", Filter::Offline, cx));
+
+        let mut tree = div().flex().flex_col().gap(px(2.0)).flex_1().min_h_0().id("tree").overflow_y_scroll();
+        for (gi, g) in self.groups.iter().enumerate() {
+            let nodes: Vec<(usize, &Node)> = g
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| match self.filter {
+                    Filter::All => true,
+                    Filter::Online => n.online(),
+                    Filter::Offline => !n.online(),
+                })
+                .collect();
+            if nodes.is_empty() && self.filter != Filter::All {
+                continue;
+            }
+            let collapsed = self.collapsed.contains(&gi);
+            tree = tree.child(
+                div()
+                    .id(("g", gi))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .mt(px(if gi == 0 { 2.0 } else { 10.0 }))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(c::hover()))
+                    .child(icon(
+                        if collapsed { IconName::ChevronRight } else { IconName::ChevronDown },
+                        12.0,
+                        c::ghost(),
+                    ))
+                    .child(div().size(px(7.0)).rounded(px(2.0)).bg(rgb(g.color)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c::muted())
+                            .child(g.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .font_family(MONO)
+                            .text_color(c::ghost())
+                            .child(g.nodes.len().to_string()),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.collapsed.remove(&gi) {
+                            this.collapsed.insert(gi);
+                        }
+                        cx.notify();
+                    })),
+            );
+            if collapsed {
+                continue;
+            }
+            for (ni, n) in nodes {
+                let selected = self.sel == (gi, ni);
+                tree = tree.child(
+                    div()
+                        .id(("n", gi * 100 + ni))
+                        .relative()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(10.0))
+                        .px(px(10.0))
+                        .py(px(4.0))
+                        .ml(px(6.0))
+                        .rounded(px(8.0))
+                        .cursor_pointer()
+                        .border_1()
+                        .when(selected, |d| d.bg(c::raised_hi()).border_color(c::border_strong()))
+                        .when(!selected, |d| d.border_color(gpui_kit::transparent_black()).hover(|s| s.bg(c::hover())))
+                        .child(status_dot(if n.online() { c::online() } else { c::ghost() }, n.online()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(12.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(if n.online() { c::text() } else { c::muted() })
+                                        .child(n.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .font_family(MONO)
+                                        .text_color(c::ghost())
+                                        .truncate()
+                                        .child(n.user_host.clone()),
+                                ),
+                        )
+                        .child(match n.latency_ms {
+                            Some(ms) => div()
+                                .text_size(px(10.5))
+                                .font_family(MONO)
+                                .text_color(latency_color(ms))
+                                .child(format!("{ms}ms")),
+                            None => div().text_size(px(10.5)).text_color(c::ghost()).child("离线"),
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.sel = (gi, ni);
+                            this.scroll = VirtualListScrollHandle::new();
+                            cx.notify();
+                        })),
+                );
+            }
+        }
+
+        let add = div()
+            .id("add-node")
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .gap(px(8.0))
+            .h(px(34.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_dashed()
+            .border_color(c::border_strong())
+            .text_size(px(12.5))
+            .text_color(c::muted())
+            .cursor_pointer()
+            .hover(|s| s.bg(c::hover()).text_color(c::text()))
+            .child(icon(IconName::Plus, 14.0, c::muted()))
+            .child("添加节点")
+            .on_click(cx.listener(|this, _, window, cx| this.open_add_node(window, cx)));
+
+        div()
+            .w(px(SIDEBAR_W))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .p(px(12.0))
+            .bg(c::chrome())
+            .child(search)
+            .child(tabs)
+            .child(tree)
+            .child(add)
+    }
+
+    fn menu(&self, cx: &mut Context<Self>) -> Div {
+        let node = self.node();
+        let mut col = div()
+            .w(px(MENU_W))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .p(px(12.0))
+            .bg(c::chrome())
+            .border_l_1()
+            .border_r_1()
+            .border_color(c::border())
+            .child(
+                div()
+                    .px(px(10.0))
+                    .pt(px(4.0))
+                    .pb(px(8.0))
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(c::ghost())
+                    .child("节点详情"),
+            );
+        for (i, p) in Page::ALL.into_iter().enumerate() {
+            let active = self.page == p;
+            let count = menu_count(node, p);
+            col = col.child(
+                div()
+                    .id(("m", i))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .h(px(34.0))
+                    .px(px(10.0))
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .text_size(px(13.0))
+                    .when(active, |d| d.bg(c::selected()).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
+                    .when(!active, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
+                    .child(icon(p.icon(), 15.0, if active { c::online() } else { c::ghost() }))
+                    .child(div().flex_1().child(p.label()))
+                    .when_some(count.filter(|n| *n > 0), |d, n| {
+                        d.child(
+                            div()
+                                .min_w(px(20.0))
+                                .h(px(18.0))
+                                .px(px(5.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(if active { c::online_soft() } else { c::idle_soft() })
+                                .text_size(px(10.5))
+                                .font_family(MONO)
+                                .text_color(if active { c::online() } else { c::muted() })
+                                .child(n.to_string()),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.page = p;
+                        cx.notify();
+                    })),
+            );
+        }
+        // 文件管理不是页面,是盖在内容区上的抽屉:这里只是开关
+        let files_on = self.files.open && self.files.is_host();
+        col.child(div().h(px(1.0)).mx(px(10.0)).my(px(8.0)).bg(c::border()))
+            .child(
+                div()
+                    .id("m-files")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .h(px(34.0))
+                    .px(px(10.0))
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .text_size(px(13.0))
+                    .when(files_on, |d| d.bg(c::selected()).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
+                    .when(!files_on, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
+                    .child(icon(IconName::FolderOpen, 15.0, if files_on { c::online() } else { c::ghost() }))
+                    .child(div().flex_1().child("文件"))
+                    .child(icon(IconName::PanelRightOpen, 13.0, c::ghost()))
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_host_files(window, cx))),
+            )
+    }
+
+    fn content(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let width = f32::from(window.viewport_size().width) - SIDEBAR_W - MENU_W - CONTENT_PAD * 2.0;
+        let inner = width - 2.0 - STACK_BODY_PAD * 2.0;
+        self.cols = (((inner + SVC_GAP) / (SVC_MIN_W + SVC_GAP)).floor() as usize).max(1);
+        self.svc_w = (inner - SVC_GAP * (self.cols - 1) as f32) / self.cols as f32;
+
+        let body: AnyElement = if self.page != Page::Stacks {
+            empty_state(self.page.icon(), "这个页面还没重做", "本次只做了堆栈页").into_any_element()
+        } else if !self.node().online() {
+            empty_state(IconName::Unplug, "节点离线", "无法连接,堆栈信息暂不可读").into_any_element()
+        } else if self.node().stacks.is_empty() {
+            empty_state(IconName::Layers, "还没有堆栈", "这个节点上没有发现 Compose 项目").into_any_element()
+        } else {
+            let sizes: Rc<Vec<Size<Pixels>>> = Rc::new(
+                self.node()
+                    .stacks
+                    .iter()
+                    .map(|s| size(px(800.0), px(self.stack_height(s))))
+                    .collect(),
+            );
+            let view = cx.entity();
+            // 列表放进绝对定位的满尺寸容器:给它一个确定的高度,
+            // 否则 Infer 尺寸在上方有汇总行时会按内容高度撑开,首项被顶出视口。
+            div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .child(div().absolute().inset_0().child(
+                    v_virtual_list(view, "stacks", sizes, |this, range, _w, cx| {
+                        range.map(|ix| this.stack_card(ix, cx)).collect::<Vec<_>>()
+                    })
+                    .track_scroll(&self.scroll),
+                ))
+                .into_any_element()
+        };
+
+        let node = self.node();
+        let hide = self.hide_charts;
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .pt(px(18.0))
+            .pb(px(14.0))
+            .flex_shrink_0()
+            .child(
+                div()
+                    .size(px(36.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(10.0))
+                    .bg(c::raised_hi())
+                    .border_1()
+                    .border_color(c::border())
+                    .child(icon(self.page.icon(), 18.0, c::secondary())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(div().text_size(px(18.0)).font_weight(FontWeight::BOLD).child(self.page.label()))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(c::muted())
+                            .child(format!("{} 上的 Compose 项目", node.name)),
+                    ),
+            )
+            .child(div().flex_1())
+            .when(self.page == Page::Stacks && node.online(), |d| {
+                d.child(
+                    button("toggle-charts", if hide { IconName::Eye } else { IconName::EyeOff }, if hide { "显示图表" } else { "隐藏图表" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.hide_charts = !this.hide_charts;
+                            cx.notify();
+                        })),
+                )
+                .child(button("refresh", IconName::RefreshCw, "刷新"))
+            });
+
+        let stats = (self.page == Page::Stacks && node.online()).then(|| self.summary());
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .px(px(CONTENT_PAD))
+            .child(header)
+            .children(stats)
+            .child(body)
+    }
+
+    /// 页头下方的一排汇总卡片。
+    fn summary(&self) -> Div {
+        let node = self.node();
+        let total = node.service_count();
+        let running: usize = node.stacks.iter().map(|s| s.running()).sum();
+        let healthy = node.stacks.iter().filter(|s| s.running() == s.services.len()).count();
+        let agg = aggregate(node.stacks.iter().flat_map(|s| s.services.iter()));
+
+        let tile = |ic: IconName, label: &'static str, value: String, sub: Div, chart: Option<Div>| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_end()
+                .gap(px(12.0))
+                .p(px(14.0))
+                .rounded(px(12.0))
+                .border_1()
+                .border_color(c::border())
+                .bg(c::raised())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .text_size(px(11.0))
+                                .text_color(c::muted())
+                                .child(icon(ic, 12.0, c::ghost()))
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_baseline()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .text_size(px(20.0))
+                                        .font_family(MONO)
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(value),
+                                )
+                                .child(sub),
+                        ),
+                )
+                .children(chart.map(|c| div().w(px(84.0)).flex_shrink_0().child(c)))
+        };
+
+        let small = |s: String, color: Rgba| div().text_size(px(11.0)).text_color(color).child(s);
+        let mem = mock::fmt_mem(agg.mem_mb);
+        let (mem_v, mem_u) = mem.split_once(' ').unwrap_or((&mem, ""));
+
+        div()
+            .flex()
+            .flex_row()
+            .gap(px(10.0))
+            .pb(px(14.0))
+            .flex_shrink_0()
+            .child(tile(
+                IconName::Layers,
+                "堆栈",
+                node.stacks.len().to_string(),
+                small(format!("{healthy} 个全部正常"), c::muted()),
+                None,
+            ))
+            .child(tile(
+                IconName::Box,
+                "服务",
+                format!("{running}/{total}"),
+                if running == total {
+                    small("全部运行".into(), c::online())
+                } else {
+                    small(format!("{} 个已停止", total - running), c::warn())
+                },
+                None,
+            ))
+            .child(tile(
+                IconName::Cpu,
+                "CPU 合计",
+                format!("{:.1}", agg.cpu),
+                small("%".into(), c::muted()),
+                (!self.hide_charts).then(|| spark(&agg.cpu_s, c::cpu(), 26.0, 2.0)),
+            ))
+            .child(tile(
+                IconName::MemoryStick,
+                "内存合计",
+                mem_v.to_string(),
+                small(mem_u.to_string(), c::muted()),
+                (!self.hide_charts).then(|| spark(&agg.mem_s, c::mem(), 26.0, 2.0)),
+            ))
+    }
+
+    fn stack_card(&self, ix: usize, cx: &mut Context<Self>) -> Div {
+        let s = &self.node().stacks[ix];
+        let up = s.running();
+        let total = s.services.len();
+        let (label, fg, bg) = status_of(up, total);
+        let agg = aggregate(s.services.iter());
+        let hide = self.hide_charts;
+        let first = &s.services[0];
+        let image = if total > 1 {
+            format!("{} +{}", first.image, total - 1)
+        } else {
+            first.image.clone()
+        };
+
+        // 每个服务一个小方块,一眼看出几个在跑
+        let pips = div().flex().flex_row().gap(px(3.0)).children(s.services.iter().map(|svc| {
+            div()
+                .size(px(7.0))
+                .rounded(px(2.0))
+                .bg(if svc.state == Running::Up { c::online() } else { c::border_strong() })
+        }));
+
+        let header = div()
+            .id(("sh", ix))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            // 减去卡片上下边框,保证实际高度 == stack_height()
+            .h(px(STACK_HEADER_H - 2.0))
+            .pl(px(14.0))
+            .pr(px(10.0))
+            .cursor_pointer()
+            .hover(|st| st.bg(c::hover()))
+            .child(icon(
+                if s.expanded { IconName::ChevronDown } else { IconName::ChevronRight },
+                14.0,
+                c::ghost(),
+            ))
+            .child(
+                div()
+                    .size(px(28.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(7.0))
+                    .bg(bg)
+                    .child(icon(IconName::Layers, 14.0, fg)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(div().text_size(px(13.5)).font_weight(FontWeight::BOLD).child(s.name.clone()))
+                            .child(pips),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_family(MONO)
+                            .text_color(c::ghost())
+                            .truncate()
+                            .child(image),
+                    ),
+            )
+            .child(metric_col("CPU", format!("{:.1}%", agg.cpu), &agg.cpu_s, c::cpu(), hide))
+            .child(metric_col("内存", mock::fmt_mem(agg.mem_mb), &agg.mem_s, c::mem(), hide))
+            .child(div().w(px(92.0)).flex().justify_end().child(pill(label, fg, bg)))
+            .child(
+                div()
+                    .id(("more", ix))
+                    .size(px(28.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.0))
+                    .hover(|st| st.bg(c::hover()))
+                    .child(icon(IconName::Ellipsis, 15.0, c::muted())),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let (g, n) = this.sel;
+                let st = &mut this.groups[g].nodes[n].stacks[ix];
+                st.expanded = !st.expanded;
+                cx.notify();
+            }));
+
+        let mut card = div()
+            .w_full()
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(if s.expanded { c::border_strong() } else { c::border() })
+            .bg(c::raised())
+            .overflow_hidden()
+            .child(header);
+
+        if s.expanded {
+            let svc_h = if hide { SVC_H_PLAIN } else { SVC_H_CHART };
+            let mut grid = div()
+                .flex()
+                .flex_col()
+                .gap(px(SVC_GAP))
+                .p(px(STACK_BODY_PAD))
+                .pt(px(STACK_BODY_PAD - 1.0)) // 让出 border_t 的 1px
+                .bg(c::sunken().opacity(0.5))
+                .border_t_1()
+                .border_color(c::border());
+            for (ri, row) in s.services.chunks(self.cols).enumerate() {
+                let mut r = div().flex().flex_row().gap(px(SVC_GAP));
+                for (ci, svc) in row.iter().enumerate() {
+                    let target = files::Target::Container { stack: s.name.clone(), svc: svc.name.clone() };
+                    let on_files = cx.listener(move |this, _, window, cx| this.open_files(target.clone(), window, cx));
+                    r = r.child(service_card(ix * 1000 + ri * 10 + ci, svc, svc_h, self.svc_w, hide, on_files));
+                }
+                for _ in row.len()..self.cols {
+                    r = r.child(div().flex_1());
+                }
+                grid = grid.child(r);
+            }
+            card = card.child(grid);
+        }
+
+        div().w_full().h(px(self.stack_height(s))).pb(px(STACK_GAP)).child(card)
+    }
+}
+
+fn empty_state(ic: IconName, title: &'static str, sub: &'static str) -> Div {
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(10.0))
+        .pb(px(80.0))
+        .child(
+            div()
+                .size(px(52.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(14.0))
+                .border_1()
+                .border_color(c::border())
+                .bg(c::raised())
+                .child(icon(ic, 22.0, c::ghost())),
+        )
+        .child(div().mt(px(4.0)).text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(c::secondary()).child(title))
+        .child(div().text_size(px(12.0)).text_color(c::ghost()).child(sub))
+}
+
+fn button(id: &'static str, ic: IconName, label: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(30.0))
+        .px(px(11.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(c::border_strong())
+        .bg(c::raised())
+        .text_size(px(12.0))
+        .text_color(c::secondary())
+        .cursor_pointer()
+        .hover(|s| s.bg(c::raised_hi()).text_color(c::text()))
+        .child(icon(ic, 13.0, c::muted()))
+        .child(label)
+}
+
+/// 堆栈头部的定宽指标列:上面标签+数值,下面迷你图。定宽保证各行上下对齐。
+fn metric_col(label: &'static str, value: String, s: &[f32; SPARK_N], color: Rgba, hide: bool) -> Div {
+    div()
+        .w(px(110.0))
+        .flex_shrink_0()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .justify_between()
+                .child(div().text_size(px(10.5)).text_color(c::ghost()).child(label))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_family(MONO)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(c::secondary())
+                        .child(value),
+                ),
+        )
+        .when(!hide, |d| d.child(spark(s, color, 12.0, 1.5)))
+}
+
+fn service_card(
+    key: usize,
+    svc: &Service,
+    h: f32,
+    w: f32,
+    hide_charts: bool,
+    on_files: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Div {
+    let up = svc.state == Running::Up;
+    let metric = |label: &'static str, value: &str, s: &[f32; SPARK_N], color: Rgba| {
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_size(px(10.5))
+                    .text_color(c::ghost())
+                    .child(div().size(px(6.0)).rounded(px(1.5)).bg(color))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .truncate()
+                    .text_size(px(12.0))
+                    .font_family(MONO)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(c::secondary())
+                    .child(value.to_string()),
+            )
+            .when(!hide_charts, |d| d.child(div().mt(px(2.0)).child(spark(s, if up { color } else { c::ghost() }, 20.0, 1.5))))
+    };
+
+    let head = div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(10.0))
+        .child(
+            div()
+                .size(px(26.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.0))
+                .bg(if up { c::online_soft() } else { c::idle_soft() })
+                .child(icon(IconName::Box, 14.0, if up { c::online() } else { c::ghost() })),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(div().truncate().text_size(px(13.5)).font_weight(FontWeight::BOLD).child(svc.name.clone()))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .text_size(px(11.0))
+                        .text_color(c::ghost())
+                        .child(div().flex_1().min_w_0().truncate().font_family(MONO).child(svc.image.clone()))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(4.0))
+                                .text_size(px(10.5))
+                                .child(icon(IconName::Clock, 11.0, c::ghost()))
+                                .child(svc.uptime.clone()),
+                        ),
+                ),
+        )
+        .child(if up {
+            pill("运行中", c::online(), c::online_soft())
+        } else {
+            pill("已停止", c::muted(), c::idle_soft())
+        });
+
+    // 端口能放几个:卡片宽 - 内边距 - 右侧操作按钮 - 插头图标,按等宽字估算每个标签宽度,
+    // 放不下的折叠成 "+N"(只要有折叠,就给 +N 标签预留位置)。
+    let port_w = |p: &str| 14.0 + p.chars().count() as f32 * PORT_CHAR_W + 5.0;
+    let mut room = w - 24.0 - ACTIONS_W - 17.0;
+    let mut shown = 0;
+    for (i, p) in svc.ports.iter().enumerate() {
+        let need = port_w(p) + if i + 1 < svc.ports.len() { PORT_MORE_W } else { 0.0 };
+        if need > room && shown > 0 {
+            break;
+        }
+        room -= port_w(p);
+        shown += 1;
+    }
+    let ports = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(5.0))
+        .h(px(22.0))
+        .overflow_hidden()
+        .child(icon(IconName::Plug, 12.0, c::ghost()))
+        .children(svc.ports[..shown].iter().map(|p| tag(p.clone()).font_family(MONO).text_size(px(10.5))))
+        .when(shown < svc.ports.len(), |d| {
+            let all = svc.ports.clone();
+            d.child(
+                tag(format!("+{}", svc.ports.len() - shown))
+                    .id(("more-ports", key))
+                    .font_family(MONO)
+                    .text_size(px(10.5))
+                    .text_color(c::muted())
+                    .cursor_default()
+                    .hover(|s| s.bg(c::selected()).text_color(c::text()))
+                    .tooltip(move |_, cx| cx.new(|_| node_form::PortsTip(all.clone())).into()),
+            )
+        });
+
+    let action = |id: usize, ic: IconName, color: Rgba, tip: &'static str| {
+        div()
+            .id(("act", key * 10 + id))
+            .h(px(24.0))
+            .px(px(7.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(5.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .text_size(px(11.0))
+            .text_color(c::muted())
+            .hover(|s| s.bg(c::hover()).text_color(c::text()))
+            .child(icon(ic, 14.0, color))
+            .when(!tip.is_empty(), |d| d.child(tip))
+    };
+
+    let actions = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(2.0))
+        .pt(px(6.0))
+        .border_t_1()
+        .border_color(c::border())
+        .child(ports)
+        .child(action(0, IconName::SquareTerminal, c::muted(), "终端"))
+        .child(action(1, IconName::ScrollText, c::muted(), "日志"))
+        .child(action(6, IconName::FolderOpen, c::muted(), "").on_click(on_files))
+        .child(action(2, IconName::ExternalLink, c::muted(), ""))
+        .child(div().w(px(1.0)).h(px(14.0)).mx(px(4.0)).bg(c::border()))
+        .child(action(3, if up { IconName::Square } else { IconName::Play }, c::muted(), ""))
+        .child(action(4, IconName::RefreshCw, c::muted(), ""))
+        .child(action(5, IconName::Trash, c::danger().opacity(0.85), ""));
+
+    div()
+        .flex_1()
+        .min_w_0()
+        .h(px(h))
+        .flex()
+        .flex_col()
+        .justify_between()
+        .p(px(12.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(c::border())
+        .bg(c::bg())
+        .overflow_hidden()
+        .child(head)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(12.0))
+                .child(metric("CPU", &svc.cpu, &svc.cpu_s, c::cpu()))
+                .child(metric("内存", &svc.mem, &svc.mem_s, c::mem()))
+                .child(metric("网络", &svc.net, &svc.net_s, c::net()))
+                .child(metric("磁盘", &svc.disk, &svc.disk_s, c::disk())),
+        )
+        .child(actions)
+}
+
+impl Render for Home {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((path, frames)) = &mut self.shot {
+            *frames += 1;
+            if *frames == 10 {
+                match window.render_to_image() {
+                    Ok(img) => match img.save(&*path) {
+                        Ok(()) => println!("截图已保存: {path}"),
+                        Err(e) => println!("保存失败: {e}"),
+                    },
+                    Err(e) => println!("离屏渲染失败: {e}"),
+                }
+                cx.quit();
+            } else {
+                window.request_animation_frame();
+            }
+        }
+        let titlebar = self.titlebar();
+        let sidebar = self.sidebar(cx);
+        let menu = self.menu(cx);
+        let content = self.content(window, cx);
+        let drawer = self.files_drawer(window, cx);
+        let dialog = self.node_dialog(window, cx);
+        div()
+            .size_full()
+            .relative()
+            .flex()
+            .flex_col()
+            .bg(c::bg())
+            .text_color(c::text())
+            .child(titlebar)
+            .child(div().flex_1().min_h_0().flex().flex_row().child(sidebar).child(menu).child(content))
+            .children(drawer)
+            .children(dialog)
+    }
+}
+
+fn main() {
+    // 调试参数:--shot <png> --node <g>,<n> --expand <k> --plain --page <0..6> --add(打开添加节点弹窗) --files <host|堆栈/服务> --fcd <目录> --fsel <名字>
+    let args: Vec<String> = std::env::args().collect();
+    let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+    let shot = arg("--shot");
+    let node = arg("--node");
+    let expand: usize = arg("--expand").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let plain = args.iter().any(|a| a == "--plain");
+    let page: Option<usize> = arg("--page").and_then(|v| v.parse().ok());
+    let add = args.iter().any(|a| a == "--add");
+    // --files host | <堆栈>/<服务>  打开文件抽屉;--fsel <名字> 选中一项;--fcd <路径> 进入目录
+    let files_arg = arg("--files");
+    let fsel = arg("--fsel");
+    let fcd = arg("--fcd");
+
+    gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx| {
+        gpui_kit::init(cx);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1360.0), px(860.0)), cx))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("DeskPanel".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(16.0), px(14.0))),
+            }),
+            ..Default::default()
+        };
+        gpui_kit::open_window(options, cx, move |window, cx| {
+            cx.new(|cx| {
+                let mut h = Home::new();
+                if let Some(n) = &node {
+                    let mut it = n.split(',').filter_map(|x| x.parse::<usize>().ok());
+                    if let (Some(g), Some(n)) = (it.next(), it.next()) {
+                        h.sel = (g, n);
+                    }
+                }
+                let (g, n) = h.sel;
+                for st in h.groups[g].nodes[n].stacks.iter_mut().take(expand) {
+                    st.expanded = true;
+                }
+                h.hide_charts = plain;
+                if let Some(p) = page {
+                    h.page = Page::ALL[p.min(6)];
+                }
+                h.shot = shot.clone().map(|p| (p, 0));
+                if add {
+                    h.open_add_node(window, cx);
+                }
+                if let Some(t) = &files_arg {
+                    let target = match t.split_once('/') {
+                        Some((stack, svc)) => files::Target::Container { stack: stack.into(), svc: svc.into() },
+                        None => files::Target::Host,
+                    };
+                    h.open_files(target, window, cx);
+                    h.files.debug_jump(fcd.clone(), fsel.clone());
+                }
+                h
+            })
+        })
+        .expect("failed to open window");
+        cx.activate(true);
+    });
+}

@@ -1,0 +1,14 @@
+[package]
+name = "dockyard"
+version = "0.1.0"
+edition = "2024"
+default-run = "dockyard"
+
+[dependencies]
+gpui-kit = "*"
+# 仅为用 Window::render_to_image 离屏截图:直接给底层 crate 开 test-support,靠特性统一生效
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
+gpui-macos = { package = "gpui-pre-macos", version = "=0.3.12", features = ["test-support"] }
+
+[profile.release]
+debug = 1

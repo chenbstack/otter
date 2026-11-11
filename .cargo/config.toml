@@ -1,0 +1,5 @@
+# 本机 xcode-select 指向 Command Line Tools，其中不含 metal 编译器。
+# GPUI 在 macOS 上编译 .metal 着色器需要完整的 Xcode 工具链，故在此局部覆盖，
+# 避免修改全局 xcode-select 影响其他项目。
+[env]
+DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer"
