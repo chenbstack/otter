@@ -18,6 +18,7 @@ use gpui_kit::*;
 
 use super::{Home, MENU_W, MONO, TITLEBAR_H, c, icon, t};
 use crate::mock::{Node, NodeId};
+use crate::sftp::{Direction, RemoteEntry, Sftp, Status as SftpStatus, TransferState};
 use crate::ui::{DROPDOWN_COMPACT_W, MenuItem, MenuSide, dropdown_menu_compact};
 
 /// 服务器文件:三栏,通常正好盖满内容区
@@ -72,7 +73,7 @@ struct Entry {
     kind: Kind,
     size: u64,
     modified: String,
-    mode: &'static str,
+    mode: String,
     owner: String,
     /// Some = 上传中(0..1)
     progress: Option<f32>,
@@ -164,7 +165,7 @@ impl B<'_> {
             kind,
             size,
             modified: stamp(&join(self.path, name)),
-            mode,
+            mode: mode.to_string(),
             owner: self.owner.into(),
             progress: None,
             mount: None,
@@ -331,6 +332,8 @@ pub struct Store {
     deleted: HashSet<String>,
     ticking: bool,
     batch: usize,
+    /// 真实 SFTP 的界面刷新循环是否在跑
+    polling: bool,
 }
 
 /// 一个文件视图的状态(浏览位置、选中、筛选)。每个标签各有一份,抽屉用所在标签的那份。
@@ -354,6 +357,12 @@ pub struct Files {
     more: u8,
     search: Option<Entity<InputState>>,
     notice: Option<SharedString>,
+    /// 真实 SFTP 连接(非 demo 的服务器目标);丢弃即断开
+    sftp: Option<Sftp>,
+    /// 连上后是否已把路径定位到远程主目录
+    path_ready: bool,
+    /// 等待确认删除的项(真实服务器上的删除不可恢复)
+    confirm_del: Option<String>,
 }
 
 impl Files {
@@ -375,7 +384,24 @@ impl Files {
             more: 0,
             search: None,
             notice: None,
+            sftp: None,
+            path_ready: false,
+            confirm_del: None,
         }
+    }
+
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+
+    pub fn sftp_ref(&self) -> Option<&Sftp> {
+        self.sftp.as_ref()
+    }
+
+    /// 丢弃连接(断开),下次渲染会重新连接
+    pub fn drop_sftp(&mut self) {
+        self.sftp = None;
+        self.path_ready = false;
     }
 
     /// 创建筛选输入框(需要 window 和 cx,所以不放在 `new` 里)
@@ -444,6 +470,9 @@ impl Home {
             fs.back.clear();
             fs.fwd.clear();
             fs.selected = None;
+            fs.sftp = None;
+            fs.path_ready = false;
+            fs.confirm_del = None;
         }
         fs.target = target;
         fs.node = sel;
@@ -491,6 +520,9 @@ impl Home {
 
     fn listing(&self) -> Vec<Entry> {
         let fs = &self.files;
+        if self.sftp_real() {
+            return fs.sftp.as_ref().and_then(|s| s.dir(&fs.path)).map(|d| d.entries.iter().map(entry_from_remote).collect()).unwrap_or_default();
+        }
         let key = fs.dir_key();
         let mut v = base(&fs.target, &fs.path, self.node());
         if let Some(extra) = self.fstore.extra.get(&key) {
@@ -504,7 +536,126 @@ impl Home {
         v
     }
 
+    /// 是否走真实 SFTP:非 demo(有本地库)且目标是服务器;demo 和容器仍是 mock。
+    fn sftp_real(&self) -> bool {
+        self.store.is_some() && self.files.target == Target::Host
+    }
+
+    /// 服务器目标的「主目录」:真实连接用远程 home,否则 mock 的 /root
+    fn files_home(&self) -> String {
+        if self.sftp_real() {
+            if let Some(h) = self.files.sftp.as_ref().map(|s| s.home()).filter(|h| !h.is_empty()) {
+                return h;
+            }
+            return "/".into();
+        }
+        Files::home_of(&self.files.target).to_string()
+    }
+
+    /// 每次渲染前调用:按需建立连接、首次连上后定位到主目录、读取当前目录、收取提示,
+    /// 有进行中的事(连接/加载/传输)就起一个定时刷新。
+    fn sync_sftp(&mut self, cx: &mut Context<Self>) {
+        if !self.sftp_real() {
+            return;
+        }
+        if self.files.sftp.is_none() {
+            let conn = self.conn_for(self.files.node);
+            self.files.sftp = Some(Sftp::connect(conn));
+            self.files.path_ready = false;
+        }
+        let fs = &mut self.files;
+        let Some(s) = fs.sftp.as_ref() else { return };
+        let mut home = None;
+        if matches!(s.status(), SftpStatus::Ready) {
+            if !fs.path_ready {
+                fs.path_ready = true;
+                home = Some(s.home()).filter(|h| !h.is_empty());
+            }
+            let want = home.clone().unwrap_or_else(|| fs.path.clone());
+            if s.dir(&want).is_none() {
+                s.list(&want);
+            }
+            if let Some(n) = s.take_notice() {
+                fs.notice = Some(n.into());
+            }
+        }
+        let busy = s.busy();
+        if let Some(h) = home {
+            fs.path = h;
+        }
+        if busy && !self.fstore.polling {
+            self.fstore.polling = true;
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_millis(120)).await;
+                    let Ok(more) = this.update(cx, |this, cx| {
+                        cx.notify();
+                        let more = this.files.sftp.as_ref().is_some_and(|s| s.busy());
+                        if !more {
+                            this.fstore.polling = false;
+                        }
+                        more
+                    }) else {
+                        break;
+                    };
+                    if !more {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// 下载目的地:双栏时是本地栏当前目录,否则系统「下载」目录
+    fn download_dir(&self) -> PathBuf {
+        if self.files.local {
+            return PathBuf::from(&self.files.lpath);
+        }
+        directories::UserDirs::new()
+            .and_then(|d| d.download_dir().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Downloads"))
+    }
+
+    fn download_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.files.selected.clone() else { return };
+        let Some(e) = self.listing().into_iter().find(|e| e.name == name) else { return };
+        let dest = self.download_dir();
+        let _ = std::fs::create_dir_all(&dest);
+        let remote = join(&self.files.path, &name);
+        if let Some(s) = self.files.sftp.as_ref() {
+            s.download(&remote, e.kind == Kind::Dir, dest.clone());
+            self.files.notice = Some(format!("开始下载 {name} → {}", dest.display()).into());
+        }
+        cx.notify();
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.sftp_real() {
+            let path = self.files.path.clone();
+            if let Some(s) = self.files.sftp.as_ref() {
+                s.list(&path);
+            }
+            self.files.notice = None;
+        } else {
+            self.files.notice = Some("已刷新".into());
+        }
+        cx.notify();
+    }
+
     fn upload(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if self.sftp_real() {
+            let dir = self.files.path.clone();
+            if let Some(s) = self.files.sftp.as_ref().filter(|s| matches!(s.status(), SftpStatus::Ready)) {
+                let n = paths.len();
+                s.upload(paths, &dir);
+                self.files.notice = Some(format!("开始上传 {n} 项").into());
+            } else {
+                self.files.notice = Some("还没连上服务器".into());
+            }
+            cx.notify();
+            return;
+        }
         let dir = self.files.path.clone();
         let b = B { path: &dir, owner: "root" };
         let mut new = vec![];
@@ -600,6 +751,14 @@ impl Home {
             .find(|n| !names.contains(n))
             .unwrap();
         let dir = self.files.path.clone();
+        if self.sftp_real() {
+            if let Some(s) = self.files.sftp.as_ref().filter(|s| matches!(s.status(), SftpStatus::Ready)) {
+                s.mkdir(&join(&dir, &name));
+                self.files.selected = Some(name);
+            }
+            cx.notify();
+            return;
+        }
         let mut e = B { path: &dir, owner: "root" }.d(&name);
         e.modified = "刚刚".into();
         let key = self.files.dir_key();
@@ -658,10 +817,10 @@ impl Home {
             (1, 1) => {
                 if let Some(name) = self.files.lsel.clone() {
                     let p = PathBuf::from(join(&self.files.lpath, &name));
-                    if p.is_file() {
+                    if p.is_file() || (p.is_dir() && self.sftp_real()) {
                         self.upload(vec![p], cx);
                     } else {
-                        self.files.notice = Some("请先选中一个文件".into());
+                        self.files.notice = Some("请先选中要上传的项".into());
                         cx.notify();
                     }
                 }
@@ -669,6 +828,7 @@ impl Home {
             (2, 0) => self.new_folder(cx),
             (2, 1) => self.pick_upload(window, cx),
             (2, 2) => self.delete_selected(cx),
+            (2, 3) => self.download_selected(cx),
             _ => cx.notify(),
         }
     }
@@ -711,7 +871,38 @@ impl Home {
             })
     }
 
+    /// 连接页的「取消/关闭」:文件标签 → 关掉这个标签;抽屉 → 收起抽屉
+    pub(crate) fn close_sftp_page(&mut self, tab: bool, cx: &mut Context<Self>) {
+        self.files.drop_sftp();
+        if tab {
+            if let Some(a) = self.workspace.active {
+                self.close_tab(a, cx);
+            }
+        } else {
+            self.files.open = false;
+        }
+        cx.notify();
+    }
+
+    fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.files.confirm_del.take() else { return };
+        let is_dir = self.listing().iter().any(|e| e.name == name && e.kind == Kind::Dir);
+        let path = join(&self.files.path, &name);
+        if let Some(s) = self.files.sftp.as_ref() {
+            s.remove(&path, is_dir);
+            self.files.notice = Some(format!("正在删除 {name}…").into());
+        }
+        self.files.selected = None;
+        cx.notify();
+    }
+
     fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        if self.sftp_real() {
+            // 真实服务器上的删除不可恢复:先在工具栏下方二次确认
+            self.files.confirm_del = self.files.selected.clone();
+            cx.notify();
+            return;
+        }
         let fs = &mut self.files;
         let Some(name) = fs.selected.take() else { return };
         let key = fs.dir_key();
@@ -721,6 +912,26 @@ impl Home {
         self.fstore.deleted.insert(format!("{key}/{name}"));
         fs.notice = Some(format!("已删除 {name}").into());
         cx.notify();
+    }
+}
+
+fn entry_from_remote(r: &RemoteEntry) -> Entry {
+    let modified = r
+        .mtime
+        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_default();
+    Entry {
+        name: r.name.clone(),
+        kind: if r.is_dir { Kind::Dir } else if r.is_link { Kind::Link } else { Kind::File },
+        size: r.size,
+        modified,
+        mode: r.mode.clone(),
+        owner: r.owner.clone(),
+        progress: None,
+        mount: None,
+        link: r.link.clone(),
+        local: None,
     }
 }
 
@@ -990,6 +1201,36 @@ impl Home {
 
     /// 文件管理的完整界面;`tab_mode` 为真时作为标签内容铺满,否则作为抽屉。
     fn files_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>, w: f32, tab_mode: bool) -> AnyElement {
+        self.sync_sftp(cx);
+        // 真实连接没连上之前,整页显示「连接中」(步骤、指纹确认、失败原因、重试),连上后才是文件列表
+        if self.sftp_real()
+            && let Some(s) = self.files.sftp.as_ref()
+        {
+            let status = s.status();
+            if !matches!(status, SftpStatus::Ready) {
+                let prompt = if let SftpStatus::HostPrompt(p) = status { Some(p) } else { None };
+                let page = self.connecting_page(crate::terminal::connecting::ConnTarget::Sftp(tab_mode), s.steps(), prompt, crate::terminal::connecting::SFTP_STEP_LABELS, cx);
+                return if tab_mode {
+                    page.into_any_element()
+                } else {
+                    div()
+                        .id("files-drawer")
+                        .absolute()
+                        .top(px(TITLEBAR_H))
+                        .right_0()
+                        .bottom_0()
+                        .w(px(w))
+                        .flex()
+                        .flex_col()
+                        .bg(c::dialog())
+                        .border_l_1()
+                        .border_color(c::border_strong())
+                        .occlude()
+                        .child(page)
+                        .into_any_element()
+                };
+            }
+        }
         let node = self.node();
         let fs = &self.files;
         // 打开「本地」后分成左右两栏,每栏各占一半
@@ -1097,7 +1338,7 @@ impl Home {
                     .hover(|s| s.bg(c::hover()))
                     .child(icon(IconName::House, 13.0, c::muted()))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        let home = Files::home_of(&this.files.target).to_string();
+                        let home = this.files_home();
                         this.go(home, cx)
                     })),
             );
@@ -1161,6 +1402,9 @@ impl Home {
         });
         let mut more_items = vec![(MenuItem::new("新建文件夹").icon(IconName::FolderPlus), 0u8), (MenuItem::new("上传").icon(IconName::Upload), 1)];
         if selected.is_some() {
+            if self.sftp_real() {
+                more_items.push((MenuItem::new("下载到本地").icon(IconName::Download), 3));
+            }
             more_items.push((MenuItem::new("删除选中项").icon(IconName::Trash), 2));
         }
         let toolbar = div()
@@ -1174,10 +1418,7 @@ impl Home {
             .child(tool_btn("f-back", IconName::ArrowLeft, !fs.back.is_empty()).on_click(cx.listener(|this, _, _, cx| this.go_back(cx))))
             .child(tool_btn("f-fwd", IconName::ArrowRight, !fs.fwd.is_empty()).on_click(cx.listener(|this, _, _, cx| this.go_fwd(cx))))
             .child(tool_btn("f-up", IconName::ArrowUp, path != "/").on_click(cx.listener(move |this, _, _, cx| this.go(up_path.clone(), cx))))
-            .child(tool_btn("f-refresh", IconName::RefreshCw, true).on_click(cx.listener(|this, _, _, cx| {
-                this.files.notice = Some("已刷新".into());
-                cx.notify();
-            })))
+            .child(tool_btn("f-refresh", IconName::RefreshCw, true).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
             .child(crumbs)
             .children(search)
             .child(self.more_button(2, more_items, cx));
@@ -1200,6 +1441,59 @@ impl Home {
                 .text_color(c::warn())
                 .child(icon(IconName::TriangleAlert, 13.0, c::warn()))
                 .child(format!("这里是容器层,重建容器后改动会丢失;需要保留的文件请放进挂载卷 {mounts}"))
+        });
+
+        // 删除确认条(真实服务器上删除不可恢复)
+        let confirm = fs.confirm_del.clone().map(|name| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .mx(px(12.0))
+                .mb(px(8.0))
+                .pl(px(10.0))
+                .pr(px(6.0))
+                .h(px(34.0))
+                .rounded(px(t::RADIUS_MD))
+                .bg(c::danger().opacity(0.14))
+                .text_size(px(t::TYPE_CONTROL))
+                .text_color(c::danger())
+                .child(icon(IconName::Trash, 13.0, c::danger()))
+                .child(div().flex_1().min_w_0().truncate().child(format!("确认删除「{name}」?服务器上的删除无法恢复")))
+                .child(
+                    div()
+                        .id("del-cancel")
+                        .h(px(24.0))
+                        .px(px(10.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(t::RADIUS_SM))
+                        .text_color(c::muted())
+                        .cursor_pointer()
+                        .hover(|s| s.bg(c::hover()))
+                        .child("取消")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.files.confirm_del = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .id("del-ok")
+                        .h(px(24.0))
+                        .px(px(10.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(t::RADIUS_SM))
+                        .bg(c::danger())
+                        .text_color(c::on_accent())
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(c::danger().opacity(0.85)))
+                        .child("删除")
+                        .on_click(cx.listener(|this, _, _, cx| this.confirm_delete(cx))),
+                )
         });
 
         // ---- 中:文件表格 ----
@@ -1227,7 +1521,11 @@ impl Home {
             .border_b_1()
             .border_color(c::border());
         let mut rows = div().id("file-rows").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().px(px(8.0)).py(px(4.0));
-        if entries.is_empty() {
+        let real_state = self.sftp_state_view(cx);
+        let entries: Vec<Entry> = if real_state.is_some() { vec![] } else { entries };
+        if let Some(v) = real_state {
+            rows = rows.child(v);
+        } else if entries.is_empty() {
             let (t, s) = if query.is_empty() { ("空文件夹", "把文件拖到这里即可上传") } else { ("没有匹配的文件", "换个关键词试试") };
             rows = rows.child(super::empty_state(IconName::FolderOpen, t, s));
         }
@@ -1261,7 +1559,7 @@ impl Home {
             let name = e.name.clone();
             let enter = e.is_dir().then(|| join(&path, &e.name));
             rows = rows.child(
-                cols(name_el, size_el, mono(e.modified.clone(), c::muted()), mono(e.mode.into(), c::ghost()), mono(e.owner.clone(), c::ghost()))
+                cols(name_el, size_el, mono(e.modified.clone(), c::muted()), mono(e.mode.clone(), c::ghost()), mono(e.owner.clone(), c::ghost()))
                     .id(("frow", i))
                     .h(px(32.0))
                     .flex_shrink_0()
@@ -1286,6 +1584,31 @@ impl Home {
 
         // ---- 状态栏 ----
         let uploading: Vec<&Entry> = self.fstore.extra.values().flatten().filter(|e| e.progress.is_some()).collect();
+        // 真实传输:汇总进行中的上传/下载
+        let xfer = fs.sftp.as_ref().filter(|_| self.sftp_real()).map(|s| s.transfers()).unwrap_or_default();
+        let running: Vec<_> = xfer.iter().filter(|x| x.state == TransferState::Running).collect();
+        let real_up = (!running.is_empty()).then(|| {
+            let total: f32 = running.iter().map(|x| x.total as f32).sum();
+            let done: f32 = running.iter().map(|x| x.done as f32).sum();
+            let p = if total > 0.0 { (done / total).min(1.0) } else { 0.0 };
+            let up = running.iter().any(|x| x.dir == Direction::Up);
+            let down = running.iter().any(|x| x.dir == Direction::Down);
+            let label = match (up, down) {
+                (true, true) => "传输",
+                (true, false) => "上传",
+                _ => "下载",
+            };
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .text_color(c::accent())
+                .child(icon(if down && !up { IconName::Download } else { IconName::Upload }, 12.0, c::accent()))
+                .child(format!("{label} {} 项", running.len()))
+                .child(progress_bar(p, 80.0))
+                .child(div().font_family(MONO).child(format!("{:.0}%", p * 100.0)))
+        });
         let up_info = (!uploading.is_empty()).then(|| {
             let total: f32 = uploading.iter().map(|e| e.size as f32).sum();
             let done: f32 = uploading.iter().map(|e| e.size as f32 * e.progress.unwrap_or(0.0)).sum();
@@ -1322,7 +1645,8 @@ impl Home {
             .when_some(selected.as_ref(), |d, e| d.child(div().truncate().text_color(c::muted()).child(format!("已选 {}", e.name))))
             .child(div().flex_1())
             .children(up_info)
-            .when(uploading.is_empty(), |d| d.when_some(fs.notice.clone(), |d, n| d.child(div().text_color(c::muted()).child(n))))
+            .children(real_up)
+            .when(uploading.is_empty() && running.is_empty(), |d| d.when_some(fs.notice.clone(), |d, n| d.child(div().text_color(c::muted()).child(n))))
             .child(div().font_family(MONO).child(via));
 
         // ---- 拖入上传的提示层:平时透明,有外部文件拖到抽屉上方时显现 ----
@@ -1364,7 +1688,7 @@ impl Home {
                     .child(div().text_size(px(t::TYPE_CONTROL)).font_family(MONO).text_color(c::muted()).child(format!("→ {drop_path}"))),
             );
 
-        let remote = div().flex_1().min_w_0().min_h_0().flex().flex_col().child(toolbar).children(warn).child(table);
+        let remote = div().flex_1().min_w_0().min_h_0().flex().flex_col().child(toolbar).children(warn).children(confirm).child(table);
         let body = div()
             .flex_1()
             .min_h_0()
@@ -1406,6 +1730,72 @@ impl Home {
     }
 }
 
+
+impl Home {
+    /// 真实 SFTP 在表格区域的状态:连接中、确认主机指纹、连接失败、加载中、读取出错。
+    /// 正常显示文件列表时返回 None。
+    fn sftp_state_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.sftp_real() {
+            return None;
+        }
+        let card = |ic: IconName, color: Rgba, title: String, sub: String| {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(6.0))
+                .pt(px(48.0))
+                .px(px(24.0))
+                .child(icon(ic, 26.0, color))
+                .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(title))
+                .child(div().max_w(px(420.0)).text_center().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(sub))
+        };
+        let retry = |id: &'static str, cx: &mut Context<Self>, redo_conn: bool| {
+            div()
+                .id(id)
+                .mt(px(8.0))
+                .h(px(28.0))
+                .px(px(14.0))
+                .flex()
+                .items_center()
+                .rounded(px(t::RADIUS_MD))
+                .bg(c::accent_soft())
+                .text_size(px(t::TYPE_CONTROL))
+                .text_color(c::accent())
+                .cursor_pointer()
+                .hover(|s| s.bg(c::accent().opacity(0.3)))
+                .child("重试")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if redo_conn {
+                        this.files.sftp = None;
+                        this.files.path_ready = false;
+                    } else {
+                        let path = this.files.path.clone();
+                        if let Some(s) = this.files.sftp.as_ref() {
+                            s.list(&path);
+                        }
+                    }
+                    cx.notify();
+                }))
+        };
+        let s = self.files.sftp.as_ref()?;
+        match s.status() {
+            // 没连上时由整页「连接中」接管(见 files_panel)
+            SftpStatus::Connecting | SftpStatus::HostPrompt(_) | SftpStatus::Failed(_) => None,
+            SftpStatus::Ready => {
+                let d = s.dir(&self.files.path);
+                match d {
+                    Some(d) if d.error.is_some() => {
+                        Some(card(IconName::TriangleAlert, c::warn(), "读取目录失败".into(), d.error.unwrap_or_default()).child(retry("dir-retry", cx, false)).into_any_element())
+                    }
+                    Some(d) if d.loading && d.entries.is_empty() => Some(card(IconName::LoaderCircle, c::accent(), "正在读取…".into(), self.files.path.clone()).into_any_element()),
+                    None => Some(card(IconName::LoaderCircle, c::accent(), "正在读取…".into(), self.files.path.clone()).into_any_element()),
+                    _ => None,
+                }
+            }
+        }
+    }
+}
 
 /// 简单文字 tooltip
 pub(crate) struct Tip(pub(crate) String);

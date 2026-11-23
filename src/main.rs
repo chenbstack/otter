@@ -7,6 +7,7 @@ mod files;
 mod known_hosts;
 mod logs;
 mod secrets;
+mod sftp;
 mod store;
 mod mock;
 mod node_form;
@@ -271,8 +272,9 @@ fn main() {
     let add = args.iter().any(|a| a == "--add");
     // --empty:截图用,空节点列表(不读写本地库)
     let empty = args.iter().any(|a| a == "--empty");
-    // --demo 或 --shot:用 mock 示例数据,不读写本地库
-    let demo = args.iter().any(|a| a == "--demo") || shot.is_some();
+    // --demo 或 --shot:用 mock 示例数据,不读写本地库;
+    // 调试:DOCKYARD_SHOT_REAL=1 让 --shot 也读本地库(配合临时 HOME 验证真实 SFTP 画面)
+    let demo = args.iter().any(|a| a == "--demo") || (shot.is_some() && std::env::var_os("DOCKYARD_SHOT_REAL").is_none());
     // --tabs n:节点名,f:节点名[@堆栈/服务]  清空后依次打开标签;--active k 激活第 k 个(从 0 起)
     let tabs_arg = arg("--tabs");
     let active_arg: Option<usize> = arg("--active").and_then(|v| v.parse().ok());

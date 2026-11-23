@@ -98,7 +98,7 @@ pub struct HostKeyPrompt {
 }
 
 /// 待确认的主机密钥 + 回复通道。
-type PendingHost = Arc<Mutex<Option<(HostKeyPrompt, Option<tokio::sync::oneshot::Sender<bool>>)>>>;
+pub(crate) type PendingHost = Arc<Mutex<Option<(HostKeyPrompt, Option<tokio::sync::oneshot::Sender<bool>>)>>>;
 
 /// 连接过程里的一步,界面的「连接中」页据此逐步展示。
 #[derive(Clone, Debug, PartialEq)]
@@ -118,7 +118,7 @@ pub struct Step {
 pub const STEP_LABELS: [&str; 3] = ["连接服务器", "身份认证", "打开终端"];
 
 /// 后台 tokio 运行时,整个进程一个。
-fn runtime() -> &'static tokio::runtime::Runtime {
+pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().thread_name("ssh").build().expect("tokio runtime")
@@ -249,7 +249,7 @@ fn set(st: &Arc<Mutex<Status>>, s: Status) {
 }
 
 #[derive(Clone)]
-struct Io {
+pub(crate) struct Io {
     out: std_mpsc::Sender<Vec<u8>>,
     inp: Arc<tokio::sync::Mutex<tokio_mpsc::UnboundedReceiver<Vec<u8>>>>,
     status: Arc<Mutex<Status>>,
@@ -258,6 +258,13 @@ struct Io {
 }
 
 impl Io {
+    /// 没有终端的场景(SFTP):输出和输入都丢弃,只保留主机指纹确认。
+    pub(crate) fn headless(host_prompt: PendingHost, steps: Arc<Mutex<Vec<Step>>>) -> Io {
+        let (out, _) = std_mpsc::channel();
+        let (_, inp) = tokio_mpsc::unbounded_channel();
+        Io { out, inp: Arc::new(tokio::sync::Mutex::new(inp)), status: Arc::new(Mutex::new(Status::Connecting)), steps, host_prompt }
+    }
+
     /// 挂出主机指纹确认,等界面回答(取消、会话被丢弃都算拒绝)
     async fn confirm_host(&self, prompt: HostKeyPrompt) -> bool {
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -272,14 +279,18 @@ impl Io {
     }
 
     /// 开始下一步
-    fn begin_step(&self, label: &'static str) {
+    pub(crate) fn steps_empty(&self) -> bool {
+        self.steps.lock().map(|g| g.is_empty()).unwrap_or(true)
+    }
+
+    pub(crate) fn begin_step(&self, label: &'static str) {
         if let Ok(mut g) = self.steps.lock() {
             g.push(Step { label, state: StepState::Running });
         }
     }
 
     /// 当前这步完成
-    fn done_step(&self) {
+    pub(crate) fn done_step(&self) {
         if let Ok(mut g) = self.steps.lock() {
             if let Some(last) = g.last_mut().filter(|s| s.state == StepState::Running) {
                 last.state = StepState::Done;
@@ -288,7 +299,7 @@ impl Io {
     }
 
     /// 当前这步失败并记下原因。已经有失败原因(更具体的)就不覆盖。
-    fn fail_step(&self, msg: &str) {
+    pub(crate) fn fail_step(&self, msg: &str) {
         if let Ok(mut g) = self.steps.lock() {
             if let Some(last) = g.last_mut().filter(|s| s.state == StepState::Running) {
                 last.state = StepState::Failed(msg.to_string());
@@ -344,7 +355,7 @@ pub(crate) fn known_hosts_file() -> PathBuf {
     base.join("Library/Application Support/dockyard/known_hosts")
 }
 
-struct Client {
+pub(crate) struct Client {
     io: Io,
     host: String,
     port: u16,
@@ -408,7 +419,9 @@ pub(crate) fn expand(path: &str) -> PathBuf {
     }
 }
 
-async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, mut resize: tokio_mpsc::UnboundedReceiver<(u16, u16)>) -> Result<(), String> {
+/// 连接服务器、校验主机密钥、认证,返回已认证的会话(终端和 SFTP 共用)。
+/// 过程会通过 `io` 记录步骤和日志;首次连接的指纹确认走 `io.confirm_host`。
+pub(crate) async fn open_authenticated(conn: &Conn, io: &Io) -> Result<client::Handle<Client>, String> {
     let config = Arc::new(client::Config { inactivity_timeout: None, keepalive_interval: Some(std::time::Duration::from_secs(30)), ..Default::default() });
     let handler = Client { io: io.clone(), host: conn.host.clone(), port: conn.port };
     let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
@@ -430,8 +443,14 @@ async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, mut resize: tokio_mpsc::
         &label,
         format!("开始认证({})", conn.auth.describe()),
     );
-    authenticate(conn, &io, &mut session).await?;
+    authenticate(conn, io, &mut session).await?;
     io.done_step();
+    Ok(session)
+}
+
+async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, mut resize: tokio_mpsc::UnboundedReceiver<(u16, u16)>) -> Result<(), String> {
+    let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
+    let session = open_authenticated(conn, &io).await?;
     io.begin_step(STEP_LABELS[2]);
     logs::push(logs::Level::Info, &label, "认证成功");
 

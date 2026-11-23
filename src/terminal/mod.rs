@@ -1,6 +1,6 @@
 //! 终端:`gpui_xterm` 负责模拟与渲染,这里负责把它接到 SSH 通道上,并画终端标签。
 
-mod connecting;
+pub(crate) mod connecting;
 pub mod ssh;
 
 use gpui_xterm::{ColorPalette, TerminalConfig, TerminalView};
