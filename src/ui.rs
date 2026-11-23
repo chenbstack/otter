@@ -63,7 +63,7 @@ pub fn backdrop() -> Div {
     fn blob(x: f32, y: f32, radius: f32, hex: u32) -> impl Iterator<Item = Div> {
         (0..LAYERS).map(move |i| {
             let r = radius * (1.0 - i as f32 / LAYERS as f32);
-            let color: Rgba = rgba((hex << 8) | 0x12);
+            let color: Rgba = rgba((hex << 8) | 0x07);
             div().absolute().left(relative(x)).top(relative(y)).ml(px(-r)).mt(px(-r)).size(px(r * 2.0)).rounded_full().bg(color)
         })
     }
@@ -71,9 +71,9 @@ pub fn backdrop() -> Div {
         .absolute()
         .inset_0()
         .overflow_hidden()
-        .children(blob(0.06, 0.0, 640.0, 0x3A1A2B))
-        .children(blob(1.0, 0.08, 600.0, 0x261D45))
-        .children(blob(0.72, 1.05, 680.0, 0x14264A))
+        .children(blob(0.06, 0.0, 640.0, 0x240F1A))
+        .children(blob(1.0, 0.08, 600.0, 0x171229))
+        .children(blob(0.72, 1.05, 680.0, 0x0D1830))
 }
 
 /// 字号与圆角 token,标准值见 docs/design/tokens.md
@@ -105,15 +105,15 @@ pub const TAB_H: f32 = 30.0;
 /// 标题栏左侧给红绿灯留的宽度
 pub const TITLEBAR_PAD_L: f32 = 84.0;
 /// 节点页卡片:最小宽度(决定列数)、高度、间距
-pub const NODE_CARD_MIN_W: f32 = 260.0;
-pub const NODE_CARD_H: f32 = 68.0;
+pub const NODE_CARD_MIN_W: f32 = 232.0;
+pub const NODE_CARD_H: f32 = 56.0;
 /// 节点页:卡片里的图标块边长、顶部搜索条和主按钮高度
-pub const NODE_ICON: f32 = 40.0;
+pub const NODE_ICON: f32 = 32.0;
 pub const NODE_BAR_H: f32 = 34.0;
 /// 终端字号、终端画布内边距
 pub const TERM_FONT: f32 = 13.0;
 pub const TERM_PAD: f32 = 8.0;
-pub const NODE_CARD_GAP: f32 = 12.0;
+pub const NODE_CARD_GAP: f32 = 10.0;
 pub const CONTENT_PAD: f32 = 20.0;
 
 pub const STACK_HEADER_H: f32 = 50.0;
