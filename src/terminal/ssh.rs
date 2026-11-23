@@ -7,6 +7,7 @@ use crate::logs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use zeroize::Zeroizing;
@@ -68,6 +69,11 @@ pub struct Conn {
 }
 
 impl Conn {
+    /// 是否有可自动使用的认证(私钥 / Agent / 已保存的密码);没有就要在终端里手输密码,不能自动重连。
+    pub fn has_saved_auth(&self) -> bool {
+        self.auth.key.is_some() || self.auth.agent || self.auth.password.is_some()
+    }
+
     /// 从 `user@host` / `user@host:port` 解析,认证默认 SSH Agent。
     pub fn parse(user_host: &str) -> Conn {
         let (user, rest) = user_host.split_once('@').unwrap_or(("root", user_host));
@@ -85,6 +91,8 @@ pub enum Status {
     /// 正在终端里等用户输入(确认指纹 / 密码 / 口令)
     Waiting,
     Connected,
+    /// 连接中断后正在自动重连(第几次);终端画面保留,界面盖一层加载状态
+    Reconnecting(u32),
     Closed(Option<String>),
 }
 
@@ -96,6 +104,22 @@ pub struct HostKeyPrompt {
     pub algo: String,
     pub fingerprint: String,
 }
+
+/// 终端已认证的 SSH 连接,连上后放在这里;SFTP 直接在它上面开通道,不用再连一次。
+pub(crate) type Link = Arc<Mutex<Option<Arc<client::Handle<Client>>>>>;
+
+/// 一次会话结束的原因
+enum End {
+    /// shell 正常退出(用户 exit / 服务器关闭了 shell)
+    Exited,
+    /// 连接意外中断(网络断开、服务器重启),可以自动重连
+    Lost,
+    /// 界面丢弃了句柄
+    Dropped,
+}
+
+/// 自动重连的最多次数和每次之前等待的秒数
+const RECONNECT_DELAYS: [u64; 6] = [1, 2, 4, 8, 15, 30];
 
 /// 待确认的主机密钥 + 回复通道。
 pub(crate) type PendingHost = Arc<Mutex<Option<(HostKeyPrompt, Option<tokio::sync::oneshot::Sender<bool>>)>>>;
@@ -167,10 +191,21 @@ pub struct Handle {
     pub status: Arc<Mutex<Status>>,
     pub steps: Arc<Mutex<Vec<Step>>>,
     host_prompt: PendingHost,
+    ever: Arc<AtomicBool>,
+    epoch: Arc<AtomicU32>,
+    link: Link,
     abort: tokio::task::AbortHandle,
 }
 
 impl Handle {
+    /// 当前可用的已认证连接(没连上、重连中为 None)
+    pub(crate) fn session(&self) -> Option<Arc<client::Handle<Client>>> {
+        self.link.lock().ok().and_then(|g| g.clone())
+    }
+    /// 每次(重新)连上加一;SFTP 据此知道旧通道已随旧连接失效
+    pub fn generation(&self) -> u32 {
+        self.epoch.load(Ordering::Relaxed)
+    }
     /// 往会话里直接写字节(用来补发终端组件漏掉的按键)
     pub fn inputter(&self) -> tokio_mpsc::UnboundedSender<Vec<u8>> {
         self.input.clone()
@@ -196,10 +231,9 @@ impl Handle {
     pub fn steps(&self) -> Vec<Step> {
         self.steps.lock().map(|s| s.clone()).unwrap_or_default()
     }
-    /// 是否已经走完全部步骤(进过 shell)。没走完就是还在连或者连接失败,界面显示「连接中」页。
+    /// 是否进过 shell。没进过就是还在连或者连接失败,界面显示「连接中」页;进过之后断线只是盖一层重连状态。
     pub fn ever_connected(&self) -> bool {
-        let steps = self.steps();
-        steps.len() == STEP_LABELS.len() && steps.iter().all(|s| s.state == StepState::Done)
+        self.ever.load(Ordering::Relaxed)
     }
 }
 
@@ -219,27 +253,64 @@ pub fn connect(conn: Conn, cols: usize, rows: usize) -> (Input, Output, Handle) 
     let st = status.clone();
     let steps_io = steps.clone();
     let hp_io = host_prompt.clone();
+    let ever = Arc::new(AtomicBool::new(false));
+    let epoch = Arc::new(AtomicU32::new(0));
+    let link: Link = Arc::new(Mutex::new(None));
+    let (ever_io, epoch_io, link_io) = (ever.clone(), epoch.clone(), link.clone());
     let join = runtime().spawn(async move {
-        let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone(), steps: steps_io, host_prompt: hp_io };
+        let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone(), steps: steps_io, host_prompt: hp_io, ever: ever_io, epoch: epoch_io, link: link_io };
         let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
         logs::push(logs::Level::Info, &label, "开始连接");
-        let res = run(&conn, cols as u16, rows as u16, io.clone(), rs_rx).await;
-        let reason = match res {
-            Ok(()) => {
-                logs::push(logs::Level::Info, &label, "连接已关闭");
-                None
+        let size = Arc::new(Mutex::new((cols as u16, rows as u16)));
+        let mut rs_rx = rs_rx;
+        let mut attempt = 0usize;
+        let reason = loop {
+            let epoch0 = io.epoch.load(Ordering::Relaxed);
+            let (c, r) = size.lock().map(|g| *g).unwrap_or((80, 24));
+            let res = run(&conn, c, r, io.clone(), &mut rs_rx, &size).await;
+            if io.epoch.load(Ordering::Relaxed) != epoch0 {
+                attempt = 0; // 这一轮连上过,重新计数
             }
-            Err(e) => {
-                logs::push(logs::Level::Error, &label, e.clone());
-                io.say(&format!("\r\n\x1b[31m{e}\x1b[0m\r\n"));
-                io.fail_step(&e);
-                Some(e)
+            let lost = match res {
+                Ok(End::Exited) => {
+                    logs::push(logs::Level::Info, &label, "连接已关闭");
+                    break None;
+                }
+                Ok(End::Dropped) => break None,
+                Ok(End::Lost) => "连接中断".to_string(),
+                Err(e) => e,
+            };
+            // 没进过 shell、认证/指纹问题、没有可自动使用的认证、次数用完:不再自动重连
+            let retry = io.ever.load(Ordering::Relaxed) && conn.has_saved_auth() && !io.failed_at_auth() && !is_fatal(&lost) && attempt < RECONNECT_DELAYS.len();
+            if !retry {
+                logs::push(logs::Level::Error, &label, lost.clone());
+                io.say(&format!("\r\n\x1b[31m{lost}\x1b[0m\r\n"));
+                io.fail_step(&lost);
+                break Some(lost);
             }
+            let delay = RECONNECT_DELAYS[attempt];
+            attempt += 1;
+            set(&st, Status::Reconnecting(attempt as u32));
+            logs::push(logs::Level::Warn, &label, format!("{lost},{delay} 秒后自动重连({attempt}/{})", RECONNECT_DELAYS.len()));
+            io.say(&format!("\r\n\x1b[33m[{lost}:{delay} 秒后自动重连({attempt}/{})]\x1b[0m\r\n", RECONNECT_DELAYS.len()));
+            // 断线期间敲的键不要在重连后一股脑发出去
+            {
+                let mut g = io.inp.lock().await;
+                while g.try_recv().is_ok() {}
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+            io.steps.lock().map(|mut g| g.clear()).ok();
+            logs::push(logs::Level::Info, &label, "开始连接");
         };
         set(&st, Status::Closed(reason));
         // io 在这里释放,Output 读到 0
     });
-    (Input(in_tx.clone()), Output { rx: out_rx, left: Vec::new() }, Handle { input: in_tx, resize: rs_tx, status, steps, host_prompt, abort: join.abort_handle() })
+    (Input(in_tx.clone()), Output { rx: out_rx, left: Vec::new() }, Handle { input: in_tx, resize: rs_tx, status, steps, host_prompt, ever, epoch, link, abort: join.abort_handle() })
+}
+
+/// 重连也没有用的错误:主机指纹问题、认证被拒。
+fn is_fatal(e: &str) -> bool {
+    ["主机密钥", "未确认新主机", "认证失败", "读取认证信息失败"].iter().any(|k| e.contains(k))
 }
 
 fn set(st: &Arc<Mutex<Status>>, s: Status) {
@@ -255,6 +326,9 @@ pub(crate) struct Io {
     status: Arc<Mutex<Status>>,
     steps: Arc<Mutex<Vec<Step>>>,
     host_prompt: PendingHost,
+    ever: Arc<AtomicBool>,
+    epoch: Arc<AtomicU32>,
+    link: Link,
 }
 
 impl Io {
@@ -262,7 +336,7 @@ impl Io {
     pub(crate) fn headless(host_prompt: PendingHost, steps: Arc<Mutex<Vec<Step>>>) -> Io {
         let (out, _) = std_mpsc::channel();
         let (_, inp) = tokio_mpsc::unbounded_channel();
-        Io { out, inp: Arc::new(tokio::sync::Mutex::new(inp)), status: Arc::new(Mutex::new(Status::Connecting)), steps, host_prompt }
+        Io { out, inp: Arc::new(tokio::sync::Mutex::new(inp)), status: Arc::new(Mutex::new(Status::Connecting)), steps, host_prompt, ever: Arc::new(AtomicBool::new(false)), epoch: Arc::new(AtomicU32::new(0)), link: Arc::new(Mutex::new(None)) }
     }
 
     /// 挂出主机指纹确认,等界面回答(取消、会话被丢弃都算拒绝)
@@ -279,6 +353,11 @@ impl Io {
     }
 
     /// 开始下一步
+    /// 失败时正停在「身份认证」这一步(重试也没用)
+    pub(crate) fn failed_at_auth(&self) -> bool {
+        self.steps.lock().map(|g| g.len() == 2 && g.last().is_some_and(|s| s.state == StepState::Running)).unwrap_or(false)
+    }
+
     pub(crate) fn steps_empty(&self) -> bool {
         self.steps.lock().map(|g| g.is_empty()).unwrap_or(true)
     }
@@ -422,7 +501,7 @@ pub(crate) fn expand(path: &str) -> PathBuf {
 /// 连接服务器、校验主机密钥、认证,返回已认证的会话(终端和 SFTP 共用)。
 /// 过程会通过 `io` 记录步骤和日志;首次连接的指纹确认走 `io.confirm_host`。
 pub(crate) async fn open_authenticated(conn: &Conn, io: &Io) -> Result<client::Handle<Client>, String> {
-    let config = Arc::new(client::Config { inactivity_timeout: None, keepalive_interval: Some(std::time::Duration::from_secs(30)), ..Default::default() });
+    let config = Arc::new(client::Config { inactivity_timeout: None, keepalive_interval: Some(std::time::Duration::from_secs(15)), ..Default::default() });
     let handler = Client { io: io.clone(), host: conn.host.clone(), port: conn.port };
     let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
     io.begin_step(STEP_LABELS[0]);
@@ -448,9 +527,9 @@ pub(crate) async fn open_authenticated(conn: &Conn, io: &Io) -> Result<client::H
     Ok(session)
 }
 
-async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, mut resize: tokio_mpsc::UnboundedReceiver<(u16, u16)>) -> Result<(), String> {
+async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, resize: &mut tokio_mpsc::UnboundedReceiver<(u16, u16)>, size: &Arc<Mutex<(u16, u16)>>) -> Result<End, String> {
     let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
-    let session = open_authenticated(conn, &io).await?;
+    let session = Arc::new(open_authenticated(conn, &io).await?);
     io.begin_step(STEP_LABELS[2]);
     logs::push(logs::Level::Info, &label, "认证成功");
 
@@ -460,16 +539,28 @@ async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, mut resize: tokio_mpsc::
     io.done_step();
     logs::push(logs::Level::Info, &label, "已打开终端");
     set(&io.status, Status::Connected);
+    io.ever.store(true, Ordering::Relaxed);
+    io.epoch.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut g) = io.link.lock() {
+        *g = Some(session.clone());
+    }
 
     let inp = io.inp.clone();
     let mut inp = inp.lock().await;
-    loop {
+    let end = loop {
         tokio::select! {
             data = inp.recv() => match data {
-                Some(d) => ch.data(&d[..]).await.map_err(|e| e.to_string())?,
-                None => break,
+                Some(d) => {
+                    if let Err(e) = ch.data(&d[..]).await {
+                        break Err(e.to_string());
+                    }
+                }
+                None => break Ok(End::Dropped),
             },
             Some((c, r)) = resize.recv() => {
+                if let Ok(mut g) = size.lock() {
+                    *g = (c, r);
+                }
                 let _ = ch.window_change(c as u32, r as u32, 0, 0).await;
             }
             msg = ch.wait() => match msg {
@@ -477,18 +568,32 @@ async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, mut resize: tokio_mpsc::
                 Some(ChannelMsg::ExtendedData { data, .. }) => { let _ = io.out.send(data.to_vec()); }
                 Some(ChannelMsg::ExitStatus { exit_status }) => {
                     io.say(&format!("\r\n[连接已关闭,退出码 {exit_status}]\r\n"));
-                    break;
+                    break Ok(End::Exited);
                 }
                 Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
-                    io.say("\r\n[连接已关闭]\r\n");
-                    break;
+                    // 正常退出时 exit-status 可能晚一点到:再等一小会儿,等不到才算意外中断
+                    let mut exited = false;
+                    let _ = tokio::time::timeout(std::time::Duration::from_millis(600), async {
+                        while let Some(m) = ch.wait().await {
+                            if let ChannelMsg::ExitStatus { exit_status } = m {
+                                io.say(&format!("\r\n[连接已关闭,退出码 {exit_status}]\r\n"));
+                                exited = true;
+                                break;
+                            }
+                        }
+                    })
+                    .await;
+                    break Ok(if exited { End::Exited } else { End::Lost });
                 }
                 _ => {}
             },
         }
+    };
+    if let Ok(mut g) = io.link.lock() {
+        *g = None;
     }
     let _ = session.disconnect(Disconnect::ByApplication, "", "en").await;
-    Ok(())
+    end
 }
 
 async fn authenticate(conn: &Conn, io: &Io, session: &mut client::Handle<Client>) -> Result<(), String> {
@@ -569,6 +674,54 @@ async fn try_agent(conn: &Conn, session: &mut client::Handle<Client>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 端到端(默认跳过):终端连上 → SFTP 复用它的连接 → 连接被外部切断后自动重连。
+    /// 需要 `DOCKYARD_TEST_SSH=user@host:port`(SSH Agent 认证)、临时 `HOME`、`DOCKYARD_TEST_READY=<文件>`:
+    /// 测试在复用成功后写这个文件,等外部杀掉 sshd 会话进程,再期待状态走 Reconnecting → Connected 且代数加一。
+    #[test]
+    fn terminal_shares_session_and_reconnects() {
+        let Ok(target) = std::env::var("DOCKYARD_TEST_SSH") else { return };
+        let ready = std::env::var("DOCKYARD_TEST_READY").expect("DOCKYARD_TEST_READY");
+        let conn = Conn::parse(&target);
+        let (_i, _o, h) = connect(conn.clone(), 80, 24);
+        let wait = |secs: u64, what: &str, f: &dyn Fn() -> bool| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+            while std::time::Instant::now() < end {
+                if f() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            panic!("等待超时:{what};状态 {:?}", h.status());
+        };
+        wait(20, "首次连上", &|| {
+            if h.host_prompt().is_some() {
+                h.answer_host(true);
+            }
+            h.status() == Status::Connected
+        });
+        let e0 = h.generation();
+        assert!(h.ever_connected() && e0 == 1);
+
+        // SFTP 复用终端的连接
+        let sess = h.session().expect("连上后应有共享连接");
+        let sftp = crate::sftp::Sftp::connect(conn, Some((sess, e0)));
+        wait(20, "SFTP 就绪", &|| matches!(sftp.status(), crate::sftp::Status::Ready));
+        let home = sftp.home();
+        sftp.list(&home);
+        wait(20, "列目录", &|| sftp.dir(&home).is_some_and(|d| !d.loading));
+        assert!(sftp.dir(&home).unwrap().error.is_none());
+        assert_eq!(sftp.epoch(), Some(e0));
+
+        // 通知外部:可以切断连接了
+        std::fs::write(&ready, b"ready").unwrap();
+        wait(60, "进入重连", &|| matches!(h.status(), Status::Reconnecting(_)));
+        assert!(h.session().is_none(), "重连期间不应有可用连接");
+        wait(90, "重连成功", &|| h.status() == Status::Connected);
+        assert!(h.generation() > e0, "重连后代数应加一");
+        assert!(h.session().is_some());
+        assert!(h.ever_connected());
+    }
 
     #[test]
     fn parse_user_host() {

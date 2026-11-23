@@ -241,6 +241,9 @@ impl Render for Home {
             },
             Some(workspace::TabKind::Nodes) | None => div().flex_1().min_h_0().flex().flex_col().child(self.nodes_page(window, cx)),
         };
+        // 终端连接中断、自动重连时,整个标签内容区盖一层加载状态(透过它能看到后面的内容)
+        let overlay = self.reconnect_overlay(cx);
+        let body = div().relative().flex_1().min_h_0().flex().flex_col().child(body).children(overlay);
         let drawer = if is_files_tab { None } else { self.files_drawer(window, cx) };
         let dialog = self.node_dialog(window, cx);
         div()

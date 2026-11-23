@@ -3,10 +3,16 @@
 pub(crate) mod connecting;
 pub mod ssh;
 
+use ::gpui::{Animation, AnimationExt as _, Transformation, ease_out_quint, percentage};
 use gpui_xterm::{ColorPalette, TerminalConfig, TerminalView};
 
 use super::*;
 use ssh::{Conn, Status};
+
+const OVERLAY_SPIN_MS: u64 = 900;
+const OVERLAY_FADE_MS: u64 = 220;
+const OVERLAY_SCRIM: f32 = 0.62;
+const OVERLAY_PILL_H: f32 = 44.0;
 
 /// 一个服务器终端标签持有的东西。丢弃即断开连接。
 pub struct TermSession {
@@ -16,6 +22,90 @@ pub struct TermSession {
 }
 
 impl Home {
+    /// 连接中断时盖在整个标签内容区上的状态层:能透过它隐约看到后面的内容。
+    /// - 自动重连中(所有模式):转圈 + 提示;
+    /// - 重连放弃了(非终端模式;终端模式自己有「重新连接」按钮):提示 + 重新连接。
+    /// GPUI 没有背景模糊,这里用半透明遮罩压暗后面的内容代替。
+    pub(crate) fn reconnect_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let a = self.workspace.active?;
+        let tab = &self.workspace.tabs[a];
+        if !matches!(tab.kind, workspace::TabKind::Node(_)) {
+            return None;
+        }
+        // 调试:DOCKYARD_FAKE_RECONNECT=1 / =lost 在没有真实终端时也画出遮罩(截图用)
+        let fake = std::env::var("DOCKYARD_FAKE_RECONNECT").ok();
+        let (status, ever) = match (tab.term.as_ref(), fake.as_deref()) {
+            (Some(t), _) => (t.handle.status(), t.handle.ever_connected()),
+            (None, Some("lost")) => (Status::Closed(Some("连接中断".into())), true),
+            (None, Some(_)) => (Status::Reconnecting(2), true),
+            (None, None) => return None,
+        };
+        let (title, sub, lost) = match status {
+            Status::Reconnecting(n) => ("连接中断,正在重连".to_string(), format!("第 {n} 次尝试"), false),
+            Status::Closed(Some(e)) if ever && tab.mode != workspace::NodeMode::Terminal => ("连接已断开".to_string(), e, true),
+            _ => return None,
+        };
+        let glyph: AnyElement = if lost {
+            icon(IconName::WifiOff, 16.0, c::warn()).into_any_element()
+        } else {
+            icon(IconName::LoaderCircle, 16.0, c::accent())
+                .with_animation("recon-spin", Animation::new(std::time::Duration::from_millis(OVERLAY_SPIN_MS)).repeat(), |i, t| i.transform(Transformation::rotate(percentage(t))))
+                .into_any_element()
+        };
+        // 一条紧凑的胶囊:图标 + 一行文字(+ 重新连接),居中压在压暗的内容上
+        Some(
+            div()
+                .id("reconnect-overlay")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(c::bg().opacity(OVERLAY_SCRIM))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    // 节点卡片的底是半透明的,先垫一层不透明底色,免得后面的文字透上来
+                    div().rounded(px(OVERLAY_PILL_H / 2.0)).bg(c::bg()).child(
+                    div()
+                        .h(px(OVERLAY_PILL_H))
+                        .pl(px(16.0))
+                        .pr(if lost { px(7.0) } else { px(18.0) })
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .glass(OVERLAY_PILL_H / 2.0, GlassStyle::CARD)
+                        .child(glyph)
+                        .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::MEDIUM).text_color(c::text()).child(title))
+                        .child(div().max_w(px(320.0)).truncate().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(sub))
+                        .when(lost, |d| {
+                            d.child(
+                                div()
+                                    .id("overlay-reconnect")
+                                    .ml(px(4.0))
+                                    .h(px(30.0))
+                                    .px(px(12.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .rounded_full()
+                                    .bg(c::accent())
+                                    .text_color(c::on_accent())
+                                    .text_size(px(t::TYPE_CONTROL))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .cursor_pointer()
+                                    .hover(|s| s.opacity(0.88))
+                                    .child(icon(IconName::RotateCw, 13.0, c::on_accent()))
+                                    .child("重新连接")
+                                    .on_click(cx.listener(|this, _, window, cx| this.reconnect_terminal(window, cx))),
+                            )
+                        }),
+                    ),
+                )
+                .with_animation("recon-fade", Animation::new(std::time::Duration::from_millis(OVERLAY_FADE_MS)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
+                .into_any_element(),
+        )
+    }
+
     pub(crate) fn active_term(&self) -> Option<&TermSession> {
         self.workspace.active.and_then(|a| self.workspace.tabs[a].term.as_ref())
     }

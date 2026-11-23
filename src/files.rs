@@ -580,10 +580,33 @@ impl Home {
         if !self.sftp_real() {
             return;
         }
-        if self.files.sftp.is_none() {
-            let conn = self.conn_for(self.files.node);
-            self.files.sftp = Some(Sftp::connect(conn));
-            self.files.path_ready = false;
+        // 这个标签的终端已经连上就复用它的连接(开个 SFTP 通道即可);终端还没连上,等它(连接页显示终端的进度);
+        // 没有终端才自己连。终端重连后连接代数变了,旧 SFTP 随旧连接作废,在新连接上重建(路径保留)。
+        let term = self
+            .workspace
+            .active
+            .and_then(|a| self.workspace.tabs.get(a))
+            .and_then(|t| t.term.as_ref())
+            .map(|t| (t.handle.ever_connected(), t.handle.session(), t.handle.generation()));
+        match term {
+            Some((false, _, _)) => return,
+            Some((true, sess, epoch)) => {
+                if self.files.sftp.as_ref().and_then(|s| s.epoch()).is_some_and(|e| e != epoch) {
+                    self.files.sftp = None;
+                }
+                if self.files.sftp.is_none() {
+                    // 重连中(没有可用连接)就先不建,等连上
+                    let Some(sess) = sess else { return };
+                    let conn = self.conn_for(self.files.node);
+                    self.files.sftp = Some(Sftp::connect(conn, Some((sess, epoch))));
+                }
+            }
+            None => {
+                if self.files.sftp.is_none() {
+                    let conn = self.conn_for(self.files.node);
+                    self.files.sftp = Some(Sftp::connect(conn, None));
+                }
+            }
         }
         let fs = &mut self.files;
         let Some(s) = fs.sftp.as_ref() else { return };
@@ -1208,14 +1231,25 @@ impl Home {
     /// 文件管理的完整界面;`tab_mode` 为真时作为标签内容铺满,否则作为抽屉。
     fn files_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>, w: f32, tab_mode: bool) -> AnyElement {
         self.sync_sftp(cx);
-        // 真实连接没连上之前,整页显示「连接中」(步骤、指纹确认、失败原因、重试),连上后才是文件列表
-        if self.sftp_real()
-            && let Some(s) = self.files.sftp.as_ref()
-        {
+        // 真实连接没连上之前,整页显示「连接中」(步骤、指纹确认、失败原因、重试),连上后才是文件列表。
+        // 这个标签的终端还没连上时,显示的是终端的连接进度(SFTP 要等它)。
+        let early = if !self.sftp_real() {
+            None
+        } else if let Some((a, t)) = self.workspace.active.and_then(|a| self.workspace.tabs.get(a).and_then(|t| t.term.as_ref()).map(|t| (a, t))).filter(|(_, t)| !t.handle.ever_connected()) {
+            Some(self.connecting_page(crate::terminal::connecting::ConnTarget::Terminal(a), t.handle.steps(), t.handle.host_prompt(), crate::terminal::ssh::STEP_LABELS, cx))
+        } else if let Some(s) = self.files.sftp.as_ref() {
             let status = s.status();
-            if !matches!(status, SftpStatus::Ready) {
+            if matches!(status, SftpStatus::Ready) {
+                None
+            } else {
                 let prompt = if let SftpStatus::HostPrompt(p) = status { Some(p) } else { None };
-                let page = self.connecting_page(crate::terminal::connecting::ConnTarget::Sftp(tab_mode), s.steps(), prompt, crate::terminal::connecting::SFTP_STEP_LABELS, cx);
+                Some(self.connecting_page(crate::terminal::connecting::ConnTarget::Sftp(tab_mode), s.steps(), prompt, crate::terminal::connecting::SFTP_STEP_LABELS, cx))
+            }
+        } else {
+            None
+        };
+        {
+            if let Some(page) = early {
                 return if tab_mode {
                     page.into_any_element()
                 } else {

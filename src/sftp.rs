@@ -13,7 +13,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::logs;
-use crate::terminal::ssh::{Conn, HostKeyPrompt, Io, PendingHost, Step, open_authenticated, runtime};
+use crate::terminal::ssh::{Client, Conn, HostKeyPrompt, Io, PendingHost, Step, open_authenticated, runtime};
+use russh::client::Handle as SshHandle;
 
 const CHUNK: usize = 256 * 1024;
 
@@ -94,6 +95,8 @@ pub struct Sftp {
     cmd: mpsc::UnboundedSender<Cmd>,
     sh: Arc<Shared>,
     abort: tokio::task::AbortHandle,
+    /// 复用终端连接时,对应的终端连接代数;终端重连后代数变了,这个 SFTP 就作废
+    epoch: Option<u32>,
 }
 
 impl Drop for Sftp {
@@ -164,7 +167,10 @@ fn fmt_err(e: impl std::fmt::Display) -> String {
 
 // ---- 对外接口 ----------------------------------------------------------------
 impl Sftp {
-    pub fn connect(conn: Conn) -> Sftp {
+    /// `shared`:复用终端已认证的连接(和它的代数),直接开 SFTP 通道,不用再连一次;None 则自己连。
+    pub fn connect(conn: Conn, shared: Option<(Arc<SshHandle<Client>>, u32)>) -> Sftp {
+        let epoch = shared.as_ref().map(|s| s.1);
+        let shared = shared.map(|s| s.0);
         let (tx, rx) = mpsc::unbounded_channel();
         let sh = Arc::new(Shared {
             status: Mutex::new(Status::Connecting),
@@ -181,7 +187,7 @@ impl Sftp {
             let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
             logs::push(logs::Level::Info, &label, "开始连接");
             let io = Io::headless(sh2.host_prompt.clone(), sh2.steps.clone());
-            if let Err(e) = session_task(&conn, &label, &io, sh2.clone(), rx).await {
+            if let Err(e) = session_task(&conn, &label, &io, sh2.clone(), rx, shared).await {
                 logs::push(logs::Level::Error, &label, e.clone());
                 // 还没走到任何一步(没有认证信息等)也要让连接页显示失败
                 if io.steps_empty() {
@@ -191,7 +197,11 @@ impl Sftp {
                 *sh2.status.lock().unwrap() = Status::Failed(e);
             }
         });
-        Sftp { cmd: tx, sh, abort: join.abort_handle() }
+        Sftp { cmd: tx, sh, abort: join.abort_handle(), epoch }
+    }
+
+    pub fn epoch(&self) -> Option<u32> {
+        self.epoch
     }
 
     pub fn status(&self) -> Status {
@@ -273,16 +283,25 @@ impl Sftp {
 }
 
 // ---- 后台任务 ----------------------------------------------------------------
-async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<Cmd>) -> Result<(), String> {
+async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<Cmd>, shared: Option<Arc<SshHandle<Client>>>) -> Result<(), String> {
     if let Some(e) = &conn.auth_error {
         return Err(e.clone());
     }
     if conn.auth.key.is_none() && !conn.auth.agent && conn.auth.password.is_none() {
         return Err("这个节点还没有保存密码或私钥,请先在节点的「编辑」里填写".into());
     }
-    let session = open_authenticated(conn, io).await?;
+    let session = match shared {
+        Some(s) => {
+            logs::push(logs::Level::Info, label, "复用终端的连接");
+            s
+        }
+        None => {
+            let s = Arc::new(open_authenticated(conn, io).await?);
+            logs::push(logs::Level::Info, label, "认证成功");
+            s
+        }
+    };
     io.begin_step("打开 SFTP");
-    logs::push(logs::Level::Info, label, "认证成功");
     let ch = session.channel_open_session().await.map_err(|e| format!("打开会话失败:{e}"))?;
     ch.request_subsystem(true, "sftp").await.map_err(|e| format!("服务器没有启用 SFTP:{e}"))?;
     let sftp = Arc::new(SftpSession::new(ch.into_stream()).await.map_err(|e| format!("SFTP 初始化失败:{e}"))?);
@@ -648,7 +667,7 @@ mod tests {
     fn end_to_end_against_real_sshd() {
         let Ok(target) = std::env::var("DOCKYARD_TEST_SSH") else { return };
         let work = std::env::var("DOCKYARD_TEST_DIR").expect("DOCKYARD_TEST_DIR 远程可写目录");
-        let sftp = Sftp::connect(Conn::parse(&target));
+        let sftp = Sftp::connect(Conn::parse(&target), None);
         let wait = |cond: &dyn Fn() -> bool, what: &str| {
             for _ in 0..200 {
                 if cond() {
