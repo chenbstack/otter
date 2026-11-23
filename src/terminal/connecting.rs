@@ -1,0 +1,210 @@
+//! 「连接中」页:点节点卡片后先显示它,逐步展示连接过程;失败时留在这页显示原因,可重试。
+//! 没有卡片:整页居中排版,大图标 + 标题 + 横向步骤条 + 失败原因 + 操作。
+//! 密码、口令、主机密钥确认要在终端里输入,所以进入这些等待时自动切到终端画布。
+
+use ::gpui::{Animation, AnimationExt as _, bounce, ease_in_out, ease_out_quint, linear};
+use std::time::Duration;
+use gpui_kit::prelude::FluentBuilder as _;
+
+use super::ssh::{STEP_LABELS, Step, StepState};
+use super::*;
+
+impl Home {
+    pub(crate) fn connecting_view(&self, steps: Vec<Step>, cx: &mut Context<Self>) -> Div {
+        let Some(a) = self.workspace.active else { return div() };
+        let tab = &self.workspace.tabs[a];
+        let (name, conn) = match (tab.node(), tab.term.as_ref()) {
+            (Some(id), Some(t)) => {
+                let (g, n) = self.locate(id);
+                (self.groups[g].nodes[n].name.clone(), format!("{}@{}:{}", t.conn.user, t.conn.host, t.conn.port))
+            }
+            _ => (String::new(), String::new()),
+        };
+        let failed = steps.iter().any(|s| matches!(s.state, StepState::Failed(_)));
+        let hue = if failed { c::danger() } else { c::accent() };
+
+        // 横向步骤条:每列上面是「线 图标 线」,下面是名称;已完成的步骤后面那段线是绿色
+        let n = STEP_LABELS.len();
+        let col = |i: usize| {
+            let state = steps.get(i).map(|s| s.state.clone());
+            let mark: AnyElement = match &state {
+                Some(StepState::Done) => icon(IconName::CircleCheck, 20.0, c::online()).into_any_element(),
+                Some(StepState::Failed(_)) => icon(IconName::CircleX, 20.0, c::danger()).into_any_element(),
+                Some(StepState::Running) => div()
+                    .size(px(10.0))
+                    .rounded_full()
+                    .bg(c::accent())
+                    .with_animation(("conn-pulse", i), Animation::new(std::time::Duration::from_millis(900)).repeat().with_easing(bounce(ease_in_out)), |d, t| d.opacity(0.3 + 0.7 * t))
+                    .into_any_element(),
+                None => div().size(px(8.0)).rounded_full().border_1().border_color(c::ghost()).into_any_element(),
+            };
+            let code = match &state {
+                Some(StepState::Done) => 1,
+                Some(StepState::Failed(_)) => 2,
+                Some(StepState::Running) => 3,
+                None => 0,
+            };
+            // 状态变化时图标淡入(id 带上状态,换状态就重新播一次)
+            let mark = div().child(mark).with_animation(("conn-mark", i * 10 + code), Animation::new(Duration::from_millis(320)).with_easing(ease_out_quint()), |d, t| d.opacity(t));
+            let tone = match &state {
+                Some(StepState::Failed(_)) => c::danger(),
+                Some(StepState::Running) => c::text(),
+                Some(StepState::Done) => c::secondary(),
+                None => c::ghost(),
+            };
+            let line = |on: bool, show: bool| div().flex_1().h(px(1.0)).when(show, |d| d.bg(if on { c::online().opacity(0.6) } else { c::border() }));
+            let left_on = i > 0 && matches!(steps.get(i - 1).map(|s| &s.state), Some(StepState::Done));
+            let right_on = matches!(state, Some(StepState::Done));
+            // 正在进行的步骤后面那段线呼吸,表示在往下一步走
+            let right: AnyElement = if matches!(state, Some(StepState::Running)) {
+                div()
+                    .flex_1()
+                    .h(px(1.0))
+                    .bg(c::accent())
+                    .with_animation(("conn-line", i), Animation::new(Duration::from_millis(1200)).repeat().with_easing(bounce(ease_in_out)), |d, t| d.opacity(0.12 + 0.6 * t))
+                    .into_any_element()
+            } else {
+                line(right_on, i + 1 < n).into_any_element()
+            };
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(20.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .child(line(left_on, i > 0))
+                        .child(div().w(px(20.0)).flex_shrink_0().flex().items_center().justify_center().child(mark))
+                        .child(right),
+                )
+                .child(div().text_size(px(t::TYPE_CONTROL)).text_color(tone).child(STEP_LABELS[i]))
+        };
+
+        // 本次连接的日志:只看这台主机、从最近一次「开始连接」起,旧的在上,始终滚到最下面
+        let mut mine: Vec<_> = crate::logs::snapshot().into_iter().filter(|e| e.host == conn).collect();
+        mine.reverse();
+        let from = mine.iter().rposition(|e| e.msg == "开始连接").unwrap_or(0);
+        let mine = mine.split_off(from);
+        let log_rows: Vec<_> = mine
+            .into_iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let col = match e.level {
+                    crate::logs::Level::Info => c::muted(),
+                    crate::logs::Level::Warn => c::warn(),
+                    crate::logs::Level::Error => c::danger(),
+                };
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .gap(px(10.0))
+                    .text_size(px(t::TYPE_MICRO))
+                    .font_family(MONO)
+                    .child(div().w(px(56.0)).flex_shrink_0().text_color(c::ghost()).child(e.time))
+                    .child(div().flex_1().min_w_0().truncate().text_color(col).child(e.msg))
+                    .with_animation(("conn-log-row", i), Animation::new(Duration::from_millis(300)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
+            })
+            .collect();
+        let log_scroll = tab.log_scroll.clone();
+        log_scroll.scroll_to_bottom();
+        let log_rows = div().id("conn-log").flex_1().min_h_0().overflow_y_scroll().track_scroll(&log_scroll).flex().flex_col().gap(px(6.0)).children(log_rows);
+        let log_area = div()
+            .w(px(380.0))
+            .h(px(170.0))
+            .flex_shrink_0()
+            .mt(px(40.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(div().text_size(px(t::TYPE_MICRO)).font_weight(FontWeight::SEMIBOLD).text_color(c::muted()).child("连接日志"))
+            .child(log_rows);
+
+        let title = if failed { format!("无法连接 {name}") } else { format!("正在连接 {name}") };
+        let actions = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .gap(px(8.0))
+            .when(failed, |d| {
+                d.child(
+                    div()
+                        .id("conn-retry")
+                        .h(px(30.0))
+                        .px(px(14.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .rounded(px(t::RADIUS_MD))
+                        .bg(c::accent())
+                        .text_color(c::on_accent())
+                        .text_size(px(t::TYPE_CONTROL))
+                        .font_weight(FontWeight::MEDIUM)
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.88))
+                        .child(icon(IconName::RotateCw, 13.0, c::on_accent()))
+                        .child("重新连接")
+                        .on_click(cx.listener(|this, _, window, cx| this.reconnect_terminal(window, cx))),
+                )
+                .child(button("conn-logs", IconName::ScrollText, "查看日志").on_click(cx.listener(|this, _, _, cx| {
+                    this.activate(0);
+                    this.set_nodes_view(crate::nodes::NodesView::Logs, cx);
+                    cx.notify();
+                })))
+            })
+            .child(button("conn-close", IconName::X, if failed { "关闭" } else { "取消" }).on_click(cx.listener(move |this, _, _, cx| this.close_tab(a, cx))));
+
+        // 图标区:连接中向外扩散两圈涟漪;失败时图标左右抖一下
+        let ring = |k: usize, ms: u64| {
+            div().absolute().inset_0().flex().items_center().justify_center().child(
+                div()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(c::accent())
+                    .with_animation(("conn-ring", k), Animation::new(Duration::from_millis(ms)).repeat().with_easing(ease_out_quint()), |d, t| d.size(px(44.0 + 60.0 * t)).opacity(0.5 * (1.0 - t))),
+            )
+        };
+        let glyph: AnyElement = if failed {
+            div()
+                .relative()
+                .child(icon(IconName::Server, 40.0, hue))
+                .with_animation("conn-shake", Animation::new(Duration::from_millis(460)).with_easing(linear), |d, t| d.left(px(9.0 * (1.0 - t) * (t * 20.0).sin())))
+                .into_any_element()
+        } else {
+            icon(IconName::Server, 40.0, hue).into_any_element()
+        };
+        let hero = div()
+            .relative()
+            .size(px(104.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(!failed, |d| d.child(ring(0, 2000)).child(ring(1, 3000)))
+            .child(glyph);
+
+        div().flex_1().min_w_0().min_h_0().bg(c::bg()).flex().items_center().justify_center().child(
+            div()
+                .w(px(520.0))
+                .max_w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(8.0))
+                .child(hero)
+                .child(div().text_size(px(20.0)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(title))
+                .child(div().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::ghost()).child(conn))
+                .child(div().w_full().mt(px(32.0)).flex().flex_row().children((0..n).map(col)))
+                .child(div().mt(px(28.0)).child(actions))
+                .child(log_area)
+                // 页面进入:淡入并从下方轻轻升起
+                .with_animation("conn-enter", Animation::new(Duration::from_millis(420)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(16.0 * (1.0 - t)))),
+        )
+    }
+}

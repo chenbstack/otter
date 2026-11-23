@@ -1,5 +1,6 @@
 //! 终端:`gpui_xterm` 负责模拟与渲染,这里负责把它接到 SSH 通道上,并画终端标签。
 
+mod connecting;
 pub mod ssh;
 
 use gpui_xterm::{ColorPalette, TerminalConfig, TerminalView};
@@ -57,15 +58,17 @@ impl Home {
         window.focus(&fh, cx);
         // 连接状态在后台线程里变化,界面这边轮询一下,变了就重绘工具栏
         let status = handle.status.clone();
+        let steps = handle.steps.clone();
         cx.spawn(async move |this, cx| {
-            let mut last = None;
+            let mut last: Option<(Status, Vec<ssh::Step>)> = None;
             let mut log_ver = crate::logs::version();
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
                 let now = status.lock().map(|s| s.clone()).unwrap_or(Status::Closed(None));
                 let ver = crate::logs::version();
-                if last.as_ref() != Some(&now) || ver != log_ver {
-                    last = Some(now.clone());
+                let snap = (now.clone(), steps.lock().map(|s| s.clone()).unwrap_or_default());
+                if last.as_ref() != Some(&snap) || ver != log_ver {
+                    last = Some(snap);
                     log_ver = ver;
                     if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
@@ -120,7 +123,12 @@ impl Home {
     /// 终端标签的内容:只有终端画布。连接状态看标签上的图标颜色;断开后右上角浮出「重连」。
     pub(crate) fn ssh_terminal_view(&self, cx: &mut Context<Self>) -> Div {
         let Some(t) = self.active_term() else { return div() };
-        let closed = matches!(t.handle.status(), Status::Closed(_));
+        let status = t.handle.status();
+        // 没连上之前显示「连接中」页(失败也留在这页);要在终端里输入时(指纹确认、密码)切到终端画布
+        if !t.handle.ever_connected() && status != Status::Waiting {
+            return self.connecting_view(t.handle.steps(), cx);
+        }
+        let closed = matches!(status, Status::Closed(_));
         div()
             .flex_1()
             .min_w_0()

@@ -50,6 +50,23 @@ pub enum Status {
     Closed(Option<String>),
 }
 
+/// 连接过程里的一步,界面的「连接中」页据此逐步展示。
+#[derive(Clone, Debug, PartialEq)]
+pub enum StepState {
+    Running,
+    Done,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Step {
+    pub label: &'static str,
+    pub state: StepState,
+}
+
+/// 连接要走的步骤,顺序固定。
+pub const STEP_LABELS: [&str; 3] = ["连接服务器", "身份认证", "打开终端"];
+
 /// 后台 tokio 运行时,整个进程一个。
 fn runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -98,6 +115,7 @@ pub struct Handle {
     input: tokio_mpsc::UnboundedSender<Vec<u8>>,
     resize: tokio_mpsc::UnboundedSender<(u16, u16)>,
     pub status: Arc<Mutex<Status>>,
+    pub steps: Arc<Mutex<Vec<Step>>>,
     abort: tokio::task::AbortHandle,
 }
 
@@ -112,6 +130,14 @@ impl Handle {
     pub fn status(&self) -> Status {
         self.status.lock().map(|s| s.clone()).unwrap_or(Status::Closed(None))
     }
+    pub fn steps(&self) -> Vec<Step> {
+        self.steps.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+    /// 是否已经走完全部步骤(进过 shell)。没走完就是还在连或者连接失败,界面显示「连接中」页。
+    pub fn ever_connected(&self) -> bool {
+        let steps = self.steps();
+        steps.len() == STEP_LABELS.len() && steps.iter().all(|s| s.state == StepState::Done)
+    }
 }
 
 impl Drop for Handle {
@@ -125,9 +151,11 @@ pub fn connect(conn: Conn, cols: usize, rows: usize) -> (Input, Output, Handle) 
     let (in_tx, in_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
     let (rs_tx, rs_rx) = tokio_mpsc::unbounded_channel::<(u16, u16)>();
     let status = Arc::new(Mutex::new(Status::Connecting));
+    let steps = Arc::new(Mutex::new(Vec::new()));
     let st = status.clone();
+    let steps_io = steps.clone();
     let join = runtime().spawn(async move {
-        let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone() };
+        let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone(), steps: steps_io };
         let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
         logs::push(logs::Level::Info, &label, "开始连接");
         let res = run(&conn, cols as u16, rows as u16, io.clone(), rs_rx).await;
@@ -139,13 +167,14 @@ pub fn connect(conn: Conn, cols: usize, rows: usize) -> (Input, Output, Handle) 
             Err(e) => {
                 logs::push(logs::Level::Error, &label, e.clone());
                 io.say(&format!("\r\n\x1b[31m{e}\x1b[0m\r\n"));
+                io.fail_step(&e);
                 Some(e)
             }
         };
         set(&st, Status::Closed(reason));
         // io 在这里释放,Output 读到 0
     });
-    (Input(in_tx.clone()), Output { rx: out_rx, left: Vec::new() }, Handle { input: in_tx, resize: rs_tx, status, abort: join.abort_handle() })
+    (Input(in_tx.clone()), Output { rx: out_rx, left: Vec::new() }, Handle { input: in_tx, resize: rs_tx, status, steps, abort: join.abort_handle() })
 }
 
 fn set(st: &Arc<Mutex<Status>>, s: Status) {
@@ -159,9 +188,35 @@ struct Io {
     out: std_mpsc::Sender<Vec<u8>>,
     inp: Arc<tokio::sync::Mutex<tokio_mpsc::UnboundedReceiver<Vec<u8>>>>,
     status: Arc<Mutex<Status>>,
+    steps: Arc<Mutex<Vec<Step>>>,
 }
 
 impl Io {
+    /// 开始下一步
+    fn begin_step(&self, label: &'static str) {
+        if let Ok(mut g) = self.steps.lock() {
+            g.push(Step { label, state: StepState::Running });
+        }
+    }
+
+    /// 当前这步完成
+    fn done_step(&self) {
+        if let Ok(mut g) = self.steps.lock() {
+            if let Some(last) = g.last_mut().filter(|s| s.state == StepState::Running) {
+                last.state = StepState::Done;
+            }
+        }
+    }
+
+    /// 当前这步失败并记下原因。已经有失败原因(更具体的)就不覆盖。
+    fn fail_step(&self, msg: &str) {
+        if let Ok(mut g) = self.steps.lock() {
+            if let Some(last) = g.last_mut().filter(|s| s.state == StepState::Running) {
+                last.state = StepState::Failed(msg.to_string());
+            }
+        }
+    }
+
     fn say(&self, text: &str) {
         let _ = self.out.send(text.as_bytes().to_vec());
     }
@@ -252,11 +307,13 @@ async fn verify_host(io: &Io, host: &str, port: u16, key: &PublicKey) -> Result<
             } else {
                 logs::push(logs::Level::Warn, &format!("{host}:{port}"), "未确认新主机,已取消连接");
                 io.say("\x1b[31m已取消。\x1b[0m\r\n");
+                io.fail_step("未确认新主机的指纹,已取消连接");
                 Ok(false)
             }
         }
         Err(keys::Error::KeyChanged { .. }) => {
             logs::push(logs::Level::Error, &format!("{host}:{port}"), format!("主机密钥与记录不一致,已拒绝连接(新指纹 {fp})"));
+            io.fail_step(&format!("主机密钥与已记录的不一致,已拒绝连接(新指纹 {fp})。可能存在中间人攻击;若服务器确实重装过,请到「已知主机」里删除该主机的记录后重试"));
             io.say(&format!(
                 "\x1b[1;31m警告:{host}:{port} 的主机密钥与记录不一致!\x1b[0m\r\n新指纹:{fp}\r\n可能存在中间人攻击,已拒绝连接。若服务器确实重装过,请先从\r\n{} 中删除该主机的记录。\r\n",
                 path.display()
@@ -280,6 +337,9 @@ fn expand(path: &str) -> PathBuf {
 async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, mut resize: tokio_mpsc::UnboundedReceiver<(u16, u16)>) -> Result<(), String> {
     let config = Arc::new(client::Config { inactivity_timeout: None, keepalive_interval: Some(std::time::Duration::from_secs(30)), ..Default::default() });
     let handler = Client { io: io.clone(), host: conn.host.clone(), port: conn.port };
+    let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
+    io.begin_step(STEP_LABELS[0]);
+    logs::push(logs::Level::Info, &label, format!("正在连接 {}:{}", conn.host, conn.port));
     let mut session = tokio::time::timeout(std::time::Duration::from_secs(15), client::connect(config, (conn.host.as_str(), conn.port), handler))
         .await
         .map_err(|_| "连接超时".to_string())?
@@ -288,12 +348,28 @@ async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, mut resize: tokio_mpsc::
             e => format!("连接失败:{e}"),
         })?;
 
+    io.done_step();
+    logs::push(logs::Level::Info, &label, "已建立连接,主机密钥校验通过");
+    io.begin_step(STEP_LABELS[1]);
+    logs::push(
+        logs::Level::Info,
+        &label,
+        match &conn.auth {
+            AuthKind::Agent => "开始认证(SSH Agent)".to_string(),
+            AuthKind::Key { path } => format!("开始认证(私钥 {path})"),
+            AuthKind::Password => "开始认证(密码)".to_string(),
+        },
+    );
     authenticate(conn, &io, &mut session).await?;
-    logs::push(logs::Level::Info, &format!("{}@{}:{}", conn.user, conn.host, conn.port), "认证成功");
+    io.done_step();
+    io.begin_step(STEP_LABELS[2]);
+    logs::push(logs::Level::Info, &label, "认证成功");
 
     let mut ch = session.channel_open_session().await.map_err(|e| format!("打开会话失败:{e}"))?;
     ch.request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| format!("申请终端失败:{e}"))?;
     ch.request_shell(true).await.map_err(|e| format!("启动 shell 失败:{e}"))?;
+    io.done_step();
+    logs::push(logs::Level::Info, &label, "已打开终端");
     set(&io.status, Status::Connected);
 
     let inp = io.inp.clone();
