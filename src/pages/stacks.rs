@@ -9,8 +9,6 @@ pub(crate) fn menu_count(node: &Node, page: Page) -> Option<usize> {
         Page::Stacks => Some(node.stacks.len()),
         Page::Images => Some(12),
         Page::Volumes => Some(0),
-        Page::Databases => Some(0),
-        Page::Websites => Some(0),
     }
 }
 
@@ -178,10 +176,7 @@ impl Home {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(t::RADIUS_LG))
-                    .bg(c::raised_hi())
-                    .border_1()
-                    .border_color(c::border())
+                    .glass(t::RADIUS_LG, GlassStyle::CONTROL)
                     .child(icon(self.page.icon(), 18.0, c::secondary())),
             )
             .child(
@@ -240,10 +235,7 @@ impl Home {
                 .items_end()
                 .gap(px(12.0))
                 .p(px(14.0))
-                .rounded(px(t::RADIUS_XL))
-                .border_1()
-                .border_color(c::border())
-                .bg(c::raised())
+                .glass(t::RADIUS_XL, GlassStyle::CARD)
                 .child(
                     div()
                         .flex_1()
@@ -422,10 +414,7 @@ impl Home {
 
         let mut card = div()
             .w_full()
-            .rounded(px(t::RADIUS_XL))
-            .border_1()
-            .border_color(if s.expanded { c::border_strong() } else { c::border() })
-            .bg(c::raised())
+            .glass(t::RADIUS_XL, GlassStyle::CARD)
             .overflow_hidden()
             .child(header);
 
