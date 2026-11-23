@@ -37,15 +37,14 @@ pub mod c {
     pub fn net() -> Rgba { rgb(0x3fd0c9) }
     pub fn disk() -> Rgba { rgb(0xe8964c) }
     // 弹窗、抽屉:要盖住下层内容,所以不透明
-    pub fn dialog() -> Rgba { rgb(0x1A1822) }
-    pub fn dialog_footer() -> Rgba { rgb(0x15131C) }
-    pub fn dialog_border() -> Rgba { rgba(0xFFFFFF26) }
-    pub fn line() -> Rgba { rgba(0xFFFFFF14) }
-    pub fn field() -> Rgba { rgba(0xFFFFFF10) }
-    pub fn field_hover() -> Rgba { rgba(0xFFFFFF18) }
-    pub fn field_border() -> Rgba { rgba(0xFFFFFF1F) }
+    pub fn dialog() -> Rgba { rgb(0x15141F) }
+    pub fn dialog_footer() -> Rgba { rgb(0x100F19) }
+    pub fn dialog_border() -> Rgba { rgba(0x9A94E02A) }
+    pub fn line() -> Rgba { rgba(0x9A94E016) }
+    pub fn field() -> Rgba { rgba(0x9A94E00A) }
+    pub fn field_hover() -> Rgba { rgba(0x9A94E014) }
+    pub fn field_border() -> Rgba { rgba(0x9A94E022) }
     pub fn field_focus_bg() -> Rgba { rgba(0x8B80FF14) }
-    pub fn seg_on() -> Rgba { rgba(0xFFFFFF26) }
     pub fn label() -> Rgba { rgb(0xA9A8B4) }
     pub fn on_accent() -> Rgba { rgb(0xFFFFFF) }
     // 遮罩
@@ -98,11 +97,13 @@ pub struct GlassStyle {
     pub sheen: f32,
     /// 是否有外侧投影(小控件不要)
     pub shadow: bool,
+    /// 扁平:纯色底(取 `fill_top`/`hover_top`),没有顶边亮线、底部暗边和外阴影
+    pub flat: bool,
 }
 
 impl GlassStyle {
-    pub const CARD: Self = Self { fill_top: 0x2B2A4888, fill_bottom: 0x16152866, hover_top: 0x35335A98, hover_bottom: 0x1E1D3680, border: 0x9A94E024, hover_border: 0x9A94E045, sheen: 0.7, shadow: true };
-    pub const CONTROL: Self = Self { fill_top: 0x34335298, fill_bottom: 0x1D1C3478, hover_top: 0x3E3C64B0, hover_bottom: 0x26254294, border: 0x9A94E030, hover_border: 0x9A94E050, sheen: 0.5, shadow: false };
+    pub const CARD: Self = Self { fill_top: 0x201F3A78, fill_bottom: 0x201F3A78, hover_top: 0x2C2B4E90, hover_bottom: 0x2C2B4E90, border: 0x9A94E024, hover_border: 0x9A94E045, sheen: 0.0, shadow: false, flat: true };
+    pub const CONTROL: Self = Self { fill_top: 0x2A295098, fill_bottom: 0x2A295098, hover_top: 0x34335CB0, hover_bottom: 0x34335CB0, border: 0x9A94E030, hover_border: 0x9A94E050, sheen: 0.0, shadow: false, flat: true };
 }
 
 fn glass_fill(top: u32, bottom: u32) -> ::gpui::Background {
@@ -131,14 +132,16 @@ pub trait Glass: Styled + ParentElement + Sized {
         if g.shadow {
             shadows.push(BoxShadow::new(px(0.0), px(6.0), h(rgba(0x0000004D))).blur_radius(px(22.0)));
         }
-        shadows.push(BoxShadow::new(px(0.0), px(-1.0), h(rgba(0x00000040))).inset());
+        if !g.flat {
+            shadows.push(BoxShadow::new(px(0.0), px(-1.0), h(rgba(0x00000040))).inset());
+        }
         self.relative()
             .rounded(px(radius))
             .border_1()
             .border_color(rgba(g.border))
             .bg(glass_fill(g.fill_top, g.fill_bottom))
             .shadow(shadows)
-            .children(glass_sheen(radius, g.sheen))
+            .children(if g.flat { vec![] } else { glass_sheen(radius, g.sheen) })
     }
 }
 impl<T: Styled + ParentElement + Sized> Glass for T {}
@@ -150,6 +153,49 @@ pub trait GlassHover: Styled + StatefulInteractiveElement + Sized {
     }
 }
 impl<T: Styled + StatefulInteractiveElement + Sized> GlassHover for T {}
+
+/// 弹窗组件:铺满整个窗口(含标题栏)的遮罩 + 居中面板,必须作为根元素最后一个子元素渲染,盖在最上层。
+/// - 遮罩 `.occlude()` 拦住下面的界面,但**不响应点击关闭**(拖动窗口、误触都不会丢掉已填内容);
+/// - `key` 在捕获阶段拦截按键(Esc 关闭、Enter 提交等),输入框里按也生效;处理了就自己 `cx.stop_propagation()`;
+/// - 面板:宽 `width`、不透明 `surface.dialog`、`radius.2xl`、描边 + 大阴影,内容用 flex 纵向排,超高部分自己滚动(见调用方)。
+/// 面板里的关闭按钮等绝对定位元素也放进 `content`(面板是 `.relative()`)。
+pub fn modal(
+    id: &'static str,
+    width: f32,
+    key: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
+    content: impl IntoIterator<Item = AnyElement>,
+) -> Stateful<Div> {
+    let panel = div()
+        .id((id, 1usize))
+        .w(px(width))
+        .max_h_full()
+        .flex()
+        .flex_col()
+        .rounded(px(t::RADIUS_2XL))
+        .border_1()
+        .border_color(c::dialog_border())
+        .bg(c::dialog())
+        .shadow_2xl()
+        .overflow_hidden()
+        .relative()
+        .occlude()
+        .children(content);
+    div()
+        .id(id)
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(24.0))
+        .bg(c::scrim_dialog())
+        .occlude()
+        .capture_key_down(key)
+        .child(panel)
+}
 
 /// 窗口底:墨黑上铺三团光晕(玫红、紫、蓝),各区域的半透明表面叠在它上面。
 /// GPUI 没有径向渐变,用一摞半透明同心圆近似。

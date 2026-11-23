@@ -50,8 +50,13 @@ impl Home {
                     .rounded(px(t::RADIUS_MD))
                     .cursor_pointer()
                     .text_size(px(t::TYPE_BODY))
-                    .when(active, |d| d.bg(c::selected()).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
-                    .when(!active, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
+                    .when(active, |d| d.glass(t::RADIUS_MD, GlassStyle::CONTROL).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
+                    .when(!active, |d| {
+                        d.border_1()
+                            .border_color(gpui_kit::transparent_black())
+                            .text_color(c::muted())
+                            .hover(|s| s.bg(c::hover()).text_color(c::secondary()))
+                    })
                     .child(icon(v.icon(), 15.0, if active { c::accent() } else { c::ghost() }))
                     .child(div().flex_1().child(v.label()))
                     .when(n > 0, |d| {

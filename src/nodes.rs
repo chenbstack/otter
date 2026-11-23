@@ -287,14 +287,13 @@ impl Home {
                     .hover(|s| s.bg(c::hover()))
                     .child(icon(IconName::Settings2, 14.0, c::muted()))
                     .tooltip(|_, cx| cx.new(|_| crate::files::Tip("管理".into())).into())
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
-                        this.open_node(id);
-                        cx.notify();
+                        this.open_node(id, Some(crate::workspace::NodeMode::Containers), window, cx);
                     })),
             )
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.open_server_terminal(id, window, cx);
+                this.open_node(id, None, window, cx);
             }))
     }
 }

@@ -93,8 +93,13 @@ impl Home {
                     .rounded(px(t::RADIUS_MD))
                     .cursor_pointer()
                     .text_size(px(t::TYPE_BODY))
-                    .when(active, |d| d.bg(c::selected()).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
-                    .when(!active, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
+                    .when(active, |d| d.glass(t::RADIUS_MD, GlassStyle::CONTROL).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
+                    .when(!active, |d| {
+                        d.border_1()
+                            .border_color(gpui_kit::transparent_black())
+                            .text_color(c::muted())
+                            .hover(|s| s.bg(c::hover()).text_color(c::secondary()))
+                    })
                     .child(icon(p.icon(), 15.0, if active { c::accent() } else { c::ghost() }))
                     .child(div().flex_1().child(p.label()))
                     .when_some(count.filter(|n| *n > 0), |d, n| {
@@ -120,60 +125,7 @@ impl Home {
                     })),
             );
         }
-        // 点「文件」开一个文件标签页;右侧小图标开关快速抽屉
-        let files_on = self.files.open && self.files.is_host();
-        col.child(div().h(px(1.0)).mx(px(10.0)).my(px(8.0)).bg(c::border()))
-            .child(
-                div()
-                    .id("m-term")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.0))
-                    .h(px(34.0))
-                    .px(px(10.0))
-                    .rounded(px(t::RADIUS_MD))
-                    .cursor_pointer()
-                    .text_size(px(t::TYPE_BODY))
-                    .text_color(c::muted())
-                    .hover(|s| s.bg(c::hover()).text_color(c::secondary()))
-                    .child(icon(IconName::SquareTerminal, 15.0, c::ghost()))
-                    .child(div().flex_1().child("终端"))
-                    .on_click(cx.listener(|this, _, _, cx| this.open_terminal(None, cx))),
-            )
-            .child(
-                div()
-                    .id("m-files")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.0))
-                    .h(px(34.0))
-                    .px(px(10.0))
-                    .rounded(px(t::RADIUS_MD))
-                    .cursor_pointer()
-                    .text_size(px(t::TYPE_BODY))
-                    .when(files_on, |d| d.bg(c::selected()).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
-                    .when(!files_on, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
-                    .child(icon(IconName::FolderOpen, 15.0, if files_on { c::accent() } else { c::ghost() }))
-                    .child(div().flex_1().child("文件"))
-                    .child(
-                        div()
-                            .id("m-files-drawer")
-                            .size(px(24.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(t::RADIUS_SM))
-                            .hover(|s| s.bg(c::selected()))
-                            .child(icon(IconName::PanelRightOpen, 13.0, c::ghost()))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.toggle_host_files(window, cx)
-                            })),
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| this.open_files_tab(crate::files::Target::Host, window, cx))),
-            )
+        col
     }
 
     pub(crate) fn content(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -494,7 +446,7 @@ impl Home {
                     let target = files::Target::Container { stack: s.name.clone(), svc: svc.name.clone() };
                     let on_files = cx.listener(move |this, _, window, cx| this.open_files(target.clone(), window, cx));
                     let (st, sv) = (s.name.clone(), svc.name.clone());
-                    let on_term = cx.listener(move |this, _, _, cx| this.open_terminal(Some((st.clone(), sv.clone())), cx));
+                    let on_term = cx.listener(move |this, _, _, cx| this.open_terminal((st.clone(), sv.clone()), cx));
                     let (st, sv) = (s.name.clone(), svc.name.clone());
                     let on_logs = cx.listener(move |this, _, _, cx| this.open_logs(st.clone(), sv.clone(), cx));
                     r = r.child(service_card(ix * 1000 + ri * 10 + ci, svc, svc_h, self.svc_w, hide, on_files, on_term, on_logs));

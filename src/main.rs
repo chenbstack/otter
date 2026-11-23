@@ -83,6 +83,8 @@ struct Home {
     node_search: Option<Entity<gpui_kit::component::input::InputState>>,
     /// 节点页当前进入的分组(None = 全部节点)
     node_group: Option<usize>,
+    /// 标签右键菜单:(标签下标, 鼠标位置)
+    tab_menu: Option<(usize, Point<Pixels>)>,
     /// 节点页侧栏当前视图
     nodes_view: nodes::NodesView,
     /// 已知主机视图的缓存(切到该视图或删除后重新读文件)
@@ -116,6 +118,7 @@ impl Home {
             next_id,
             node_search: None,
             node_group: None,
+            tab_menu: None,
             nodes_view: nodes::NodesView::Hosts,
             known_hosts: Vec::new(),
             credentials: mock::credentials(),
@@ -186,26 +189,30 @@ impl Render for Home {
         }
         let titlebar = self.titlebar(cx);
         let active_kind = self.workspace.active.map(|a| &self.workspace.tabs[a].kind);
-        let is_term = matches!(active_kind, Some(workspace::TabKind::Terminal { container: None, .. })) && self.active_term().is_some();
-        let is_files_tab = matches!(active_kind, Some(workspace::TabKind::Files(_)));
+        let mode = self.workspace.active.map(|a| self.workspace.tabs[a].mode);
+        let on_node_tab = matches!(active_kind, Some(workspace::TabKind::Node(_)));
+        let is_term = on_node_tab && mode == Some(workspace::NodeMode::Terminal) && self.active_term().is_some();
+        let is_files_tab = on_node_tab && mode == Some(workspace::NodeMode::Files);
         let body = match active_kind {
-            Some(workspace::TabKind::Terminal { container: None, .. }) if self.active_term().is_some() => {
-                div().flex_1().min_h_0().flex().flex_col().child(self.ssh_terminal_view(cx))
-            }
             Some(workspace::TabKind::Terminal { container, .. }) => {
                 let node = self.node();
-                div().flex_1().min_h_0().flex().flex_col().child(self.terminal_view(&node.name, &node.user_host, container.as_ref()))
+                div().flex_1().min_h_0().flex().flex_col().child(self.terminal_view(&node.name, &node.user_host, Some(container)))
             }
             Some(workspace::TabKind::Logs { stack, svc, .. }) => {
                 let a = self.workspace.active.unwrap_or(0);
                 div().flex_1().min_h_0().flex().flex_col().child(self.logs_view(a, stack, svc, cx))
             }
-            Some(workspace::TabKind::Files(_)) => div().flex_1().min_h_0().flex().flex_col().child(self.files_tab(window, cx)),
-            Some(workspace::TabKind::Node(_)) => {
-                let menu = self.menu(cx);
-                let content = self.content(window, cx);
-                div().flex_1().min_h_0().flex().flex_row().child(menu).child(content)
-            }
+            Some(workspace::TabKind::Node(_)) => match mode {
+                Some(workspace::NodeMode::Terminal) if self.active_term().is_some() => {
+                    div().flex_1().min_h_0().flex().flex_col().child(self.ssh_terminal_view(cx))
+                }
+                Some(workspace::NodeMode::Files) => div().flex_1().min_h_0().flex().flex_col().child(self.files_tab(window, cx)),
+                _ => {
+                    let menu = self.menu(cx);
+                    let content = self.content(window, cx);
+                    div().flex_1().min_h_0().flex().flex_row().child(menu).child(content)
+                }
+            },
             Some(workspace::TabKind::Nodes) | None => div().flex_1().min_h_0().flex().flex_col().child(self.nodes_page(window, cx)),
         };
         let drawer = if is_files_tab { None } else { self.files_drawer(window, cx) };
@@ -223,11 +230,12 @@ impl Render for Home {
             .child(body)
             .children(drawer)
             .children(dialog)
+            .children(self.tab_menu_overlay(cx))
     }
 }
 
 fn main() {
-    // 调试参数:--shot <png> --node <g>,<n> --tabs n:<节点名>,f:<节点名>[@堆栈/服务],... --active <k> --expand <k> --plain --page <0..6> --add(打开添加节点弹窗) --files <host|堆栈/服务> --fcd <目录> --fsel <名字>
+    // 调试参数:--shot <png> --node <g>,<n> --tabs n:<节点名>(容器模式),t:<节点名>(终端模式),f:<节点名>[@堆栈/服务](SFTP 模式),... --active <k> --expand <k> --plain --page <0..6> --add(打开添加节点弹窗) --files <host|堆栈/服务> --fcd <目录> --fsel <名字>
     let args: Vec<String> = std::env::args().collect();
     let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let shot = arg("--shot");
@@ -243,6 +251,8 @@ fn main() {
     let files_arg = arg("--files");
     let fsel = arg("--fsel");
     let fcd = arg("--fcd");
+    // --mode terminal|files|containers  切换活动节点标签的模式
+    let mode_arg = arg("--mode");
     // --ssh user@host[:port]  把第一个节点的连接地址改成它,并直接打开它的终端
     let ssh_arg = arg("--ssh");
     // --nview 0..3  节点页侧栏视图:主机、钥匙串、已知主机、日志(配合 --active 0)
@@ -270,7 +280,7 @@ fn main() {
                         if let Some(node) = h.groups.get(g).and_then(|g| g.nodes.get(n)) {
                             let id = node.id;
                             h.workspace = Workspace::default();
-                            h.open_node(id);
+                            h.open_node(id, Some(workspace::NodeMode::Containers), window, cx);
                         }
                     }
                 }
@@ -284,12 +294,14 @@ fn main() {
                         };
                         let Some(id) = h.all_nodes().find(|n| n.name == name).map(|n| n.id) else { continue };
                         match kind {
-                            "n" => h.open_node(id),
+                            "n" => h.open_node(id, Some(workspace::NodeMode::Containers), window, cx),
                             "t" => {
-                                // t:节点名 = 服务器终端;t:节点名@堆栈/服务 = 容器终端
+                                // t:节点名 = 节点标签的终端模式;t:节点名@堆栈/服务 = 容器终端标签
                                 h.sel = id;
-                                let c = ct.and_then(|c| c.split_once('/')).map(|(a, b)| (a.to_string(), b.to_string()));
-                                h.open_terminal(c, cx);
+                                match ct.and_then(|c| c.split_once('/')) {
+                                    Some((a, b)) => h.open_terminal((a.to_string(), b.to_string()), cx),
+                                    None => h.open_node(id, Some(workspace::NodeMode::Terminal), window, cx),
+                                }
                             }
                             "l" => {
                                 h.sel = id;
@@ -298,13 +310,12 @@ fn main() {
                                 }
                             }
                             "f" => {
-                                // f:节点名 = 服务器文件;f:节点名@堆栈/服务 = 容器文件
+                                // f:节点名 = 节点标签的 SFTP 模式(服务器文件);f:节点名@堆栈/服务 = 同上但指向容器
                                 h.sel = id;
-                                let target = match ct.and_then(|c| c.split_once('/')) {
-                                    Some((stack, svc)) => files::Target::Container { stack: stack.into(), svc: svc.into() },
-                                    None => files::Target::Host,
-                                };
-                                h.open_files_tab(target, window, cx);
+                                h.open_node(id, Some(workspace::NodeMode::Files), window, cx);
+                                if let Some((stack, svc)) = ct.and_then(|c| c.split_once('/')) {
+                                    h.files.retarget(files::Target::Container { stack: stack.into(), svc: svc.into() });
+                                }
                                 h.files.debug_jump(fcd.clone(), fsel.clone());
                             }
                             _ => {}
@@ -317,7 +328,15 @@ fn main() {
                 if let Some(addr) = &ssh_arg {
                     let id = h.groups[0].nodes[0].id;
                     h.groups[0].nodes[0].user_host = addr.clone();
-                    h.open_server_terminal(id, window, cx);
+                    h.open_node(id, Some(workspace::NodeMode::Terminal), window, cx);
+                }
+                if let Some(m) = mode_arg.as_deref() {
+                    let m = match m {
+                        "files" => workspace::NodeMode::Files,
+                        "containers" => workspace::NodeMode::Containers,
+                        _ => workspace::NodeMode::Terminal,
+                    };
+                    h.set_mode(m, window, cx);
                 }
                 if let Some(k) = nview {
                     h.activate(0);

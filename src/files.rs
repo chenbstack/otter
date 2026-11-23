@@ -18,6 +18,7 @@ use gpui_kit::*;
 
 use super::{Home, MENU_W, MONO, TITLEBAR_H, c, icon, t};
 use crate::mock::{Node, NodeId};
+use crate::ui::{Glass as _, GlassHover as _};
 
 /// 服务器文件:三栏,通常正好盖满内容区
 const HOST_W: f32 = 1100.0;
@@ -452,16 +453,18 @@ impl Files {
         }
     }
 
-    pub fn is_host(&self) -> bool {
-        self.target == Target::Host
-    }
-
     /// 截图调试用:直接跳到某目录 / 选中某项
     pub fn debug_jump(&mut self, cd: Option<String>, sel: Option<String>) {
         if let Some(p) = cd {
             self.path = p;
         }
         self.selected = sel;
+    }
+
+    /// 截图调试用:切换目标并回到该目标的主目录
+    pub fn retarget(&mut self, target: Target) {
+        self.path = Self::home_of(&target).into();
+        self.target = target;
     }
 
     fn dir_key(&self) -> String {
@@ -504,14 +507,6 @@ impl Home {
         fs.open = true;
         fs.picker = false;
         cx.notify();
-    }
-
-    pub fn toggle_host_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.files.open && self.files.target == Target::Host {
-            self.close_files(cx);
-        } else {
-            self.open_files(Target::Host, window, cx);
-        }
     }
 
     fn close_files(&mut self, cx: &mut Context<Self>) {
@@ -746,11 +741,10 @@ fn text_btn(id: &'static str, ic: IconName, label: &'static str, accent: bool) -
                 .child(icon(ic, 13.0, c::on_accent()))
         })
         .when(!accent, |d| {
-            d.border_1()
-                .border_color(c::border_strong())
-                .bg(c::raised())
+            d.glass(t::RADIUS_MD, crate::GlassStyle::CONTROL)
+                .glass_hover(crate::GlassStyle::CONTROL)
                 .text_color(c::secondary())
-                .hover(|s| s.bg(c::raised_hi()).text_color(c::text()))
+                .hover(|s| s.text_color(c::text()))
                 .child(icon(ic, 13.0, c::muted()))
         })
         .child(label)
@@ -832,8 +826,8 @@ impl Home {
                 .rounded(px(t::RADIUS_SM))
                 .text_size(px(t::TYPE_CONTROL))
                 .cursor_pointer()
-                .when(on, |d| d.bg(c::selected()).text_color(c::text()).font_weight(FontWeight::MEDIUM))
-                .when(!on, |d| d.text_color(c::muted()).hover(|s| s.text_color(c::secondary())))
+                .when(on, |d| d.glass(t::RADIUS_SM, crate::GlassStyle::CONTROL).text_color(c::text()).font_weight(FontWeight::MEDIUM))
+                .when(!on, |d| d.border_1().border_color(gpui_kit::transparent_black()).text_color(c::muted()).hover(|s| s.text_color(c::secondary())))
                 .child(icon(ic, 13.0, if on { c::accent() } else { c::ghost() }))
                 .child(label)
         };
