@@ -321,7 +321,7 @@ impl Home {
 
 fn term_palette() -> ColorPalette {
     let a = crate::ui::TERM_ANSI;
-    let b = ColorPalette::builder().background(0x0B, 0x0A, 0x0F).background_alpha(0.0).foreground(0xC9, 0xC8, 0xD0).cursor(0x8B, 0x80, 0xFF);
+    let b = ColorPalette::builder().background(0x0B, 0x0A, 0x0F).background_alpha(0.0).foreground(crate::ui::TERM_FG.0, crate::ui::TERM_FG.1, crate::ui::TERM_FG.2).cursor(0x8B, 0x80, 0xFF);
     let b = b.black(a[0].0, a[0].1, a[0].2).red(a[1].0, a[1].1, a[1].2).green(a[2].0, a[2].1, a[2].2).yellow(a[3].0, a[3].1, a[3].2);
     let b = b.blue(a[4].0, a[4].1, a[4].2).magenta(a[5].0, a[5].1, a[5].2).cyan(a[6].0, a[6].1, a[6].2).white(a[7].0, a[7].1, a[7].2);
     let b = b.bright_black(a[8].0, a[8].1, a[8].2).bright_red(a[9].0, a[9].1, a[9].2).bright_green(a[10].0, a[10].1, a[10].2).bright_yellow(a[11].0, a[11].1, a[11].2);

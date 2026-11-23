@@ -438,6 +438,8 @@ pub const NODE_BAR_H: f32 = 34.0;
 /// 终端字号、终端画布内边距
 pub const TERM_FONT: f32 = 13.0;
 pub const TERM_PAD: f32 = 8.0;
+/// 终端默认前景色,见 `docs/design/tokens.md` 1.9 `terminal.fg`
+pub const TERM_FG: (u8, u8, u8) = (0xB3, 0xAE, 0xDB);
 /// 终端 ANSI 16 色(0–7 普通,8–15 明亮),取值见 `docs/design/tokens.md` 1.9
 pub const TERM_ANSI: [(u8, u8, u8); 16] = [
     (0x1A, 0x19, 0x23), (0xFF, 0x5C, 0x6C), (0x46, 0xD9, 0xA0), (0xFF, 0xB2, 0x4A),
