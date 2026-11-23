@@ -17,6 +17,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+mod left;
+use left::LeftSrv;
 use super::{Home, MENU_W, MONO, TITLEBAR_H, c, icon, t};
 use crate::mock::{Node, NodeId};
 use crate::sftp::{Direction, RemoteEntry, Sftp, Status as SftpStatus, TransferState};
@@ -379,6 +381,8 @@ pub struct Files {
     selected: Option<String>,
     /// 「本地」开关:打开后左边多一栏本机文件
     local: bool,
+    /// 左栏的来源:本地,或另一台服务器
+    left: LeftSrv,
     lpath: String,
     lsel: Option<String>,
     lback: Vec<String>,
@@ -517,6 +521,8 @@ struct DragLocal {
 struct DragRemote {
     name: String,
     is_dir: bool,
+    /// 来自左栏(服务器来源)而不是右栏
+    left: bool,
 }
 
 #[derive(Clone)]
@@ -537,6 +543,7 @@ impl Files {
             fwd: vec![],
             selected: None,
             local: false,
+            left: LeftSrv::default(),
             lpath: PREFS.lock().ok().and_then(|p| p.0.clone()).unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".into())),
             lsel: None,
             lback: vec![],
@@ -578,6 +585,10 @@ impl Files {
 
     /// 创建筛选输入框(需要 window 和 cx,所以不放在 `new` 里)
     pub fn init_search(&mut self, window: &mut Window, cx: &mut Context<Home>) {
+        if std::env::var_os("DOCKYARD_FILES_SRC").is_some() && self.left.search.is_none() {
+            self.left.menu = true;
+            self.left.search = Some(cx.new(|cx| InputState::new(window, cx).placeholder("搜索服务器")));
+        }
         if self.search.is_none() {
             let s = cx.new(|cx| InputState::new(window, cx).placeholder("筛选当前目录"));
             cx.observe(&s, |_, _, cx| cx.notify()).detach();
@@ -639,6 +650,8 @@ impl Files {
         {
             self.ctx = Some(CtxMenu { which: w.parse().unwrap_or(2), name: Some(n.to_string()).filter(|n| !n.is_empty()), pos: point(px(1500.0), px(330.0)) });
         }
+        // DOCKYARD_FILES_SRC=1 截图时展开左栏的来源下拉
+        self.left.menu = std::env::var_os("DOCKYARD_FILES_SRC").is_some();
         // DOCKYARD_FILES_MORE=1|2 截图时展开本地/远程栏的「更多」菜单
         self.more = std::env::var("DOCKYARD_FILES_MORE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     }
@@ -1748,6 +1761,10 @@ impl Home {
     /// 文件管理的完整界面;`tab_mode` 为真时作为标签内容铺满,否则作为抽屉。
     fn files_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>, w: f32, tab_mode: bool) -> AnyElement {
         self.sync_sftp(cx);
+        if self.files.local {
+            self.restore_left(cx);
+            self.sync_left(cx);
+        }
         // 真实连接没连上之前,整页显示「连接中」(步骤、指纹确认、失败原因、重试),连上后才是文件列表。
         // 这个标签的终端还没连上时,显示的是终端的连接进度(SFTP 要等它)。
         let early = if !self.sftp_real() {
@@ -1823,6 +1840,7 @@ impl Home {
                     .child(icon(IconName::FolderOpen, 15.0, c::accent())),
             )
             .child(div().text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::SEMIBOLD).child("文件"))
+            .when(fs.local, |d| d.child(div().ml(px(6.0)).child(self.source_button(cx))))
             .child(div().flex_1())
             .child(
                 div()
@@ -2132,7 +2150,7 @@ impl Home {
             let enter = e.is_dir().then(|| join(&path, &e.name));
             let name_r = e.name.clone();
             let row_w = list_w - 16.0;
-            let drag_item = DragRemote { name: e.name.clone(), is_dir: e.is_dir() };
+            let drag_item = DragRemote { name: e.name.clone(), is_dir: e.is_dir(), left: false };
             let folder_to = e.is_dir().then(|| join(&path, &e.name));
             rows = rows.child(
                 cols(name_el, size_el, mono(e.modified.clone(), c::muted()), mono(e.mode.clone(), c::ghost()), mono(e.owner.clone(), c::ghost()))
@@ -2150,10 +2168,19 @@ impl Home {
                     })
                     // 目录行:把本地项拖到它上面,上传到这个目录
                     .when_some(folder_to, |d, to| {
-                        d.drag_over::<DragLocal>(|s, _, _, _| s.bg(c::accent_soft())).on_drop(cx.listener(move |this, it: &DragLocal, _, cx| {
-                            cx.stop_propagation();
-                            this.upload_into(vec![it.path.clone()], to.clone(), cx);
-                        }))
+                        let to2 = to.clone();
+                        d.drag_over::<DragLocal>(|s, _, _, _| s.bg(c::accent_soft()))
+                            .on_drop(cx.listener(move |this, it: &DragLocal, _, cx| {
+                                cx.stop_propagation();
+                                this.upload_into(vec![it.path.clone()], to.clone(), cx);
+                            }))
+                            .drag_over::<DragRemote>(|s, it, _, _| if it.left { s.bg(c::accent_soft()) } else { s })
+                            .on_drop(cx.listener(move |this, it: &DragRemote, _, cx| {
+                                cx.stop_propagation();
+                                if it.left {
+                                    this.relay_drop(it, false, to2.clone(), cx);
+                                }
+                            }))
                     })
                     .on_mouse_down(MouseButton::Right, {
                         let n = name_r.clone();
@@ -2185,6 +2212,13 @@ impl Home {
             // 把本地项拖到远程栏:上传到当前目录
             .drag_over::<DragLocal>(|s, _, _, _| s.bg(c::accent().opacity(0.05)))
             .on_drop(cx.listener(|this, it: &DragLocal, _, cx| this.upload(vec![it.path.clone()], cx)))
+            .drag_over::<DragRemote>(|s, it, _, _| if it.left { s.bg(c::accent().opacity(0.05)) } else { s })
+            .on_drop(cx.listener(|this, it: &DragRemote, _, cx| {
+                if it.left {
+                    let dir = this.files.path.clone();
+                    this.relay_drop(it, false, dir, cx);
+                }
+            }))
             .child(thead)
             .child(rows)
             .children(self.ctx_menu(2, cx));
@@ -2301,7 +2335,8 @@ impl Home {
             .min_h_0()
             .flex()
             .flex_row()
-            .when(fs.local, |d| d.child(self.local_pane(pane_w, cx)))
+            .when(fs.local && fs.left.node.is_none(), |d| d.child(self.local_pane(pane_w, cx)))
+            .when(fs.local && fs.left.node.is_some(), |d| d.child(self.server_left_pane(pane_w, cx)))
             .child(remote);
 
         div()

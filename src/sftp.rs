@@ -88,6 +88,8 @@ struct Shared {
     host_prompt: PendingHost,
     steps: Arc<Mutex<Vec<Step>>>,
     next_id: AtomicU64,
+    /// 就绪后的 SFTP 会话,服务器之间中转时从这里取
+    session: Mutex<Option<Arc<SftpSession>>>,
 }
 
 /// 界面持有的一端;丢弃它会断开连接。
@@ -181,6 +183,7 @@ impl Sftp {
             host_prompt: Arc::new(Mutex::new(None)),
             steps: Arc::new(Mutex::new(Vec::new())),
             next_id: AtomicU64::new(1),
+            session: Mutex::new(None),
         });
         let sh2 = sh.clone();
         let join = runtime().spawn(async move {
@@ -198,6 +201,21 @@ impl Sftp {
             }
         });
         Sftp { cmd: tx, sh, abort: join.abort_handle(), epoch }
+    }
+
+    /// 把 `src` 服务器上的 `remote`(文件或文件夹)中转到本连接(目的服务器)的 `dst_dir` 下:
+    /// 数据只经过本机内存,按块读源、写目的,读写流水线并行,不落盘。进度记在本连接的传输列表里。
+    pub fn relay_from(&self, src: &Sftp, remote: &str, is_dir: bool, dst_dir: &str) {
+        let (Some(from), Some(to)) = (src.session(), self.session()) else {
+            notice(&self.sh, "服务器还没连上,无法传输".into());
+            return;
+        };
+        let (sh, remote, dst_dir) = (self.sh.clone(), remote.to_string(), dst_dir.to_string());
+        runtime().spawn(async move { relay(&from, &to, &sh, remote, is_dir, dst_dir).await });
+    }
+
+    pub(crate) fn session(&self) -> Option<Arc<SftpSession>> {
+        self.sh.session.lock().ok().and_then(|g| g.clone())
     }
 
     pub fn epoch(&self) -> Option<u32> {
@@ -308,6 +326,7 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
     let home = sftp.canonicalize(".").await.unwrap_or_else(|_| "/".into());
     io.done_step();
     *sh.home.lock().unwrap() = home;
+    *sh.session.lock().unwrap() = Some(sftp.clone());
     *sh.status.lock().unwrap() = Status::Ready;
     logs::push(logs::Level::Info, label, "SFTP 已就绪");
 
@@ -604,6 +623,120 @@ async fn download(sftp: &SftpSession, sh: &Shared, remote: String, is_dir: bool,
     finish(sh, id, r);
 }
 
+/// 目的服务器上已存在同名项时加 " (n)" 后缀,不覆盖
+async fn unique_remote(sftp: &SftpSession, dir: &str, name: &str) -> String {
+    let first = join_remote(dir, name);
+    if !sftp.try_exists(first.clone()).await.unwrap_or(false) {
+        return first;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.to_string(), String::new()),
+    };
+    for i in 1.. {
+        let p = join_remote(dir, &format!("{stem} ({i}){ext}"));
+        if !sftp.try_exists(p.clone()).await.unwrap_or(false) {
+            return p;
+        }
+    }
+    unreachable!()
+}
+
+/// 中转要做的事:先建目的目录,再逐个文件
+enum RelayItem {
+    Dir(String),
+    File { from: String, to: String, size: u64 },
+}
+
+fn collect_relay<'a>(src: &'a SftpSession, from: String, to: String, is_dir: bool, size: u64, out: &'a mut Vec<RelayItem>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+        if !is_dir {
+            out.push(RelayItem::File { from, to, size });
+            return Ok(());
+        }
+        out.push(RelayItem::Dir(to.clone()));
+        for e in list_dir(src, &from).await? {
+            if e.is_link {
+                continue;
+            }
+            // 源服务器给的名字要当成目的服务器上的路径分量,同样不能含 `..`、分隔符
+            if !safe_component(&e.name) {
+                return Err(format!("源服务器返回了非法文件名 {:?}", e.name));
+            }
+            collect_relay(src, join_remote(&from, &e.name), join_remote(&to, &e.name), e.is_dir, e.size, out).await?;
+        }
+        Ok(())
+    })
+}
+
+/// 读写之间缓冲的块数:读下一块的同时,前几块在写,吞吐接近两端中较慢的一边
+const PIPE_DEPTH: usize = 6;
+
+async fn relay_file(from_s: &SftpSession, to_s: &SftpSession, sh: &Shared, id: u64, from: &str, to: &str) -> Result<(), String> {
+    let mut rd = from_s.open(from.to_string()).await.map_err(|e| format!("{from}:{e}"))?;
+    let mut wr = to_s.create(to.to_string()).await.map_err(|e| format!("{to}:{e}"))?;
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(PIPE_DEPTH);
+    // move:读完后 tx 随之释放,写端的 recv 才会结束
+    let reader = async move {
+        loop {
+            let mut buf = vec![0u8; CHUNK];
+            let n = rd.read(&mut buf).await.map_err(|e| format!("{from}:{e}"))?;
+            if n == 0 {
+                return Ok::<(), String>(());
+            }
+            buf.truncate(n);
+            if tx.send(buf).await.is_err() {
+                return Ok(()); // 写端出错已退出,错误由写端报告
+            }
+        }
+    };
+    let writer = async {
+        while let Some(b) = rx.recv().await {
+            wr.write_all(&b).await.map_err(|e| format!("{to}:{e}"))?;
+            progress(sh, id, b.len() as u64);
+        }
+        wr.shutdown().await.map_err(|e| format!("{to}:{e}"))
+    };
+    tokio::try_join!(reader, writer).map(|_| ())
+}
+
+async fn relay(from_s: &SftpSession, to_s: &SftpSession, sh: &Shared, remote: String, is_dir: bool, dst_dir: String) {
+    let name = remote.trim_end_matches('/').rsplit('/').next().unwrap_or("文件").to_string();
+    if !safe_component(&name) {
+        notice(sh, format!("传输失败:非法文件名 {name:?}"));
+        return;
+    }
+    let dest = unique_remote(to_s, &dst_dir, &name).await;
+    let id = new_transfer(sh, name, Direction::Up, 1);
+    let r = async {
+        let size = if is_dir { 0 } else { from_s.metadata(remote.clone()).await.map_err(fmt_err)?.size.unwrap_or(0) };
+        let mut items = Vec::new();
+        collect_relay(from_s, remote.clone(), dest.clone(), is_dir, size, &mut items).await?;
+        let total: u64 = items.iter().map(|i| if let RelayItem::File { size, .. } = i { *size } else { 0 }).sum();
+        if let Ok(mut t) = sh.transfers.lock() {
+            if let Some(x) = t.iter_mut().find(|x| x.id == id) {
+                x.total = total.max(1);
+            }
+        }
+        for it in items {
+            match it {
+                RelayItem::Dir(p) => {
+                    if let Err(e) = to_s.create_dir(p.clone()).await {
+                        if !to_s.try_exists(p.clone()).await.unwrap_or(false) {
+                            return Err(format!("{p}:{e}"));
+                        }
+                    }
+                }
+                RelayItem::File { from, to, .. } => relay_file(from_s, to_s, sh, id, &from, &to).await?,
+            }
+        }
+        Ok(())
+    }
+    .await;
+    finish(sh, id, r);
+    relist(to_s, sh, &dst_dir).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,6 +867,47 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
         wait(&|| !busy(), "下载文件");
         assert_eq!(std::fs::read(dl.join("single.txt")).unwrap(), b"hello");
+
+        // 服务器 → 服务器:第二条独立连接作为目的端,中转文件夹(含 700KB 文件)和单文件;重名自动加后缀
+        let dst = Sftp::connect(Conn::parse(&target), None);
+        for _ in 0..200 {
+            if matches!(dst.status(), Status::Ready) {
+                break;
+            }
+            if matches!(dst.status(), Status::HostPrompt(_)) {
+                dst.answer_host(true);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let d2 = join_remote(&work, "e2e-dst");
+        dst.mkdir(&d2);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let dbusy = || dst.transfers().iter().any(|t| t.state == TransferState::Running);
+        for _ in 0..3 {
+            dst.relay_from(&sftp, &join_remote(&d, "proj"), true, &d2);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            wait(&|| !dbusy(), "中转文件夹");
+        }
+        dst.relay_from(&sftp, &join_remote(&d, "single.txt"), false, &d2);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        wait(&|| !dbusy(), "中转文件");
+        let ts = dst.transfers();
+        assert!(ts.len() == 4 && ts.iter().all(|t| t.state == TransferState::Done && t.done == t.total), "{ts:?}");
+        let list2 = |p: &str| {
+            dst.list(p);
+            for _ in 0..100 {
+                if dst.dir(p).is_some_and(|d| !d.loading) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            dst.dir(p).unwrap()
+        };
+        let top: Vec<_> = list2(&d2).entries.iter().map(|e| e.name.clone()).collect();
+        assert_eq!(top, vec!["proj", "proj (1)", "proj (2)", "single.txt"]);
+        assert_eq!(list2(&join_remote(&d2, "proj (1)")).entries.iter().find(|e| e.name == "a.txt").unwrap().size, 700_000);
+        assert_eq!(list2(&join_remote(&d2, "proj/sub")).entries[0].name, "b.txt");
+        sftp.remove(&d2, true);
 
         // 递归删除
         sftp.remove(&d, true);
