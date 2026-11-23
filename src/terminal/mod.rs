@@ -4,6 +4,9 @@ pub(crate) mod connecting;
 pub mod ssh;
 
 use ::gpui::{Animation, AnimationExt as _, Transformation, ease_out_quint, percentage};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use gpui_xterm::{ColorPalette, TerminalConfig, TerminalView};
 
 use super::*;
@@ -19,6 +22,48 @@ pub struct TermSession {
     pub view: Entity<TerminalView>,
     pub handle: ssh::Handle,
     pub conn: Conn,
+    /// 服务器是否开了括号粘贴模式(`ESC[?2004h`),粘贴时据此决定要不要包标记
+    pub bracketed_paste: Arc<AtomicBool>,
+}
+
+/// 透传 SSH 输出给终端模拟器,同时盯着 `ESC[?2004h/l`,记下括号粘贴模式的开关。
+struct PasteModeScan<R> {
+    inner: R,
+    flag: Arc<AtomicBool>,
+    /// 上一块的尾部,防止转义序列被拆在两次读取之间
+    tail: Vec<u8>,
+}
+
+impl<R: std::io::Read> std::io::Read for PasteModeScan<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        let mut hay = std::mem::take(&mut self.tail);
+        hay.extend_from_slice(&buf[..n]);
+        let find = |pat: &[u8]| hay.windows(pat.len()).rposition(|w| w == pat);
+        match (find(b"\x1b[?2004h"), find(b"\x1b[?2004l")) {
+            (Some(h), Some(l)) => self.flag.store(h > l, Ordering::Relaxed),
+            (Some(_), None) => self.flag.store(true, Ordering::Relaxed),
+            (None, Some(_)) => self.flag.store(false, Ordering::Relaxed),
+            _ => {}
+        }
+        let keep = hay.len().saturating_sub(7);
+        self.tail = hay.split_off(keep);
+        Ok(n)
+    }
+}
+
+/// 把剪贴板文字整理成可以写进 PTY 的字节:换行统一成回车;服务器开了括号粘贴就包上标记,并去掉文字里自带的结束标记。
+fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    let text = text.replace("\r\n", "\r").replace('\n', "\r");
+    if !bracketed {
+        return text.into_bytes();
+    }
+    // 去掉所有控制字符(含 ESC 和 C1),只留回车和 Tab:只删结束标记会被 `ESC[2ESC[201~01~` 这种拼接绕过
+    let text: String = text.chars().filter(|&c| c == '\r' || c == '\t' || !c.is_control()).collect();
+    let mut out = b"\x1b[200~".to_vec();
+    out.extend_from_slice(text.as_bytes());
+    out.extend_from_slice(b"\x1b[201~");
+    out
 }
 
 impl Home {
@@ -112,13 +157,15 @@ impl Home {
 
     pub(crate) fn start_session(&mut self, conn: Conn, window: &mut Window, cx: &mut Context<Self>) -> TermSession {
         let (inp, out, handle) = ssh::connect(conn.clone(), 80, 24);
+        let bracketed_paste = Arc::new(AtomicBool::new(false));
+        let out = PasteModeScan { inner: out, flag: bracketed_paste.clone(), tail: Vec::new() };
         let resizer = handle.resizer();
         let inputter = handle.inputter();
         let cfg = TerminalConfig {
             font_family: MONO.into(),
             font_size: px(TERM_FONT),
             padding: Edges::all(px(TERM_PAD)),
-            colors: ColorPalette::builder().background(0x0B, 0x0A, 0x0F).foreground(0xF5, 0xF4, 0xF7).cursor(0x8B, 0x80, 0xFF).build(),
+            colors: term_palette(),
             ..Default::default()
         };
         let view = cx.new(|cx| {
@@ -169,7 +216,7 @@ impl Home {
             }
         })
         .detach();
-        TermSession { view, handle, conn }
+        TermSession { view, handle, conn, bracketed_paste }
     }
 
     /// 重新连接:丢弃旧会话,用同样的连接信息开新会话。
@@ -202,7 +249,32 @@ impl Home {
             .min_h_0()
             .relative()
             .bg(c::bg())
-            .child(div().size_full().child(t.view.clone()))
+            .child({
+                // gpui_xterm 只认 Ctrl+C/V,macOS 上的 Cmd+C/V 在这里接管;粘贴自己写,才能支持括号粘贴
+                let view = t.view.clone();
+                let inputter = t.handle.inputter();
+                let bracketed = t.bracketed_paste.clone();
+                div().size_full().child(t.view.clone()).capture_key_down(move |ev, _, cx| {
+                    let m = &ev.keystroke.modifiers;
+                    if !m.platform || m.control || m.alt {
+                        return;
+                    }
+                    match ev.keystroke.key.as_str() {
+                        "v" => {
+                            if let Ok(text) = gpui_xterm::Clipboard::new().and_then(|mut c| c.paste()) {
+                                let _ = inputter.send(paste_bytes(&text, bracketed.load(Ordering::Relaxed)));
+                            }
+                            cx.stop_propagation();
+                        }
+                        "c" => {
+                            if view.read(cx).copy_selection() {
+                                cx.stop_propagation();
+                            }
+                        }
+                        _ => {}
+                    }
+                })
+            })
             .when(closed, |d| {
                 d.child(
                     div()
@@ -227,5 +299,57 @@ impl Home {
                         .on_click(cx.listener(|this, _, window, cx| this.reconnect_terminal(window, cx))),
                 )
             })
+    }
+}
+
+fn term_palette() -> ColorPalette {
+    let a = crate::ui::TERM_ANSI;
+    let b = ColorPalette::builder().background(0x0B, 0x0A, 0x0F).foreground(0xC9, 0xC8, 0xD0).cursor(0x8B, 0x80, 0xFF);
+    let b = b.black(a[0].0, a[0].1, a[0].2).red(a[1].0, a[1].1, a[1].2).green(a[2].0, a[2].1, a[2].2).yellow(a[3].0, a[3].1, a[3].2);
+    let b = b.blue(a[4].0, a[4].1, a[4].2).magenta(a[5].0, a[5].1, a[5].2).cyan(a[6].0, a[6].1, a[6].2).white(a[7].0, a[7].1, a[7].2);
+    let b = b.bright_black(a[8].0, a[8].1, a[8].2).bright_red(a[9].0, a[9].1, a[9].2).bright_green(a[10].0, a[10].1, a[10].2).bright_yellow(a[11].0, a[11].1, a[11].2);
+    b.bright_blue(a[12].0, a[12].1, a[12].2).bright_magenta(a[13].0, a[13].1, a[13].2).bright_cyan(a[14].0, a[14].1, a[14].2).bright_white(a[15].0, a[15].1, a[15].2).build()
+}
+
+#[cfg(test)]
+mod paste_tests {
+    // 不能 `use super::*`:它会带进 gpui 的 `test` 属性宏,盖掉标准的 `#[test]`
+    use super::{PasteModeScan, paste_bytes};
+    use std::io::Read;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn paste_normalizes_newlines_and_brackets() {
+        assert_eq!(paste_bytes("a\nb\r\nc", false), b"a\rb\rc");
+        assert_eq!(paste_bytes("a\nb", true), b"\x1b[200~a\rb\x1b[201~");
+        assert_eq!(paste_bytes("x\x1b[201~rm", true), b"\x1b[200~x[201~rm\x1b[201~");
+        // 拼接绕过:去掉 ESC 后不会再出现结束标记
+        let out = paste_bytes("a\x1b[2\x1b[201~01~b\u{9b}c\x07", true);
+        assert_eq!(out, b"\x1b[200~a[2[201~01~bc\x1b[201~");
+        assert_eq!(out.windows(6).filter(|w| *w == b"\x1b[201~").count(), 1);
+    }
+
+    #[test]
+    fn scan_detects_mode_split_across_reads() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let chunks: Vec<&[u8]> = vec![b"hi \x1b[?20", b"04h$ ", b"\x1b[?2004l"];
+        struct Seq(std::vec::IntoIter<&'static [u8]>);
+        impl Read for Seq {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let c = self.0.next().unwrap_or(b"");
+                buf[..c.len()].copy_from_slice(c);
+                Ok(c.len())
+            }
+        }
+        let leaked: Vec<&'static [u8]> = chunks.into_iter().map(|c| &*Box::leak(c.to_vec().into_boxed_slice())).collect();
+        let mut s = PasteModeScan { inner: Seq(leaked.into_iter()), flag: flag.clone(), tail: Vec::new() };
+        let mut buf = [0u8; 64];
+        s.read(&mut buf).unwrap();
+        assert!(!flag.load(Ordering::Relaxed));
+        s.read(&mut buf).unwrap();
+        assert!(flag.load(Ordering::Relaxed));
+        s.read(&mut buf).unwrap();
+        assert!(!flag.load(Ordering::Relaxed));
     }
 }
