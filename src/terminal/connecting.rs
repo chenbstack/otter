@@ -240,7 +240,7 @@ impl Home {
             .when(!failed, |d| d.child(ring(0, 2000)).child(ring(1, 3000)))
             .child(glyph);
 
-        div().flex_1().min_w_0().min_h_0().bg(c::bg()).flex().items_center().justify_center().child(
+        div().flex_1().min_w_0().min_h_0().flex().items_center().justify_center().child(
             div()
                 .w(px(520.0))
                 .max_w_full()

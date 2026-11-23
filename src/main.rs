@@ -219,7 +219,6 @@ impl Render for Home {
         let active_kind = self.workspace.active.map(|a| &self.workspace.tabs[a].kind);
         let mode = self.workspace.active.map(|a| self.workspace.tabs[a].mode);
         let on_node_tab = matches!(active_kind, Some(workspace::TabKind::Node(_)));
-        let is_term = on_node_tab && mode == Some(workspace::NodeMode::Terminal) && self.active_term().is_some();
         let is_files_tab = on_node_tab && mode == Some(workspace::NodeMode::Files);
         let body = match active_kind {
             Some(workspace::TabKind::Terminal { container, .. }) => {
@@ -255,8 +254,7 @@ impl Render for Home {
             .flex_col()
             .bg(c::bg())
             .text_color(c::text())
-            // 服务器终端标签用纯色底,不铺光晕,标题栏和终端画布才是同一个颜色
-            .when(!is_term, |d| d.child(backdrop()))
+            .child(backdrop())
             .child(titlebar)
             .child(body)
             .children(drawer)

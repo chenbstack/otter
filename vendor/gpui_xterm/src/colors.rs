@@ -296,6 +296,13 @@ impl ColorPaletteBuilder {
         self
     }
 
+    /// 默认背景的不透明度(dockyard 加的):0 表示不填底,让窗口底的光晕透出来。
+    /// 服务器指定了背景色的格子仍照常画色块。
+    pub fn background_alpha(mut self, a: f32) -> Self {
+        self.palette.background.a = a;
+        self
+    }
+
     pub fn foreground(mut self, r: u8, g: u8, b: u8) -> Self {
         self.palette.foreground = rgb_to_hsla(Rgb { r, g, b });
         self
