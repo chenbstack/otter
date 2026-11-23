@@ -52,7 +52,8 @@ impl Home {
                 .border_1()
                 .text_size(px(t::TYPE_CONTROL))
                 .cursor_pointer()
-                .when(on, |d| d.bg(c::raised_hi()).border_color(c::border_strong()).text_color(c::text()).font_weight(FontWeight::MEDIUM))
+                .relative()
+                .when(on, |d| d.glass(t::RADIUS_MD, GlassStyle::CONTROL).text_color(c::text()).font_weight(FontWeight::MEDIUM))
                 .when(!on, |d| {
                     d.border_color(gpui_kit::transparent_black())
                         .text_color(c::muted())
@@ -99,7 +100,7 @@ impl Home {
             .pl(px(TITLEBAR_PAD_L))
             .pr(px(CONTENT_PAD))
             .child(pinned)
-            .child(div().w(px(1.0)).h(px(14.0)).mx(px(4.0)).flex_shrink_0().bg(c::border_strong()))
+            .child(div().w(px(8.0)).flex_shrink_0())
             .child(div().id("tabs").flex().flex_row().items_center().gap(px(4.0)).min_w_0().overflow_x_scroll().children(rest))
     }
 }

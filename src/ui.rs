@@ -17,7 +17,7 @@ pub mod c {
     pub fn sunken() -> Rgba { rgba(0x00000080) }
     pub fn selected() -> Rgba { rgba(0xFFFFFF2B) }
     pub fn hover() -> Rgba { rgba(0xFFFFFF14) }
-    pub fn border() -> Rgba { rgba(0xFFFFFF1F) }
+    pub fn border() -> Rgba { rgba(0xFFFFFF0F) }
     pub fn border_strong() -> Rgba { rgba(0xFFFFFF38) }
     pub fn text() -> Rgba { rgb(0xF5F4F7) }
     pub fn secondary() -> Rgba { rgb(0xC9C8D0) }
@@ -54,6 +54,102 @@ pub mod c {
     // 文件类型
     pub fn folder() -> Rgba { rgb(0x7fa8f0) }
 }
+
+/// 玻璃的顶边镜面亮线:一条两头渐隐的 1px 白线(不再有左上角的白色柔光,那会让卡片发白发灰)。
+/// 使用方要先 `.relative()`;`radius` 取元素自己的圆角;`strength` 是强度倍数。
+pub fn glass_sheen(radius: f32, strength: f32) -> Vec<Div> {
+    use gpui_kit::rgba;
+    let w = |a: f32| -> gpui_kit::Rgba { gpui_kit::rgb(0xFFFFFF).opacity(a * strength) };
+    let line = div()
+        .absolute()
+        .top_0()
+        .left(px(radius))
+        .right(px(radius))
+        .h(px(1.0))
+        .flex()
+        .flex_row()
+        .child(div().flex_1().h_full().bg(gpui::linear_gradient(
+            90.0,
+            gpui::linear_color_stop(rgba(0xFFFFFF00), 0.0),
+            gpui::linear_color_stop(w(0.30), 1.0),
+        )))
+        .child(div().flex_1().h_full().bg(gpui::linear_gradient(
+            90.0,
+            gpui::linear_color_stop(w(0.30), 0.0),
+            gpui::linear_color_stop(rgba(0xFFFFFF00), 1.0),
+        )));
+    vec![line]
+}
+
+/// 玻璃风格的参数。预设:`GlassStyle::CARD`(卡片、列表行)、`GlassStyle::CONTROL`(按钮、标签、小控件)。
+/// 深色半透明玻璃:底色是带一点靛蓝的近黑色渐变(不用白色提亮,避免发灰发白),描边用很淡的鸢尾色,只有顶边一条细亮线。
+/// 颜色字段都是 0xRRGGBBAA。
+#[derive(Clone, Copy)]
+pub struct GlassStyle {
+    /// 底色渐变(顶、底);悬停时换成 `hover_*`
+    pub fill_top: u32,
+    pub fill_bottom: u32,
+    pub hover_top: u32,
+    pub hover_bottom: u32,
+    /// 描边
+    pub border: u32,
+    pub hover_border: u32,
+    /// 顶边亮线强度倍数,见 `glass_sheen`
+    pub sheen: f32,
+    /// 是否有外侧投影(小控件不要)
+    pub shadow: bool,
+}
+
+impl GlassStyle {
+    pub const CARD: Self = Self { fill_top: 0x2B2A4888, fill_bottom: 0x16152866, hover_top: 0x35335A98, hover_bottom: 0x1E1D3680, border: 0x9A94E024, hover_border: 0x9A94E045, sheen: 0.7, shadow: true };
+    pub const CONTROL: Self = Self { fill_top: 0x34335298, fill_bottom: 0x1D1C3478, hover_top: 0x3E3C64B0, hover_bottom: 0x26254294, border: 0x9A94E030, hover_border: 0x9A94E050, sheen: 0.5, shadow: false };
+}
+
+fn glass_fill(top: u32, bottom: u32) -> ::gpui::Background {
+    use gpui_kit::rgba;
+    ::gpui::linear_gradient(
+        180.0,
+        ::gpui::linear_color_stop(rgba(top), 0.0),
+        ::gpui::linear_color_stop(rgba(bottom), 1.0),
+    )
+}
+
+/// 给任何元素套上「玻璃」外观:深色半透明渐变底 + 淡鸢尾描边 + 顶边镜面亮线 + 底部暗边 + 可选外阴影。
+/// ```ignore
+/// div().id("card").glass(t::RADIUS_LG, GlassStyle::CARD).glass_hover(GlassStyle::CARD)
+/// ```
+/// `glass` 会设置 `.relative()`、圆角、边框、底色、阴影并追加亮线子元素,不要再覆盖这些属性。
+/// 需要手型光标和悬停提亮的元素再接 `glass_hover`(要求元素有 id)。
+///
+/// GPUI 没有背景模糊,所以不追求"透出模糊背景"的 iOS 玻璃,而是做深色磨砂质感:靠半透明让窗口底的光晕隐约透出。
+pub trait Glass: Styled + ParentElement + Sized {
+    fn glass(self, radius: f32, g: GlassStyle) -> Self {
+        use ::gpui::{BoxShadow, Hsla};
+        use gpui_kit::rgba;
+        let h = |c: gpui_kit::Rgba| -> Hsla { c.into() };
+        let mut shadows = Vec::new();
+        if g.shadow {
+            shadows.push(BoxShadow::new(px(0.0), px(6.0), h(rgba(0x0000004D))).blur_radius(px(22.0)));
+        }
+        shadows.push(BoxShadow::new(px(0.0), px(-1.0), h(rgba(0x00000040))).inset());
+        self.relative()
+            .rounded(px(radius))
+            .border_1()
+            .border_color(rgba(g.border))
+            .bg(glass_fill(g.fill_top, g.fill_bottom))
+            .shadow(shadows)
+            .children(glass_sheen(radius, g.sheen))
+    }
+}
+impl<T: Styled + ParentElement + Sized> Glass for T {}
+
+pub trait GlassHover: Styled + StatefulInteractiveElement + Sized {
+    fn glass_hover(self, g: GlassStyle) -> Self {
+        use gpui_kit::rgba;
+        self.cursor_pointer().hover(move |s| s.bg(glass_fill(g.hover_top, g.hover_bottom)).border_color(rgba(g.hover_border)))
+    }
+}
+impl<T: Styled + StatefulInteractiveElement + Sized> GlassHover for T {}
 
 /// 窗口底:墨黑上铺三团光晕(玫红、紫、蓝),各区域的半透明表面叠在它上面。
 /// GPUI 没有径向渐变,用一摞半透明同心圆近似。
@@ -221,14 +317,11 @@ pub fn button(id: &'static str, ic: IconName, label: &'static str) -> Stateful<D
         .gap(px(6.0))
         .h(px(30.0))
         .px(px(11.0))
-        .rounded(px(t::RADIUS_MD))
-        .border_1()
-        .border_color(c::border_strong())
-        .bg(c::raised())
+        .glass(t::RADIUS_MD, GlassStyle::CONTROL)
+        .glass_hover(GlassStyle::CONTROL)
         .text_size(px(t::TYPE_CONTROL))
         .text_color(c::secondary())
-        .cursor_pointer()
-        .hover(|s| s.bg(c::raised_hi()).text_color(c::text()))
+        .hover(|s| s.text_color(c::text()))
         .child(icon(ic, 13.0, c::muted()))
         .child(label)
 }

@@ -34,7 +34,7 @@ impl Home {
     }
 
     fn nodes_side(&self, cx: &mut Context<Self>) -> Div {
-        let mut col = div().w(px(NODES_SIDE_W)).flex_shrink_0().h_full().flex().flex_col().gap(px(2.0)).p(px(12.0)).bg(c::chrome()).border_r_1().border_color(c::border());
+        let mut col = div().w(px(NODES_SIDE_W)).flex_shrink_0().h_full().flex().flex_col().gap(px(6.0)).px(px(12.0)).pt(px(16.0)).pb(px(12.0)).bg(c::chrome()).border_r_1().border_color(c::border());
         for (i, v) in NodesView::ALL.into_iter().enumerate() {
             let active = self.nodes_view == v;
             let n = self.view_count(v);
@@ -46,7 +46,7 @@ impl Home {
                     .items_center()
                     .gap(px(10.0))
                     .h(px(34.0))
-                    .px(px(10.0))
+                    .px(px(12.0))
                     .rounded(px(t::RADIUS_MD))
                     .cursor_pointer()
                     .text_size(px(t::TYPE_BODY))
@@ -112,18 +112,7 @@ impl Home {
 
     /// 玻璃质感的行容器(与节点卡片同一套底色和描边)
     fn glass_row(id: impl Into<ElementId>) -> Stateful<Div> {
-        div()
-            .id(id)
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
-            .px(px(14.0))
-            .min_h(px(46.0))
-            .rounded(px(t::RADIUS_LG))
-            .border_1()
-            .border_color(rgba(0xFFFFFF17))
-            .bg(rgba(0xFFFFFF0F))
+        div().id(id).glass(t::RADIUS_LG, GlassStyle::CARD).flex().flex_row().items_center().gap(px(12.0)).px(px(14.0)).min_h(px(46.0))
     }
 
     fn rows_scroll(id: &'static str, rows: Vec<Stateful<Div>>) -> Stateful<Div> {

@@ -214,6 +214,8 @@ impl Home {
     fn card_shell(id: ElementId, w: f32) -> Stateful<Div> {
         div()
             .id(id)
+            .glass(t::RADIUS_LG, GlassStyle::CARD)
+            .glass_hover(GlassStyle::CARD)
             .w(px(w))
             .h(px(NODE_CARD_H))
             .flex_shrink_0()
@@ -222,38 +224,6 @@ impl Home {
             .items_center()
             .gap(px(10.0))
             .px(px(12.0))
-            .rounded(px(t::RADIUS_LG))
-            .border_1()
-            .relative()
-            .border_color(rgba(0xFFFFFF17))
-            .bg(rgba(0xFFFFFF0F))
-            .cursor_pointer()
-            .hover(|s| s.bg(rgba(0xFFFFFF18)).border_color(rgba(0xFFFFFF33)))
-            // 磨砂玻璃的高光:左上角一片柔光 + 顶边一条镜面亮线
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .rounded(px(t::RADIUS_LG))
-                    .bg(gpui::linear_gradient(
-                        135.0,
-                        gpui::linear_color_stop(rgba(0xFFFFFF1F), 0.0),
-                        gpui::linear_color_stop(rgba(0xFFFFFF00), 0.55),
-                    )),
-            )
-            .child(
-                div().absolute().top_0().left(px(14.0)).right(px(14.0)).h(px(1.0)).flex().flex_row()
-                    .child(div().flex_1().h_full().bg(gpui::linear_gradient(
-                        90.0,
-                        gpui::linear_color_stop(rgba(0xFFFFFF00), 0.0),
-                        gpui::linear_color_stop(rgba(0xFFFFFF4D), 1.0),
-                    )))
-                    .child(div().flex_1().h_full().bg(gpui::linear_gradient(
-                        90.0,
-                        gpui::linear_color_stop(rgba(0xFFFFFF4D), 0.0),
-                        gpui::linear_color_stop(rgba(0xFFFFFF00), 1.0),
-                    ))),
-            )
     }
 
     fn folder_card(&self, gi: usize, g: &Group, w: f32, cx: &mut Context<Self>) -> Stateful<Div> {
