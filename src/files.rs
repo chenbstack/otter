@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use ::gpui::{Animation, AnimationExt as _, ease_out_quint};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputState};
@@ -26,6 +27,9 @@ const HOST_W: f32 = 1100.0;
 /// 容器文件:两栏,容器里通常只关心挂载卷和少数配置
 const CT_W: f32 = 760.0;
 const MIN_W: f32 = 480.0;
+
+/// 筛选框展开/收起动画时长
+const SEARCH_ANIM_MS: u64 = 180;
 
 const K: u64 = 1024;
 const M: u64 = 1024 * K;
@@ -353,6 +357,12 @@ pub struct Files {
     lback: Vec<String>,
     lfwd: Vec<String>,
     lsearch: Option<Entity<InputState>>,
+    /// 筛选框是否展开(平时只显示一个图标)
+    lsopen: bool,
+    sopen: bool,
+    /// 正在播收起动画(播完才真正收起)
+    lsclosing: bool,
+    sclosing: bool,
     /// 展开的「更多」菜单:0 无,1 本地栏,2 远程栏
     more: u8,
     search: Option<Entity<InputState>>,
@@ -381,6 +391,10 @@ impl Files {
             lback: vec![],
             lfwd: vec![],
             lsearch: None,
+            lsopen: false,
+            sopen: false,
+            lsclosing: false,
+            sclosing: false,
             more: 0,
             search: None,
             notice: None,
@@ -424,8 +438,14 @@ impl Files {
             self.path = p;
         }
         self.selected = sel;
-        // 调试:DOCKYARD_FILES_LOCAL=1 截图时打开「本地」栏
-        self.local = std::env::var_os("DOCKYARD_FILES_LOCAL").is_some();
+        // 调试:DOCKYARD_FILES_LOCAL=0 截图时关闭双栏(默认打开);DOCKYARD_FILES_SEARCH=1 展开两个筛选框
+        if std::env::var("DOCKYARD_FILES_LOCAL").as_deref() == Ok("0") {
+            self.local = false;
+        }
+        if std::env::var_os("DOCKYARD_FILES_SEARCH").is_some() {
+            self.sopen = true;
+            self.lsopen = true;
+        }
         // DOCKYARD_FILES_MORE=1|2 截图时展开本地/远程栏的「更多」菜单
         self.more = std::env::var("DOCKYARD_FILES_MORE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     }
@@ -447,6 +467,8 @@ impl Files {
         f.node = node;
         f.target = target;
         f.open = true;
+        // SFTP 模式默认双栏(左本地右远程)
+        f.local = true;
         f
     }
 
@@ -1014,23 +1036,7 @@ impl Home {
                     .on_click(cx.listener(move |this, _, _, cx| this.local_go(to.clone(), cx))),
             );
         }
-        let search = fs.lsearch.clone().map(|s| {
-            div()
-                .w(px(if pane_w < 640.0 { 130.0 } else { 180.0 }))
-                .flex_shrink_0()
-                .h(px(30.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .pl(px(9.0))
-                .rounded(px(t::RADIUS_MD))
-                .bg(c::sunken())
-                .border_1()
-                .border_color(c::border())
-                .text_size(px(t::TYPE_CONTROL))
-                .child(icon(IconName::Search, 13.0, c::ghost()))
-                .child(div().flex_1().child(Input::new(&s).appearance(false).with_size(px(12.0 / 0.875))))
-        });
+        let search = self.filter_box(1, pane_w, cx);
         let more_items = vec![(MenuItem::new("新建文件夹").icon(IconName::FolderPlus), 0u8), (MenuItem::new("上传到服务器").icon(IconName::Upload), 1)];
         let toolbar = div()
             .flex()
@@ -1383,23 +1389,7 @@ impl Home {
                     .tooltip(move |_, cx| cx.new(|_| Tip(format!("宿主机路径 {host}"))).into()),
             );
         }
-        let search = fs.search.clone().map(|s| {
-            div()
-                .w(px(if pane_w < 640.0 { 130.0 } else { 180.0 }))
-                .flex_shrink_0()
-                .h(px(30.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .pl(px(9.0))
-                .rounded(px(t::RADIUS_MD))
-                .bg(c::sunken())
-                .border_1()
-                .border_color(c::border())
-                .text_size(px(t::TYPE_CONTROL))
-                .child(icon(IconName::Search, 13.0, c::ghost()))
-                .child(div().flex_1().child(Input::new(&s).appearance(false).with_size(px(12.0 / 0.875))))
-        });
+        let search = self.filter_box(2, pane_w, cx);
         let mut more_items = vec![(MenuItem::new("新建文件夹").icon(IconName::FolderPlus), 0u8), (MenuItem::new("上传").icon(IconName::Upload), 1)];
         if selected.is_some() {
             if self.sftp_real() {
@@ -1732,6 +1722,102 @@ impl Home {
 
 
 impl Home {
+    /// 筛选框:平时只是一个搜索图标;点击展开成输入框并聚焦,尾部的 × 清空并收起。
+    /// `which`:1 本地栏,2 远程栏。
+    fn filter_box(&self, which: u8, pane_w: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let fs = &self.files;
+        let (state, open, closing) = if which == 1 { (fs.lsearch.clone()?, fs.lsopen, fs.lsclosing) } else { (fs.search.clone()?, fs.sopen, fs.sclosing) };
+        let set_open = move |this: &mut Home, v: bool| {
+            if which == 1 {
+                this.files.lsopen = v;
+            } else {
+                this.files.sopen = v;
+            }
+        };
+        if !open {
+            let st = state.clone();
+            return Some(
+                tool_btn(if which == 1 { "l-search" } else { "r-search" }, IconName::Search, true)
+                    .tooltip(|_, cx| cx.new(|_| Tip("筛选".into())).into())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        set_open(this, true);
+                        window.focus(&st.focus_handle(cx), cx);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+        let st = state.clone();
+        let full = if pane_w < 640.0 { 150.0 } else { 200.0 };
+        Some(
+            div()
+                .id((if which == 1 { "l-search-box" } else { "r-search-box" }, closing as usize))
+                .w(px(full))
+                .overflow_hidden()
+                .flex_shrink_0()
+                .h(px(30.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .pl(px(9.0))
+                .pr(px(3.0))
+                .rounded(px(t::RADIUS_MD))
+                .bg(c::sunken())
+                .border_1()
+                .border_color(c::border())
+                .text_size(px(t::TYPE_CONTROL))
+                .child(icon(IconName::Search, 13.0, c::ghost()))
+                .child(div().flex_1().min_w_0().child(Input::new(&state).appearance(false).with_size(px(12.0 / 0.875))))
+                .child(
+                    div()
+                        .id(if which == 1 { "l-search-close" } else { "r-search-close" })
+                        .size(px(22.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(t::RADIUS_SM))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(c::hover()))
+                        .child(icon(IconName::X, 13.0, c::muted()))
+                        .tooltip(|_, cx| cx.new(|_| Tip("清空并关闭".into())).into())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            // 先清空(列表立刻恢复),再播收起动画,播完真正收起
+                            st.update(cx, |s, cx| s.set_value("", window, cx));
+                            if which == 1 {
+                                this.files.lsclosing = true;
+                            } else {
+                                this.files.sclosing = true;
+                            }
+                            cx.notify();
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(Duration::from_millis(SEARCH_ANIM_MS)).await;
+                                let _ = this.update(cx, |this, cx| {
+                                    set_open(this, false);
+                                    if which == 1 {
+                                        this.files.lsclosing = false;
+                                    } else {
+                                        this.files.sclosing = false;
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
+                        })),
+                )
+                // 展开:从图标宽度长到完整宽度并淡入;收起:反过来
+                .with_animation(
+                    (if which == 1 { "l-search-anim" } else { "r-search-anim" }, closing as usize),
+                    Animation::new(Duration::from_millis(SEARCH_ANIM_MS)).with_easing(ease_out_quint()),
+                    move |d, t| {
+                        let t = if closing { 1.0 - t } else { t };
+                        d.w(px(28.0 + (full - 28.0) * t)).opacity(0.25 + 0.75 * t)
+                    },
+                )
+                .into_any_element(),
+        )
+    }
+
     /// 真实 SFTP 在表格区域的状态:连接中、确认主机指纹、连接失败、加载中、读取出错。
     /// 正常显示文件列表时返回 None。
     fn sftp_state_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
