@@ -263,7 +263,6 @@ fn expand(path: &str) -> PathBuf {
 }
 
 async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, mut resize: tokio_mpsc::UnboundedReceiver<(u16, u16)>) -> Result<(), String> {
-    io.say(&format!("正在连接 {}@{}:{} ...\r\n", conn.user, conn.host, conn.port));
     let config = Arc::new(client::Config { inactivity_timeout: None, keepalive_interval: Some(std::time::Duration::from_secs(30)), ..Default::default() });
     let handler = Client { io: io.clone(), host: conn.host.clone(), port: conn.port };
     let mut session = tokio::time::timeout(std::time::Duration::from_secs(15), client::connect(config, (conn.host.as_str(), conn.port), handler))
