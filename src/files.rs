@@ -10,10 +10,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ::gpui::{Animation, AnimationExt as _, ease_out_quint};
+use ::gpui::{Animation, AnimationExt as _, bounce, ease_in_out, ease_out_quint};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Sizable as _;
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -30,6 +30,8 @@ const MIN_W: f32 = 480.0;
 
 /// 筛选框展开/收起动画时长
 const SEARCH_ANIM_MS: u64 = 180;
+/// 文件列表骨架占位的呼吸周期
+const SKELETON_MS: u64 = 1100;
 
 const K: u64 = 1024;
 const M: u64 = 1024 * K;
@@ -128,6 +130,31 @@ fn parent(path: &str) -> String {
         Some(0) | None => "/".into(),
         Some(i) => path[..i].into(),
     }
+}
+
+/// 把用户输入的路径解析成绝对路径:`~` 展开成 `home`,相对路径接在 `base` 后面,处理 `.` 和 `..`。
+fn resolve_path(input: &str, base: &str, home: &str) -> String {
+    let input = input.trim();
+    let full = if input == "~" {
+        home.to_string()
+    } else if let Some(r) = input.strip_prefix("~/") {
+        join(home, r)
+    } else if input.starts_with('/') {
+        input.to_string()
+    } else {
+        join(base, input)
+    };
+    let mut out: Vec<&str> = Vec::new();
+    for seg in full.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    format!("/{}", out.join("/"))
 }
 
 fn ext(name: &str) -> &str {
@@ -357,6 +384,11 @@ pub struct Files {
     lback: Vec<String>,
     lfwd: Vec<String>,
     lsearch: Option<Entity<InputState>>,
+    /// 地址栏编辑:输入框(本地栏 / 远程栏)、正在编辑哪一栏(0 无,1 本地,2 远程)、本地路径无效
+    laddr: Option<Entity<InputState>>,
+    addr: Option<Entity<InputState>>,
+    addr_edit: u8,
+    addr_err: bool,
     /// 筛选框是否展开(平时只显示一个图标)
     lsopen: bool,
     sopen: bool,
@@ -373,6 +405,125 @@ pub struct Files {
     path_ready: bool,
     /// 等待确认删除的项(真实服务器上的删除不可恢复)
     confirm_del: Option<String>,
+    /// 右键菜单:哪一栏、哪一项(None 是空白处)、弹出位置
+    ctx: Option<CtxMenu>,
+    /// 表格排序:远程栏、本地栏(本地栏的会记忆)
+    sort: Sort,
+    lsort: Sort,
+}
+
+/// 表格排序列
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SortKey {
+    Name,
+    Size,
+    Time,
+    Mode,
+    Owner,
+}
+
+impl SortKey {
+    fn tag(self) -> &'static str {
+        match self {
+            SortKey::Name => "name",
+            SortKey::Size => "size",
+            SortKey::Time => "time",
+            SortKey::Mode => "mode",
+            SortKey::Owner => "owner",
+        }
+    }
+    fn from_tag(t: &str) -> Option<Self> {
+        Some(match t {
+            "name" => SortKey::Name,
+            "size" => SortKey::Size,
+            "time" => SortKey::Time,
+            "mode" => SortKey::Mode,
+            "owner" => SortKey::Owner,
+            _ => return None,
+        })
+    }
+    /// 第一次点这一列时的方向:大小、时间从大/新到小,其余从小到大
+    fn first_asc(self) -> bool {
+        !matches!(self, SortKey::Size | SortKey::Time)
+    }
+}
+
+type Sort = (SortKey, bool);
+
+/// 本地栏的记忆:上次所在目录和排序方式。启动时从本地库读进来,之后每次变化写回库。
+static PREFS: std::sync::Mutex<(Option<String>, Option<Sort>)> = std::sync::Mutex::new((None, None));
+
+pub fn restore_prefs(st: &crate::store::Store) {
+    let dir = st.get_setting("local_dir").filter(|d| Path::new(d).is_dir());
+    let sort = st.get_setting("local_sort").and_then(|v| {
+        let (k, d) = v.split_once(':')?;
+        Some((SortKey::from_tag(k)?, d == "asc"))
+    });
+    if let Ok(mut p) = PREFS.lock() {
+        *p = (dir, sort);
+    }
+}
+
+fn sort_dirs_first<T>(v: &mut [T], is_dir: impl Fn(&T) -> bool, name: impl Fn(&T) -> String, cmp: impl Fn(&T, &T) -> std::cmp::Ordering, asc: bool) {
+    v.sort_by(|a, b| {
+        is_dir(b).cmp(&is_dir(a)).then_with(|| {
+            let o = cmp(a, b);
+            (if asc { o } else { o.reverse() }).then_with(|| name(a).to_lowercase().cmp(&name(b).to_lowercase()))
+        })
+    });
+}
+
+fn sort_entries(v: &mut [Entry], (key, asc): Sort) {
+    sort_dirs_first(
+        v,
+        |e| e.is_dir(),
+        |e| e.name.clone(),
+        |a, b| match key {
+            SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            SortKey::Size => a.size.cmp(&b.size),
+            SortKey::Time => a.modified.cmp(&b.modified),
+            SortKey::Mode => a.mode.cmp(&b.mode),
+            SortKey::Owner => a.owner.cmp(&b.owner),
+        },
+        asc,
+    );
+}
+
+type LocalRow = (String, bool, u64, String);
+
+fn sort_local(v: &mut [LocalRow], (key, asc): Sort) {
+    sort_dirs_first(
+        v,
+        |e| e.1,
+        |e| e.0.clone(),
+        |a, b| match key {
+            SortKey::Size => a.2.cmp(&b.2),
+            SortKey::Time => a.3.cmp(&b.3),
+            _ => a.0.to_lowercase().cmp(&b.0.to_lowercase()),
+        },
+        asc,
+    );
+}
+
+/// 拖拽载荷:本地栏的一项(拖到远程栏上传)/ 远程栏的一项(拖到本地栏下载)
+#[derive(Clone)]
+struct DragLocal {
+    path: PathBuf,
+    name: String,
+    is_dir: bool,
+}
+
+#[derive(Clone)]
+struct DragRemote {
+    name: String,
+    is_dir: bool,
+}
+
+#[derive(Clone)]
+struct CtxMenu {
+    which: u8,
+    name: Option<String>,
+    pos: Point<Pixels>,
 }
 
 impl Files {
@@ -386,11 +537,15 @@ impl Files {
             fwd: vec![],
             selected: None,
             local: false,
-            lpath: std::env::var("HOME").unwrap_or_else(|_| "/".into()),
+            lpath: PREFS.lock().ok().and_then(|p| p.0.clone()).unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".into())),
             lsel: None,
             lback: vec![],
             lfwd: vec![],
             lsearch: None,
+            laddr: None,
+            addr: None,
+            addr_edit: 0,
+            addr_err: false,
             lsopen: false,
             sopen: false,
             lsclosing: false,
@@ -401,6 +556,9 @@ impl Files {
             sftp: None,
             path_ready: false,
             confirm_del: None,
+            ctx: None,
+            sort: (SortKey::Name, true),
+            lsort: PREFS.lock().ok().and_then(|p| p.1).unwrap_or((SortKey::Name, true)),
         }
     }
 
@@ -430,6 +588,32 @@ impl Files {
             cx.observe(&s, |_, _, cx| cx.notify()).detach();
             self.lsearch = Some(s);
         }
+        for which in [1u8, 2] {
+            let slot = if which == 1 { &mut self.laddr } else { &mut self.addr };
+            if slot.is_none() {
+                let s = cx.new(|cx| InputState::new(window, cx).placeholder("输入路径,回车跳转"));
+                // 回车跳转;失焦放弃编辑;输入时清掉错误标记
+                cx.subscribe_in(&s, window, move |this: &mut Home, _, ev: &InputEvent, _window, cx| match ev {
+                    InputEvent::PressEnter { .. } => this.commit_addr(which, cx),
+                    InputEvent::Blur => {
+                        if this.files.addr_edit == which {
+                            this.files.addr_edit = 0;
+                            this.files.addr_err = false;
+                            cx.notify();
+                        }
+                    }
+                    InputEvent::Change => {
+                        if this.files.addr_err {
+                            this.files.addr_err = false;
+                            cx.notify();
+                        }
+                    }
+                    _ => {}
+                })
+                .detach();
+                *slot = Some(s);
+            }
+        }
     }
 
     /// 截图调试用:直接跳到某目录 / 选中某项
@@ -445,6 +629,15 @@ impl Files {
         if std::env::var_os("DOCKYARD_FILES_SEARCH").is_some() {
             self.sopen = true;
             self.lsopen = true;
+        }
+        // DOCKYARD_FILES_ADDR=1|2 截图时让本地/远程栏进入地址栏编辑,DOCKYARD_FILES_ADDR_ERR=1 同时标红
+        self.addr_edit = std::env::var("DOCKYARD_FILES_ADDR").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        self.addr_err = std::env::var_os("DOCKYARD_FILES_ADDR_ERR").is_some();
+        // DOCKYARD_FILES_CTX=2:名字 / 2: / 1:名字 截图时弹出右键菜单(位置固定)
+        if let Ok(v) = std::env::var("DOCKYARD_FILES_CTX")
+            && let Some((w, n)) = v.split_once(':')
+        {
+            self.ctx = Some(CtxMenu { which: w.parse().unwrap_or(2), name: Some(n.to_string()).filter(|n| !n.is_empty()), pos: point(px(1500.0), px(330.0)) });
         }
         // DOCKYARD_FILES_MORE=1|2 截图时展开本地/远程栏的「更多」菜单
         self.more = std::env::var("DOCKYARD_FILES_MORE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -543,7 +736,9 @@ impl Home {
     fn listing(&self) -> Vec<Entry> {
         let fs = &self.files;
         if self.sftp_real() {
-            return fs.sftp.as_ref().and_then(|s| s.dir(&fs.path)).map(|d| d.entries.iter().map(entry_from_remote).collect()).unwrap_or_default();
+            let mut v: Vec<Entry> = fs.sftp.as_ref().and_then(|s| s.dir(&fs.path)).map(|d| d.entries.iter().map(entry_from_remote).collect()).unwrap_or_default();
+            sort_entries(&mut v, fs.sort);
+            return v;
         }
         let key = fs.dir_key();
         let mut v = base(&fs.target, &fs.path, self.node());
@@ -554,7 +749,7 @@ impl Home {
             }
         }
         v.retain(|e| !self.fstore.deleted.contains(&format!("{key}/{}", e.name)));
-        v.sort_by(|a, b| b.is_dir().cmp(&a.is_dir()).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        sort_entries(&mut v, fs.sort);
         v
     }
 
@@ -673,6 +868,76 @@ impl Home {
             self.files.notice = Some(format!("开始下载 {name} → {}", dest.display()).into());
         }
         cx.notify();
+    }
+
+    /// 可点击的表头:点击切换排序(同一列再点反向),当前排序列旁边显示方向箭头
+    fn sort_th(&self, which: u8, label: &'static str, key: SortKey, cx: &mut Context<Self>) -> Stateful<Div> {
+        let cur = if which == 1 { self.files.lsort } else { self.files.sort };
+        let active = cur.0 == key;
+        div()
+            .id(("sort-th", which as usize * 10 + key as usize))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(3.0))
+            .cursor_pointer()
+            .text_size(px(t::TYPE_CAPTION))
+            .text_color(if active { c::secondary() } else { c::ghost() })
+            .hover(|s| s.text_color(c::secondary()))
+            .child(label)
+            .when(active, |d| d.child(icon(if cur.1 { IconName::ArrowUp } else { IconName::ArrowDown }, 11.0, c::secondary())))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_sort(which, key, cx)))
+    }
+
+    fn toggle_sort(&mut self, which: u8, key: SortKey, cx: &mut Context<Self>) {
+        let slot = if which == 1 { &mut self.files.lsort } else { &mut self.files.sort };
+        *slot = if slot.0 == key { (key, !slot.1) } else { (key, key.first_asc()) };
+        if which == 1 {
+            self.remember_local(cx);
+        }
+        cx.notify();
+    }
+
+    /// 把本地栏的目录和排序方式记下来(下次启动、新开文件页都从这里恢复)
+    fn remember_local(&mut self, _cx: &mut Context<Self>) {
+        let (dir, (k, asc)) = (self.files.lpath.clone(), self.files.lsort);
+        if let Ok(mut p) = PREFS.lock() {
+            *p = (Some(dir.clone()), Some((k, asc)));
+        }
+        if let Some(st) = self.store.as_ref() {
+            let _ = st.set_setting("local_dir", &dir);
+            let _ = st.set_setting("local_sort", &format!("{}:{}", k.tag(), if asc { "asc" } else { "desc" }));
+        }
+    }
+
+    /// 拖拽下载:把远程当前目录里的一项下载到 `dest`
+    fn download_to(&mut self, it: &DragRemote, dest: PathBuf, cx: &mut Context<Self>) {
+        if !self.sftp_real() {
+            self.files.notice = Some("演示数据不支持下载".into());
+        } else if let Some(s) = self.files.sftp.as_ref().filter(|s| matches!(s.status(), SftpStatus::Ready)) {
+            let _ = std::fs::create_dir_all(&dest);
+            s.download(&join(&self.files.path, &it.name), it.is_dir, dest.clone());
+            self.files.notice = Some(format!("开始下载 {} → {}", it.name, dest.display()).into());
+        } else {
+            self.files.notice = Some("还没连上服务器".into());
+        }
+        cx.notify();
+    }
+
+    /// 拖拽上传到远程的某个目录(拖到目录行上)
+    fn upload_into(&mut self, paths: Vec<PathBuf>, dir: String, cx: &mut Context<Self>) {
+        if self.sftp_real() {
+            if let Some(s) = self.files.sftp.as_ref().filter(|s| matches!(s.status(), SftpStatus::Ready)) {
+                let n = paths.len();
+                s.upload(paths, &dir);
+                self.files.notice = Some(format!("开始上传 {n} 项 → {dir}").into());
+            } else {
+                self.files.notice = Some("还没连上服务器".into());
+            }
+            cx.notify();
+        } else {
+            self.upload(paths, cx);
+        }
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -812,6 +1077,201 @@ impl Home {
         cx.notify();
     }
 
+    /// 文件区域的右键菜单:在鼠标位置弹出;右键某一项时先选中它,菜单里的操作都作用于选中项
+    fn ctx_menu(&self, which: u8, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let m = self.files.ctx.clone().filter(|m| m.which == which)?;
+        let is_dir = m.name.as_ref().is_some_and(|n| {
+            if which == 1 {
+                Path::new(&join(&self.files.lpath, n)).is_dir()
+            } else {
+                self.listing().iter().any(|e| &e.name == n && e.kind == Kind::Dir)
+            }
+        });
+        let mut items: Vec<(MenuItem, u8)> = Vec::new();
+        match (which, m.name.is_some()) {
+            (1, true) => {
+                if is_dir {
+                    items.push((MenuItem::new("打开").icon(IconName::FolderOpen), 10));
+                }
+                items.push((MenuItem::new("上传到服务器").icon(IconName::Upload), 1));
+                items.push((MenuItem::new("复制路径").icon(IconName::Copy), 11));
+            }
+            (1, false) => {
+                items.push((MenuItem::new("新建文件夹").icon(IconName::FolderPlus), 0));
+                items.push((MenuItem::new("刷新").icon(IconName::RefreshCw), 12));
+            }
+            (_, true) => {
+                if is_dir {
+                    items.push((MenuItem::new("打开").icon(IconName::FolderOpen), 10));
+                }
+                if self.sftp_real() {
+                    items.push((MenuItem::new("下载到本地").icon(IconName::Download), 3));
+                }
+                items.push((MenuItem::new("复制路径").icon(IconName::Copy), 11));
+                items.push((MenuItem::new("删除").icon(IconName::Trash), 2));
+            }
+            (_, false) => {
+                items.push((MenuItem::new("新建文件夹").icon(IconName::FolderPlus), 0));
+                items.push((MenuItem::new("上传").icon(IconName::Upload), 1));
+                items.push((MenuItem::new("刷新").icon(IconName::RefreshCw), 12));
+            }
+        }
+        let (menu_items, acts): (Vec<_>, Vec<_>) = items.into_iter().unzip();
+        let (t1, t2) = (cx.entity(), cx.entity());
+        let name = m.name.clone();
+        Some(
+            deferred(
+                anchored().position(m.pos).snap_to_window_with_margin(px(8.0)).child(div().relative().w(px(DROPDOWN_COMPACT_W)).h(px(0.0)).child(dropdown_menu_compact(
+                    if which == 1 { "l-ctx-menu" } else { "r-ctx-menu" },
+                    menu_items,
+                    None,
+                    MenuSide::Below,
+                    0.0,
+                    move |i, window, cx| {
+                        let (act, name) = (acts[i], name.clone());
+                        t1.update(cx, |h, cx| {
+                            h.files.ctx = None;
+                            h.ctx_action(which, name, act, window, cx)
+                        })
+                    },
+                    move |_, cx| {
+                        t2.update(cx, |h, cx| {
+                            h.files.ctx = None;
+                            cx.notify();
+                        })
+                    },
+                ))),
+            )
+            .with_priority(2)
+            .into_any_element(),
+        )
+    }
+
+    /// 右键菜单的操作:打开 / 复制路径 / 刷新,其余(新建、上传、下载、删除)和「更多」菜单共用
+    fn ctx_action(&mut self, which: u8, name: Option<String>, act: u8, window: &mut Window, cx: &mut Context<Self>) {
+        match (act, name) {
+            (10, Some(n)) => {
+                if which == 1 {
+                    let to = join(&self.files.lpath, &n);
+                    self.local_go(to, cx);
+                } else {
+                    let to = join(&self.files.path, &n);
+                    self.go(to, cx);
+                }
+            }
+            (11, Some(n)) => {
+                let full = if which == 1 { join(&self.files.lpath, &n) } else { join(&self.files.path, &n) };
+                cx.write_to_clipboard(ClipboardItem::new_string(full));
+                self.files.notice = Some("已复制路径".into());
+                cx.notify();
+            }
+            (12, _) => {
+                if which == 1 {
+                    cx.notify();
+                } else {
+                    self.refresh(cx);
+                }
+            }
+            (a, _) => self.more_action(which, a, window, cx),
+        }
+    }
+
+    /// 面包屑右侧的空白:点一下进入地址栏编辑
+    fn addr_blank(which: u8, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id(("addr-blank", which as usize))
+            .flex_1()
+            .min_w(px(16.0))
+            .h_full()
+            .cursor_text()
+            .on_click(cx.listener(move |this, _, window, cx| this.start_addr_edit(which, window, cx)))
+    }
+
+    /// 编辑状态的地址栏:和面包屑同尺寸的输入框,聚焦描边,路径无效时描边变红;Esc 放弃
+    fn addr_box(&self, which: u8, cx: &mut Context<Self>) -> Div {
+        let state = if which == 1 { self.files.laddr.clone() } else { self.files.addr.clone() };
+        let err = self.files.addr_err;
+        let mut b = div()
+            .flex_1()
+            .min_w_0()
+            .h(px(30.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .pl(px(8.0))
+            .pr(px(6.0))
+            .gap(px(6.0))
+            .rounded(px(t::RADIUS_MD))
+            .when(err, |d| d.bg(c::danger().opacity(0.06)).border_1().border_color(c::danger().opacity(0.6)))
+            .when(!err, |d| d.bg(c::sunken()).border_1().border_color(c::accent().opacity(0.55)))
+            .text_size(px(t::TYPE_CONTROL))
+            // 点到地址栏之外(包括不可聚焦的空白处)就放弃编辑:空白处不会抢走焦点,单靠失焦事件不够
+            .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                if this.files.addr_edit == which {
+                    this.files.addr_edit = 0;
+                    this.files.addr_err = false;
+                    cx.notify();
+                }
+            }))
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" && this.files.addr_edit != 0 {
+                    this.files.addr_edit = 0;
+                    this.files.addr_err = false;
+                    cx.notify();
+                }
+            }));
+        b = b.child(icon(if err { IconName::TriangleAlert } else { IconName::Pencil }, 13.0, if err { c::danger() } else { c::ghost() }));
+        if let Some(st) = state {
+            b = b.child(div().flex_1().min_w_0().child(Input::new(&st).appearance(false).with_size(px(12.0 / 0.875))));
+        }
+        if err {
+            b = b.child(div().flex_shrink_0().text_size(px(t::TYPE_CAPTION)).text_color(c::danger()).child("不是有效的目录"));
+        }
+        b
+    }
+
+    /// 进入地址栏编辑:输入框里是当前完整路径,全选,聚焦
+    fn start_addr_edit(&mut self, which: u8, window: &mut Window, cx: &mut Context<Self>) {
+        let (state, cur) = if which == 1 { (self.files.laddr.clone(), self.files.lpath.clone()) } else { (self.files.addr.clone(), self.files.path.clone()) };
+        let Some(state) = state else { return };
+        self.files.addr_edit = which;
+        self.files.addr_err = false;
+        state.update(cx, |s, cx| {
+            s.set_value(cur, window, cx);
+            s.select_all(window, cx);
+        });
+        window.focus(&state.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// 回车:本地栏检查是不是目录,无效就留在输入框里标红;远程栏交给服务器(读目录失败会在列表区提示)
+    fn commit_addr(&mut self, which: u8, cx: &mut Context<Self>) {
+        let state = if which == 1 { self.files.laddr.clone() } else { self.files.addr.clone() };
+        let Some(state) = state else { return };
+        let text = state.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            self.files.addr_edit = 0;
+            cx.notify();
+            return;
+        }
+        if which == 1 {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+            let to = resolve_path(&text, &self.files.lpath, &home);
+            if Path::new(&to).is_dir() {
+                self.files.addr_edit = 0;
+                self.local_go(to, cx);
+            } else {
+                self.files.addr_err = true;
+                cx.notify();
+            }
+        } else {
+            let home = self.files_home();
+            let to = resolve_path(&text, &self.files.path, &home);
+            self.files.addr_edit = 0;
+            self.go(to, cx);
+        }
+    }
+
     fn local_go(&mut self, path: String, cx: &mut Context<Self>) {
         let fs = &mut self.files;
         if path != fs.lpath {
@@ -819,6 +1279,7 @@ impl Home {
             fs.lfwd.clear();
             fs.lsel = None;
         }
+        self.remember_local(cx);
         cx.notify();
     }
 
@@ -827,6 +1288,7 @@ impl Home {
         if let Some(p) = fs.lback.pop() {
             fs.lfwd.push(std::mem::replace(&mut fs.lpath, p));
             fs.lsel = None;
+            self.remember_local(cx);
             cx.notify();
         }
     }
@@ -836,6 +1298,7 @@ impl Home {
         if let Some(p) = fs.lfwd.pop() {
             fs.lback.push(std::mem::replace(&mut fs.lpath, p));
             fs.lsel = None;
+            self.remember_local(cx);
             cx.notify();
         }
     }
@@ -994,18 +1457,18 @@ fn read_local(dir: &str) -> Vec<(String, bool, u64, String)> {
                 .collect()
         })
         .unwrap_or_default();
-    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
     v
 }
 
 impl Home {
     /// 「本地」栏:本机目录(真实文件系统),只读浏览。
-    fn local_pane(&self, pane_w: f32, cx: &mut Context<Self>) -> Div {
+    fn local_pane(&self, pane_w: f32, cx: &mut Context<Self>) -> Stateful<Div> {
         let fs = &self.files;
         let path = fs.lpath.clone();
         let up = parent(&path);
         let query = fs.lsearch.as_ref().map(|s| s.read(cx).value().trim().to_lowercase()).unwrap_or_default();
-        let entries: Vec<_> = read_local(&path).into_iter().filter(|e| query.is_empty() || e.0.to_lowercase().contains(&query)).collect();
+        let mut entries: Vec<_> = read_local(&path).into_iter().filter(|e| query.is_empty() || e.0.to_lowercase().contains(&query)).collect();
+        sort_local(&mut entries, fs.lsort);
         // 面包屑:和远程栏同样的样式
         let mut crumbs = div()
             .flex_1()
@@ -1059,6 +1522,7 @@ impl Home {
                     .on_click(cx.listener(move |this, _, _, cx| this.local_go(to.clone(), cx))),
             );
         }
+        crumbs = crumbs.child(Self::addr_blank(1, cx));
         let search = self.filter_box(1, pane_w, cx);
         let more_items = vec![(MenuItem::new("新建文件夹").icon(IconName::FolderPlus), 0u8), (MenuItem::new("上传到服务器").icon(IconName::Upload), 1)];
         let toolbar = div()
@@ -1073,7 +1537,7 @@ impl Home {
             .child(tool_btn("l-fwd", IconName::ArrowRight, !fs.lfwd.is_empty()).on_click(cx.listener(|this, _, _, cx| this.local_fwd(cx))))
             .child(tool_btn("l-up", IconName::ArrowUp, path != "/").on_click(cx.listener(move |this, _, _, cx| this.local_go(up.clone(), cx))))
             .child(tool_btn("l-refresh", IconName::RefreshCw, true).on_click(cx.listener(|_, _, _, cx| cx.notify())))
-            .child(crumbs)
+            .child(if fs.addr_edit == 1 { self.addr_box(1, cx) } else { crumbs })
             .children(search)
             .child(self.more_button(1, more_items, cx));
         let th = |t: &'static str| div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(t);
@@ -1087,10 +1551,22 @@ impl Home {
             .px(px(18.0))
             .border_b_1()
             .border_color(c::border())
-            .child(th("名称").flex_1().min_w_0())
-            .child(th("大小").w(px(76.0)).flex_shrink_0().flex().justify_end())
-            .child(th("修改时间").w(px(118.0)).flex_shrink_0());
-        let mut rows = div().id("local-rows").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().px(px(8.0)).py(px(4.0));
+            .child(self.sort_th(1, "名称", SortKey::Name, cx).flex_1().min_w_0())
+            .child(self.sort_th(1, "大小", SortKey::Size, cx).w(px(76.0)).flex_shrink_0().flex().justify_end())
+            .child(self.sort_th(1, "修改时间", SortKey::Time, cx).w(px(118.0)).flex_shrink_0());
+        let mut rows = div()
+            .id("local-rows")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .px(px(8.0))
+            .py(px(4.0))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                this.files.ctx = Some(CtxMenu { which: 1, name: None, pos: ev.position });
+                cx.notify();
+            }));
         if entries.is_empty() {
             rows = rows.child(super::empty_state(IconName::FolderOpen, "空文件夹", "或没有访问权限"));
         }
@@ -1099,6 +1575,10 @@ impl Home {
             let (ic, color) = if is_dir { (IconName::Folder, c::accent()) } else { (IconName::File, c::muted()) };
             let enter = is_dir.then(|| join(&path, &name));
             let n = name.clone();
+            let name_r = name.clone();
+            let row_w = pane_w - 16.0;
+            let drag_item = DragLocal { path: PathBuf::from(join(&path, &name)), name: name.clone(), is_dir };
+            let drop_name = name.clone();
             rows = rows.child(
                 div()
                     .id(("lrow", i))
@@ -1136,6 +1616,27 @@ impl Home {
                             .child(if is_dir { "—".to_string() } else { fmt_size(size) }),
                     )
                     .child(div().w(px(118.0)).flex_shrink_0().truncate().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::muted()).child(time))
+                    .on_drag(drag_item, move |d, _, _, cx| {
+                        let (name, is_dir) = (d.name.clone(), d.is_dir);
+                        cx.new(|_| DragGhost { name, is_dir, w: row_w })
+                    })
+                    // 目录行:把远程项拖到它上面,下载到这个目录
+                    .when(is_dir, |d| {
+                        let lp = path.clone();
+                        d.drag_over::<DragRemote>(|s, _, _, _| s.bg(c::accent_soft())).on_drop(cx.listener(move |this, it: &DragRemote, _, cx| {
+                            cx.stop_propagation();
+                            this.download_to(it, PathBuf::from(join(&lp, &drop_name)), cx);
+                        }))
+                    })
+                    .on_mouse_down(MouseButton::Right, {
+                        let n = name_r.clone();
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.files.lsel = Some(n.clone());
+                            this.files.ctx = Some(CtxMenu { which: 1, name: Some(n.clone()), pos: ev.position });
+                            cx.notify();
+                        })
+                    })
                     .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                         if ev.click_count() >= 2
                             && let Some(to) = &enter
@@ -1148,7 +1649,23 @@ impl Home {
                     })),
             );
         }
-        div().flex_1().min_w_0().min_h_0().flex().flex_col().border_r_1().border_color(c::border()).child(toolbar).child(thead).child(rows)
+        let lpath_drop = path.clone();
+        div()
+            .id("local-pane")
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(c::border())
+            // 把远程项拖到本地栏:下载到当前目录
+            .drag_over::<DragRemote>(|s, _, _, _| s.bg(c::accent().opacity(0.05)))
+            .on_drop(cx.listener(move |this, it: &DragRemote, _, cx| this.download_to(it, PathBuf::from(&lpath_drop), cx)))
+            .child(toolbar)
+            .child(thead)
+            .child(rows)
+            .children(self.ctx_menu(1, cx))
     }
 }
 
@@ -1239,7 +1756,8 @@ impl Home {
             Some(self.connecting_page(crate::terminal::connecting::ConnTarget::Terminal(a), t.handle.steps(), t.handle.host_prompt(), crate::terminal::ssh::STEP_LABELS, cx))
         } else if let Some(s) = self.files.sftp.as_ref() {
             let status = s.status();
-            if matches!(status, SftpStatus::Ready) {
+            // 复用终端连接时只差开个通道(很快),不整页切「连接中」,在列表区显示「正在读取」
+            if matches!(status, SftpStatus::Ready) || (matches!(status, SftpStatus::Connecting) && s.epoch().is_some()) {
                 None
             } else {
                 let prompt = if let SftpStatus::HostPrompt(p) = status { Some(p) } else { None };
@@ -1402,9 +1920,10 @@ impl Home {
                     .on_click(cx.listener(move |this, _, _, cx| this.go(to.clone(), cx))),
             );
         }
+        crumbs = crumbs.child(Self::addr_blank(2, cx));
         if let Some((_, host)) = &mount {
             let host = host.clone();
-            crumbs = crumbs.child(div().flex_1()).child(
+            crumbs = crumbs.child(
                 div()
                     .id("mount-badge")
                     .flex_shrink_0()
@@ -1443,7 +1962,7 @@ impl Home {
             .child(tool_btn("f-fwd", IconName::ArrowRight, !fs.fwd.is_empty()).on_click(cx.listener(|this, _, _, cx| this.go_fwd(cx))))
             .child(tool_btn("f-up", IconName::ArrowUp, path != "/").on_click(cx.listener(move |this, _, _, cx| this.go(up_path.clone(), cx))))
             .child(tool_btn("f-refresh", IconName::RefreshCw, true).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
-            .child(crumbs)
+            .child(if fs.addr_edit == 2 { self.addr_box(2, cx) } else { crumbs })
             .children(search)
             .child(self.more_button(2, more_items, cx));
 
@@ -1537,17 +2056,46 @@ impl Home {
                 .when(show_mode, |d| d.child(div().w(px(82.0)).flex_shrink_0().child(mode)))
                 .when(show_owner, |d| d.child(div().w(px(48.0)).flex_shrink_0().child(owner)))
         };
-        let th = |t: &'static str| div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(t).into_any_element();
-        let thead = cols(th("名称"), th("大小"), th("修改时间"), th("权限"), th("所有者"))
+        let (h1, h2, h3, h4, h5) = (
+            self.sort_th(2, "名称", SortKey::Name, cx).into_any_element(),
+            self.sort_th(2, "大小", SortKey::Size, cx).into_any_element(),
+            self.sort_th(2, "修改时间", SortKey::Time, cx).into_any_element(),
+            self.sort_th(2, "权限", SortKey::Mode, cx).into_any_element(),
+            self.sort_th(2, "所有者", SortKey::Owner, cx).into_any_element(),
+        );
+        let thead = cols(h1, h2, h3, h4, h5)
             .h(px(30.0))
             .flex_shrink_0()
             .px(px(18.0))
             .border_b_1()
             .border_color(c::border());
-        let mut rows = div().id("file-rows").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().px(px(8.0)).py(px(4.0));
+        let mut rows = div()
+            .id("file-rows")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .px(px(8.0))
+            .py(px(4.0))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                this.files.ctx = Some(CtxMenu { which: 2, name: None, pos: ev.position });
+                cx.notify();
+            }));
         let real_state = self.sftp_state_view(cx);
-        let entries: Vec<Entry> = if real_state.is_some() { vec![] } else { entries };
-        if let Some(v) = real_state {
+        let loading = real_state.is_none() && self.sftp_loading();
+        let entries: Vec<Entry> = if real_state.is_some() || loading { vec![] } else { entries };
+        if loading {
+            // 加载中:用和文件行同样版式的骨架占位,内容出来时版面不跳
+            const NAME_W: [f32; 9] = [140.0, 96.0, 180.0, 120.0, 76.0, 160.0, 110.0, 88.0, 132.0];
+            let bar = |w: f32| div().h(px(8.0)).w(px(w)).rounded_full().bg(c::hover()).into_any_element();
+            let mut sk = div().flex().flex_col();
+            for (i, w) in NAME_W.iter().enumerate() {
+                let name = div().flex().flex_row().items_center().gap(px(10.0)).child(div().size(px(16.0)).rounded(px(4.0)).bg(c::hover())).child(bar(*w)).into_any_element();
+                sk = sk.child(cols(name, bar(34.0), bar(92.0), bar(56.0), bar(28.0)).h(px(32.0)).flex_shrink_0().px(px(10.0)).opacity(1.0 - i as f32 * 0.07));
+            }
+            rows = rows.child(sk.with_animation("file-skeleton", Animation::new(Duration::from_millis(SKELETON_MS)).repeat().with_easing(bounce(ease_in_out)), |d, t| d.opacity(0.45 + 0.55 * t)));
+        } else if let Some(v) = real_state {
             rows = rows.child(v);
         } else if entries.is_empty() {
             let (t, s) = if query.is_empty() { ("空文件夹", "把文件拖到这里即可上传") } else { ("没有匹配的文件", "换个关键词试试") };
@@ -1582,6 +2130,10 @@ impl Home {
             let mono = |t: String, color: Rgba| div().truncate().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(color).child(t).into_any_element();
             let name = e.name.clone();
             let enter = e.is_dir().then(|| join(&path, &e.name));
+            let name_r = e.name.clone();
+            let row_w = list_w - 16.0;
+            let drag_item = DragRemote { name: e.name.clone(), is_dir: e.is_dir() };
+            let folder_to = e.is_dir().then(|| join(&path, &e.name));
             rows = rows.child(
                 cols(name_el, size_el, mono(e.modified.clone(), c::muted()), mono(e.mode.clone(), c::ghost()), mono(e.owner.clone(), c::ghost()))
                     .id(("frow", i))
@@ -1592,6 +2144,26 @@ impl Home {
                     .cursor_pointer()
                     .when(on, |d| d.bg(c::selected()))
                     .when(!on, |d| d.hover(|s| s.bg(c::hover())))
+                    .on_drag(drag_item, move |d, _, _, cx| {
+                        let (name, is_dir) = (d.name.clone(), d.is_dir);
+                        cx.new(|_| DragGhost { name, is_dir, w: row_w })
+                    })
+                    // 目录行:把本地项拖到它上面,上传到这个目录
+                    .when_some(folder_to, |d, to| {
+                        d.drag_over::<DragLocal>(|s, _, _, _| s.bg(c::accent_soft())).on_drop(cx.listener(move |this, it: &DragLocal, _, cx| {
+                            cx.stop_propagation();
+                            this.upload_into(vec![it.path.clone()], to.clone(), cx);
+                        }))
+                    })
+                    .on_mouse_down(MouseButton::Right, {
+                        let n = name_r.clone();
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.files.selected = Some(n.clone());
+                            this.files.ctx = Some(CtxMenu { which: 2, name: Some(n.clone()), pos: ev.position });
+                            cx.notify();
+                        })
+                    })
                     .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                         if ev.click_count() >= 2
                             && let Some(to) = &enter
@@ -1604,7 +2176,18 @@ impl Home {
                     })),
             );
         }
-        let table = div().flex_1().min_w_0().flex().flex_col().child(thead).child(rows);
+        let table = div()
+            .id("remote-table")
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            // 把本地项拖到远程栏:上传到当前目录
+            .drag_over::<DragLocal>(|s, _, _, _| s.bg(c::accent().opacity(0.05)))
+            .on_drop(cx.listener(|this, it: &DragLocal, _, cx| this.upload(vec![it.path.clone()], cx)))
+            .child(thead)
+            .child(rows)
+            .children(self.ctx_menu(2, cx));
 
         // ---- 状态栏 ----
         let uploading: Vec<&Entry> = self.fstore.extra.values().flatten().filter(|e| e.progress.is_some()).collect();
@@ -1852,6 +2435,23 @@ impl Home {
         )
     }
 
+    /// 真实 SFTP 正在加载目录(含复用终端连接时等通道打开):列表区显示骨架占位
+    fn sftp_loading(&self) -> bool {
+        // 调试:DOCKYARD_FILES_LOADING=1 强制显示加载骨架(截图用)
+        if std::env::var_os("DOCKYARD_FILES_LOADING").is_some() {
+            return true;
+        }
+        if !self.sftp_real() {
+            return false;
+        }
+        let Some(s) = self.files.sftp.as_ref() else { return false };
+        match s.status() {
+            SftpStatus::Connecting => s.epoch().is_some(),
+            SftpStatus::Ready => s.dir(&self.files.path).is_none_or(|d| d.error.is_none() && d.loading && d.entries.is_empty()),
+            _ => false,
+        }
+    }
+
     /// 真实 SFTP 在表格区域的状态:连接中、确认主机指纹、连接失败、加载中、读取出错。
     /// 正常显示文件列表时返回 None。
     fn sftp_state_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1908,12 +2508,37 @@ impl Home {
                     Some(d) if d.error.is_some() => {
                         Some(card(IconName::TriangleAlert, c::warn(), "读取目录失败".into(), d.error.unwrap_or_default()).child(retry("dir-retry", cx, false)).into_any_element())
                     }
-                    Some(d) if d.loading && d.entries.is_empty() => Some(card(IconName::LoaderCircle, c::accent(), "正在读取…".into(), self.files.path.clone()).into_any_element()),
-                    None => Some(card(IconName::LoaderCircle, c::accent(), "正在读取…".into(), self.files.path.clone()).into_any_element()),
                     _ => None,
                 }
             }
         }
+    }
+}
+
+/// 拖拽时跟随鼠标的小卡片:比文件名宽一截的一行(图标 + 名称),和被拖的行区分开,看起来是「拿起了这一项」
+pub(crate) struct DragGhost {
+    name: String,
+    is_dir: bool,
+    /// 和被拖的那一行同宽
+    w: f32,
+}
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(self.w))
+            .h(px(32.0))
+            .px(px(12.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(9.0))
+            .rounded(px(t::RADIUS_MD))
+            .bg(c::dialog())
+            .border_1()
+            .border_color(c::accent().opacity(0.6))
+            .shadow_lg()
+            .child(icon(if self.is_dir { IconName::Folder } else { IconName::File }, 15.0, if self.is_dir { c::accent() } else { c::muted() }))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_BODY)).text_color(c::text()).child(self.name.clone()))
     }
 }
 
@@ -1932,5 +2557,20 @@ impl Render for Tip {
             .font_family(MONO)
             .text_color(c::secondary())
             .child(self.0.clone())
+    }
+}
+
+#[cfg(test)]
+mod addr_tests {
+    use super::resolve_path as r;
+    #[test]
+    fn resolve_path_cases() {
+        assert_eq!(r("/etc/nginx", "/root", "/root"), "/etc/nginx");
+        assert_eq!(r("~", "/var", "/home/a"), "/home/a");
+        assert_eq!(r("~/x/y", "/var", "/home/a"), "/home/a/x/y");
+        assert_eq!(r("logs", "/var", "/h"), "/var/logs");
+        assert_eq!(r("../etc/", "/var/log", "/h"), "/var/etc");
+        assert_eq!(r("/a/./b//c/..", "/", "/h"), "/a/b");
+        assert_eq!(r("../../..", "/a", "/h"), "/");
     }
 }

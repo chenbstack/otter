@@ -75,6 +75,11 @@ const MIGRATIONS: &[&str] = &[
          ciphertext BLOB NOT NULL,
          PRIMARY KEY (node_id, slot)
      );",
+    // v3:界面偏好(本地栏上次所在目录、排序方式等),键值对
+    "CREATE TABLE settings (
+         key   TEXT PRIMARY KEY,
+         value TEXT NOT NULL
+     );",
 ];
 
 /// 秘密槽位
@@ -138,6 +143,19 @@ impl Store {
             })?;
         }
         Ok(())
+    }
+
+    /// 读界面偏好,没有或出错返回 None
+    pub fn get_setting(&self, key: &str) -> Option<String> {
+        self.conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).ok()
+    }
+
+    /// 写界面偏好(覆盖)
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), String> {
+        self.conn
+            .execute("INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key, value])
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     /// 读出全部分组和它们的节点(堆栈为空,由服务器实时提供)。
@@ -259,6 +277,15 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settings_roundtrip() {
+        let st = Store::open_memory().unwrap();
+        assert_eq!(st.get_setting("k"), None);
+        st.set_setting("k", "a").unwrap();
+        st.set_setting("k", "b").unwrap();
+        assert_eq!(st.get_setting("k").as_deref(), Some("b"));
+    }
+
     use super::*;
 
     #[test]

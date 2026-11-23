@@ -123,6 +123,7 @@ impl Home {
         } else {
             match store::Store::open_default().and_then(|s| s.load_groups().map(|g| (s, g))) {
                 Ok((s, g)) => {
+                    files::restore_prefs(&s);
                     store = Some(s);
                     g
                 }
