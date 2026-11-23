@@ -84,7 +84,7 @@ pub const NODE_CARD_MIN_W: f32 = 260.0;
 pub const NODE_CARD_H: f32 = 68.0;
 /// 节点页:卡片里的图标块边长、顶部搜索条和主按钮高度
 pub const NODE_ICON: f32 = 40.0;
-pub const NODE_BAR_H: f32 = 38.0;
+pub const NODE_BAR_H: f32 = 34.0;
 pub const NODE_CARD_GAP: f32 = 12.0;
 pub const CONTENT_PAD: f32 = 20.0;
 
