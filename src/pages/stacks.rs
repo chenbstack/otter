@@ -95,7 +95,7 @@ impl Home {
                     .text_size(px(t::TYPE_BODY))
                     .when(active, |d| d.bg(c::selected()).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
                     .when(!active, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
-                    .child(icon(p.icon(), 15.0, if active { c::online() } else { c::ghost() }))
+                    .child(icon(p.icon(), 15.0, if active { c::accent() } else { c::ghost() }))
                     .child(div().flex_1().child(p.label()))
                     .when_some(count.filter(|n| *n > 0), |d, n| {
                         d.child(
@@ -107,10 +107,10 @@ impl Home {
                                 .items_center()
                                 .justify_center()
                                 .rounded_full()
-                                .bg(if active { c::online_soft() } else { c::idle_soft() })
+                                .bg(if active { c::accent_soft() } else { c::idle_soft() })
                                 .text_size(px(t::TYPE_MICRO))
                                 .font_family(MONO)
-                                .text_color(if active { c::online() } else { c::muted() })
+                                .text_color(if active { c::accent() } else { c::muted() })
                                 .child(n.to_string()),
                         )
                     })
@@ -155,7 +155,7 @@ impl Home {
                     .text_size(px(t::TYPE_BODY))
                     .when(files_on, |d| d.bg(c::selected()).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
                     .when(!files_on, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
-                    .child(icon(IconName::FolderOpen, 15.0, if files_on { c::online() } else { c::ghost() }))
+                    .child(icon(IconName::FolderOpen, 15.0, if files_on { c::accent() } else { c::ghost() }))
                     .child(div().flex_1().child("文件"))
                     .child(
                         div()

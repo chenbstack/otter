@@ -28,6 +28,13 @@ impl Home {
                 }
             };
             let pinned = matches!(tab.kind, TabKind::Nodes);
+            // 服务器终端标签的图标颜色就是连接状态
+            let icon_color = match tab.term.as_ref().map(|t| t.handle.status()) {
+                Some(crate::terminal::ssh::Status::Connected) => c::online(),
+                Some(crate::terminal::ssh::Status::Closed(_)) => c::danger(),
+                Some(_) => c::warn(),
+                None => if on { c::accent() } else { c::ghost() },
+            };
             let group: SharedString = format!("tab-{ix}").into();
             div()
                 .id(("tab", ix))
@@ -51,7 +58,7 @@ impl Home {
                         .text_color(c::muted())
                         .hover(|s| s.bg(c::hover()).text_color(c::secondary()))
                 })
-                .child(icon(kind_icon, 14.0, if on { c::online() } else { c::ghost() }))
+                .child(icon(kind_icon, 14.0, icon_color))
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 .when(!pinned, |d| {
                     d.child(

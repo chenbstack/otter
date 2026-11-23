@@ -2,7 +2,7 @@
 
 pub mod ssh;
 
-use gpui_xterm::{TerminalConfig, TerminalView};
+use gpui_xterm::{ColorPalette, TerminalConfig, TerminalView};
 
 use super::*;
 use crate::workspace::{Tab, TabKind};
@@ -27,6 +27,7 @@ impl Home {
             font_family: MONO.into(),
             font_size: px(TERM_FONT),
             padding: Edges::all(px(TERM_PAD)),
+            colors: ColorPalette::builder().background(0x0F, 0x10, 0x16).foreground(0xEC, 0xED, 0xF5).cursor(0x7C, 0x86, 0xFF).build(),
             ..Default::default()
         };
         let view = cx.new(|cx| {
@@ -95,65 +96,40 @@ impl Home {
         cx.notify();
     }
 
+    /// 终端标签的内容:只有终端画布。连接状态看标签上的图标颜色;断开后右上角浮出「重连」。
     pub(crate) fn ssh_terminal_view(&self, cx: &mut Context<Self>) -> Div {
         let Some(t) = self.active_term() else { return div() };
-        let status = t.handle.status();
-        let (dot, label) = match &status {
-            Status::Connecting => (c::warn(), "连接中".to_string()),
-            Status::Waiting => (c::warn(), "等待输入".to_string()),
-            Status::Connected => (c::online(), "已连接".to_string()),
-            Status::Closed(Some(why)) => (c::danger(), format!("已断开:{why}")),
-            Status::Closed(None) => (c::ghost(), "已断开".to_string()),
-        };
-        let closed = matches!(status, Status::Closed(_));
-        let node = self.node();
-        let id = node.id;
-        let btn = |id: &'static str, text: &'static str, ic: IconName| {
-            div()
-                .id(id)
-                .h(px(24.0))
-                .px(px(8.0))
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .rounded(px(t::RADIUS_SM))
-                .text_size(px(t::TYPE_CAPTION))
-                .text_color(c::muted())
-                .cursor_pointer()
-                .hover(|s| s.bg(c::hover()).text_color(c::text()))
-                .child(icon(ic, 13.0, c::muted()))
-                .child(text)
-        };
+        let closed = matches!(t.handle.status(), Status::Closed(_));
         div()
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .h(px(TERM_BAR_H))
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(CONTENT_PAD))
-                    .border_b_1()
-                    .border_color(c::border())
-                    .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(dot))
-                    .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::MEDIUM).child(node.name.clone()))
-                    .child(div().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::ghost()).child(node.user_host.clone()))
-                    .child(div().truncate().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(label))
-                    .child(div().flex_1())
-                    .when(closed, |d| {
-                        d.child(btn("term-reconnect", "重连", IconName::RotateCw).on_click(cx.listener(|this, _, window, cx| this.reconnect_terminal(window, cx))))
-                    })
-                    .child(btn("term-manage", "管理", IconName::LayoutGrid).on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_node(id);
-                        cx.notify();
-                    }))),
-            )
-            .child(div().flex_1().min_h_0().bg(c::sunken()).child(t.view.clone()))
+            .relative()
+            .bg(c::sunken())
+            .child(div().size_full().child(t.view.clone()))
+            .when(closed, |d| {
+                d.child(
+                    div()
+                        .id("term-reconnect")
+                        .absolute()
+                        .top(px(TERM_PAD))
+                        .right(px(CONTENT_PAD))
+                        .h(px(28.0))
+                        .px(px(12.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .rounded(px(t::RADIUS_MD))
+                        .bg(c::accent())
+                        .text_color(c::on_accent())
+                        .text_size(px(t::TYPE_CONTROL))
+                        .font_weight(FontWeight::MEDIUM)
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.88))
+                        .child(icon(IconName::RotateCw, 13.0, c::on_accent()))
+                        .child("重新连接")
+                        .on_click(cx.listener(|this, _, window, cx| this.reconnect_terminal(window, cx))),
+                )
+            })
     }
 }

@@ -48,12 +48,12 @@ impl Home {
             .gap(px(6.0))
             .px(px(14.0))
             .rounded(px(t::RADIUS_MD))
-            .bg(c::online())
+            .bg(c::accent())
             .text_color(c::on_accent())
             .text_size(px(t::TYPE_CONTROL))
             .font_weight(FontWeight::SEMIBOLD)
             .cursor_pointer()
-            .hover(|s| s.bg(c::online().opacity(0.88)))
+            .hover(|s| s.bg(c::accent().opacity(0.88)))
             .child(icon(IconName::Plus, 13.0, c::on_accent()))
             .child("新建节点")
             .on_click(cx.listener(|this, _, window, cx| this.open_add_node(window, cx)));
@@ -224,7 +224,8 @@ impl Home {
     fn node_card(&self, n: &Node, w: f32, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = n.id;
         Self::card_shell(("node", id.0 as usize).into(), w)
-            .child(Self::icon_tile(IconName::Server, c::secondary(), c::idle_soft()))
+            .group(format!("node-card-{}", id.0))
+            .child(Self::icon_tile(IconName::Server, c::accent(), c::accent_soft()))
             .child(
                 div()
                     .flex_1()
@@ -248,6 +249,26 @@ impl Home {
                     .text_size(px(t::TYPE_MICRO))
                     .text_color(c::ghost())
                     .child(format!("{} 服务", n.service_count())),
+            )
+            .child(
+                div()
+                    .id(("node-manage", id.0 as usize))
+                    .size(px(26.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(t::RADIUS_SM))
+                    .opacity(0.0)
+                    .group_hover(format!("node-card-{}", id.0), |s| s.opacity(1.0))
+                    .hover(|s| s.bg(c::hover()))
+                    .child(icon(IconName::Settings2, 14.0, c::muted()))
+                    .tooltip(|_, cx| cx.new(|_| crate::files::Tip("管理".into())).into())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.open_node(id);
+                        cx.notify();
+                    })),
             )
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.open_server_terminal(id, window, cx);

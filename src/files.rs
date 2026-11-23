@@ -688,7 +688,7 @@ impl Home {
 // ---- 渲染 --------------------------------------------------------------------
 fn file_icon(e: &Entry) -> (IconName, Rgba) {
     match e.kind {
-        Kind::Dir if e.mount.is_some() => (IconName::HardDrive, c::online()),
+        Kind::Dir if e.mount.is_some() => (IconName::HardDrive, c::accent()),
         Kind::Dir => (IconName::Folder, c::folder()),
         Kind::Link => (IconName::Link, c::muted()),
         Kind::File => {
@@ -700,7 +700,7 @@ fn file_icon(e: &Entry) -> (IconName, Rgba) {
             } else if is_archive(n) {
                 (IconName::FileArchive, c::disk())
             } else if ["sh", "py", "js", "rs"].contains(&ext(n)) {
-                (IconName::FileCode, c::online())
+                (IconName::FileCode, c::accent())
             } else if ["yml", "yaml", "json", "xml", "toml", "conf", "ini", "env"].contains(&ext(n)) {
                 (IconName::FileCog, c::mem())
             } else if is_text(n) {
@@ -739,10 +739,10 @@ fn text_btn(id: &'static str, ic: IconName, label: &'static str, accent: bool) -
         .text_size(px(t::TYPE_CONTROL))
         .cursor_pointer()
         .when(accent, |d| {
-            d.bg(c::online())
+            d.bg(c::accent())
                 .text_color(c::on_accent())
                 .font_weight(FontWeight::SEMIBOLD)
-                .hover(|s| s.bg(c::online().opacity(0.88)))
+                .hover(|s| s.bg(c::accent().opacity(0.88)))
                 .child(icon(ic, 13.0, c::on_accent()))
         })
         .when(!accent, |d| {
@@ -772,7 +772,7 @@ fn progress_bar(p: f32, w: f32) -> Div {
         .h(px(4.0))
         .rounded_full()
         .bg(c::idle_soft())
-        .child(div().h_full().w(px(w * p.clamp(0.0, 1.0))).rounded_full().bg(c::online()))
+        .child(div().h_full().w(px(w * p.clamp(0.0, 1.0))).rounded_full().bg(c::accent()))
 }
 
 impl Home {
@@ -834,7 +834,7 @@ impl Home {
                 .cursor_pointer()
                 .when(on, |d| d.bg(c::selected()).text_color(c::text()).font_weight(FontWeight::MEDIUM))
                 .when(!on, |d| d.text_color(c::muted()).hover(|s| s.text_color(c::secondary())))
-                .child(icon(ic, 13.0, if on { c::online() } else { c::ghost() }))
+                .child(icon(ic, 13.0, if on { c::accent() } else { c::ghost() }))
                 .child(label)
         };
         let picker = fs.picker.then(|| {
@@ -883,7 +883,7 @@ impl Home {
                             .cursor_pointer()
                             .when(on, |d| d.bg(c::selected()))
                             .hover(|s| s.bg(c::hover()))
-                            .child(div().size(px(6.0)).flex_shrink_0().rounded_full().bg(if up { c::online() } else { c::ghost() }))
+                            .child(div().size(px(6.0)).flex_shrink_0().rounded_full().bg(if up { c::accent() } else { c::ghost() }))
                             .child(div().text_size(px(t::TYPE_BODY)).text_color(if on { c::text() } else { c::secondary() }).child(svc.name.clone()))
                             .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::ghost()).child(svc.image.clone()))
                             .on_click(cx.listener(move |this, _, window, cx| this.open_files(target.clone(), window, cx))),
@@ -911,8 +911,8 @@ impl Home {
                     .items_center()
                     .justify_center()
                     .rounded(px(t::RADIUS_MD))
-                    .bg(c::online_soft())
-                    .child(icon(IconName::FolderOpen, 15.0, c::online())),
+                    .bg(c::accent_soft())
+                    .child(icon(IconName::FolderOpen, 15.0, c::accent())),
             )
             .child(div().text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::SEMIBOLD).child("文件"))
             .child(
@@ -1017,10 +1017,10 @@ impl Home {
                     .h(px(20.0))
                     .px(px(7.0))
                     .rounded(px(t::RADIUS_SM))
-                    .bg(c::online_soft())
+                    .bg(c::accent_soft())
                     .text_size(px(t::TYPE_MICRO))
-                    .text_color(c::online())
-                    .child(icon(IconName::HardDrive, 11.0, c::online()))
+                    .text_color(c::accent())
+                    .child(icon(IconName::HardDrive, 11.0, c::accent()))
                     .child("挂载卷")
                     .tooltip(move |_, cx| cx.new(|_| Tip(format!("宿主机路径 {host}"))).into()),
             );
@@ -1104,7 +1104,7 @@ impl Home {
                     .cursor_pointer()
                     .when(active, |d| d.bg(c::selected()))
                     .when(!active, |d| d.hover(|s| s.bg(c::hover())))
-                    .child(icon(ic, 14.0, if active { c::online() } else { c::ghost() }))
+                    .child(icon(ic, 14.0, if active { c::accent() } else { c::ghost() }))
                     .child(
                         div()
                             .flex_1()
@@ -1180,12 +1180,12 @@ impl Home {
                 .child(div().min_w_0().truncate().text_size(px(t::TYPE_BODY)).text_color(if on { c::text() } else { c::secondary() }).child(e.name.clone()))
                 .when_some(e.link.clone(), |d, l| d.child(div().flex_shrink_0().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::ghost()).child(format!("→ {l}"))))
                 .when(e.mount.is_some(), |d| {
-                    d.child(div().flex_shrink_0().px(px(5.0)).rounded(px(t::RADIUS_XS)).bg(c::online_soft()).text_size(px(t::TYPE_MICRO)).text_color(c::online()).child("挂载"))
+                    d.child(div().flex_shrink_0().px(px(5.0)).rounded(px(t::RADIUS_XS)).bg(c::accent_soft()).text_size(px(t::TYPE_MICRO)).text_color(c::accent()).child("挂载"))
                 })
                 .into_any_element();
             let size_el = match e.progress {
                 Some(p) => div().flex().flex_row().items_center().gap(px(6.0)).child(progress_bar(p, 38.0)).child(
-                    div().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::online()).child(format!("{:.0}%", p * 100.0)),
+                    div().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::accent()).child(format!("{:.0}%", p * 100.0)),
                 ),
                 None => div()
                     .text_size(px(t::TYPE_CAPTION))
@@ -1427,8 +1427,8 @@ impl Home {
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
-                .text_color(c::online())
-                .child(icon(IconName::Upload, 12.0, c::online()))
+                .text_color(c::accent())
+                .child(icon(IconName::Upload, 12.0, c::accent()))
                 .child(format!("上传 {} 项", uploading.len()))
                 .child(progress_bar(p, 80.0))
                 .child(div().font_family(MONO).child(format!("{:.0}%", p * 100.0)))
@@ -1480,7 +1480,7 @@ impl Home {
                     .rounded(px(t::RADIUS_XL))
                     .border_2()
                     .border_dashed()
-                    .border_color(c::online().opacity(0.7))
+                    .border_color(c::accent().opacity(0.7))
                     .bg(c::scrim_drop())
                     .child(
                         div()
@@ -1489,8 +1489,8 @@ impl Home {
                             .items_center()
                             .justify_center()
                             .rounded_full()
-                            .bg(c::online_soft())
-                            .child(icon(IconName::CloudUpload, 24.0, c::online())),
+                            .bg(c::accent_soft())
+                            .child(icon(IconName::CloudUpload, 24.0, c::accent())),
                     )
                     .child(div().text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::SEMIBOLD).child("松开即可上传"))
                     .child(div().text_size(px(t::TYPE_CONTROL)).font_family(MONO).text_color(c::muted()).child(format!("→ {drop_path}"))),
@@ -1553,7 +1553,7 @@ impl Home {
 
 
 /// 简单文字 tooltip
-struct Tip(String);
+pub(crate) struct Tip(pub(crate) String);
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()

@@ -63,7 +63,7 @@ impl Home {
                     .px(px(16.0))
                     .border_b_1()
                     .border_color(c::border())
-                    .child(icon(IconName::ScrollText, 15.0, c::online()))
+                    .child(icon(IconName::ScrollText, 15.0, c::accent()))
                     .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).child(svc.to_string()))
                     .child(div().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::ghost()).child(stack.to_string()))
                     .child(div().flex_1())
@@ -79,9 +79,9 @@ impl Home {
                             .rounded(px(t::RADIUS_SM))
                             .text_size(px(t::TYPE_CONTROL))
                             .cursor_pointer()
-                            .when(follow, |d| d.bg(c::online_soft()).text_color(c::online()))
+                            .when(follow, |d| d.bg(c::accent_soft()).text_color(c::accent()))
                             .when(!follow, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
-                            .child(icon(IconName::ArrowDownToLine, 13.0, if follow { c::online() } else { c::ghost() }))
+                            .child(icon(IconName::ArrowDownToLine, 13.0, if follow { c::accent() } else { c::ghost() }))
                             .child("跟随最新")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(t) = this.workspace.tabs.get_mut(tab_ix) {

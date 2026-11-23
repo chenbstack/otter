@@ -169,7 +169,7 @@ fn field_box(state: &Entity<InputState>, error: bool, mono: bool, window: &Windo
         .rounded(px(t::RADIUS_MD))
         .border_1()
         .when(error, |d| d.bg(c::danger().opacity(0.06)).border_color(c::danger().opacity(0.6)))
-        .when(!error && focused, |d| d.bg(c::field_focus_bg()).border_color(c::online().opacity(0.55)))
+        .when(!error && focused, |d| d.bg(c::field_focus_bg()).border_color(c::accent().opacity(0.55)))
         .when(!error && !focused, |d| {
             d.bg(c::field()).border_color(c::field_border()).hover(|s| s.bg(c::field_hover()))
         })
@@ -245,7 +245,7 @@ impl Home {
                 .cursor_pointer()
                 .when(on, |d| d.bg(c::seg_on()).text_color(c::text()).font_weight(FontWeight::SEMIBOLD).shadow_xs())
                 .when(!on, |d| d.text_color(c::muted()).hover(|s| s.text_color(c::secondary())))
-                .child(icon(ic, 13.0, if on { c::online() } else { c::ghost() }))
+                .child(icon(ic, 13.0, if on { c::accent() } else { c::ghost() }))
                 .child(text)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(f) = &mut this.form {
@@ -417,7 +417,7 @@ impl Home {
                     .text_size(px(t::TYPE_BODY))
                     .font_weight(FontWeight::SEMIBOLD)
                     .cursor_pointer()
-                    .when(can_submit, |d| d.bg(c::online()).text_color(c::on_accent()).hover(|s| s.opacity(0.88)))
+                    .when(can_submit, |d| d.bg(c::accent()).text_color(c::on_accent()).hover(|s| s.opacity(0.88)))
                     .when(!can_submit, |d| d.bg(c::field()).border_1().border_color(c::field_border()).text_color(c::ghost()).cursor_default())
                     .child(icon(IconName::Plus, 13.0, if can_submit { c::on_accent() } else { c::ghost() }))
                     .child(if f.editing.is_some() { "保存" } else { "添加节点" })
@@ -442,8 +442,8 @@ impl Home {
                     .items_center()
                     .justify_center()
                     .rounded(px(t::RADIUS_LG))
-                    .bg(c::online_soft())
-                    .child(icon(IconName::Server, 18.0, c::online())),
+                    .bg(c::accent_soft())
+                    .child(icon(IconName::Server, 18.0, c::accent())),
             )
             .child(
                 div()

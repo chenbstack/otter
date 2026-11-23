@@ -9,19 +9,22 @@ use crate::mock::SPARK_N;
 // ---- 色板(来自 theme.ts,略微拉开层次)---------------------------------------
 pub mod c {
     use gpui_kit::{Rgba, rgb, rgba};
-    pub fn bg() -> Rgba { rgb(0x141416) }
-    pub fn chrome() -> Rgba { rgb(0x101012) }
-    pub fn raised() -> Rgba { rgb(0x1A1A1D) }
-    pub fn raised_hi() -> Rgba { rgb(0x1F1F23) }
-    pub fn sunken() -> Rgba { rgb(0x0C0C0E) }
-    pub fn selected() -> Rgba { rgb(0x26262B) }
+    pub fn bg() -> Rgba { rgb(0x14151C) }
+    pub fn chrome() -> Rgba { rgb(0x101119) }
+    pub fn raised() -> Rgba { rgb(0x1B1D27) }
+    pub fn raised_hi() -> Rgba { rgb(0x222534) }
+    pub fn sunken() -> Rgba { rgb(0x0F1016) }
+    pub fn selected() -> Rgba { rgb(0x2A2D3E) }
     pub fn hover() -> Rgba { rgba(0xFFFFFF0A) }
-    pub fn border() -> Rgba { rgb(0x222226) }
-    pub fn border_strong() -> Rgba { rgb(0x34343B) }
-    pub fn text() -> Rgba { rgb(0xECECEE) }
-    pub fn secondary() -> Rgba { rgb(0xC6C6CA) }
-    pub fn muted() -> Rgba { rgb(0x8A8A90) }
-    pub fn ghost() -> Rgba { rgb(0x5A5A63) }
+    pub fn border() -> Rgba { rgb(0x262938) }
+    pub fn border_strong() -> Rgba { rgb(0x373B50) }
+    pub fn text() -> Rgba { rgb(0xECEDF5) }
+    pub fn secondary() -> Rgba { rgb(0xC7C9D6) }
+    pub fn muted() -> Rgba { rgb(0x8B8EA0) }
+    pub fn ghost() -> Rgba { rgb(0x5C6075) }
+    /// 强调色(按钮、选中、焦点);绿色 `online` 只表示成功/运行中/已连接
+    pub fn accent() -> Rgba { rgb(0x7C86FF) }
+    pub fn accent_soft() -> Rgba { rgba(0x7C86FF1F) }
     pub fn online() -> Rgba { rgb(0x4ce3a0) }
     pub fn warn() -> Rgba { rgb(0xe3b34c) }
     pub fn danger() -> Rgba { rgb(0xe35c5c) }
@@ -33,20 +36,20 @@ pub mod c {
     pub fn net() -> Rgba { rgb(0x3fd0c9) }
     pub fn disk() -> Rgba { rgb(0xe8964c) }
     // 弹窗
-    pub fn dialog() -> Rgba { rgb(0x1E1E22) }
-    pub fn dialog_footer() -> Rgba { rgb(0x1A1A1E) }
+    pub fn dialog() -> Rgba { rgb(0x1F2130) }
+    pub fn dialog_footer() -> Rgba { rgb(0x1B1D2A) }
     pub fn dialog_border() -> Rgba { rgba(0xFFFFFF1A) }
     pub fn line() -> Rgba { rgba(0xFFFFFF0F) }
     pub fn field() -> Rgba { rgba(0xFFFFFF08) }
     pub fn field_hover() -> Rgba { rgba(0xFFFFFF0C) }
     pub fn field_border() -> Rgba { rgba(0xFFFFFF14) }
-    pub fn field_focus_bg() -> Rgba { rgba(0x4ce3a00A) }
+    pub fn field_focus_bg() -> Rgba { rgba(0x7C86FF0A) }
     pub fn seg_on() -> Rgba { rgba(0xFFFFFF14) }
-    pub fn label() -> Rgba { rgb(0xA0A0A8) }
-    pub fn on_accent() -> Rgba { rgb(0x06140D) }
+    pub fn label() -> Rgba { rgb(0xA2A5B8) }
+    pub fn on_accent() -> Rgba { rgb(0x0A0B1A) }
     // 遮罩
     pub fn scrim_dialog() -> Rgba { rgba(0x0000008C) }
-    pub fn scrim_drop() -> Rgba { rgba(0x141416E6) }
+    pub fn scrim_drop() -> Rgba { rgba(0x14151CE6) }
     // 文件类型
     pub fn folder() -> Rgba { rgb(0x7fa8f0) }
 }
@@ -85,8 +88,7 @@ pub const NODE_CARD_H: f32 = 68.0;
 /// 节点页:卡片里的图标块边长、顶部搜索条和主按钮高度
 pub const NODE_ICON: f32 = 40.0;
 pub const NODE_BAR_H: f32 = 34.0;
-/// 终端标签的工具栏高度、终端字号、终端画布内边距
-pub const TERM_BAR_H: f32 = 36.0;
+/// 终端字号、终端画布内边距
 pub const TERM_FONT: f32 = 13.0;
 pub const TERM_PAD: f32 = 8.0;
 pub const NODE_CARD_GAP: f32 = 12.0;

@@ -45,7 +45,7 @@ impl Home {
                     .px(px(16.0))
                     .border_b_1()
                     .border_color(c::border())
-                    .child(icon(IconName::SquareTerminal, 15.0, c::online()))
+                    .child(icon(IconName::SquareTerminal, 15.0, c::accent()))
                     .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).child("终端"))
                     .child(div().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::ghost()).child(host_line)),
             )
@@ -87,7 +87,7 @@ impl Home {
                                 .flex()
                                 .flex_row()
                                 .gap(px(8.0))
-                                .child(div().text_color(c::online()).child(who.clone()))
+                                .child(div().text_color(c::accent()).child(who.clone()))
                                 .child(div().text_color(c::text()).child(text))
                         } else {
                             div().text_color(c::secondary()).child(text)
@@ -98,7 +98,7 @@ impl Home {
                             .flex()
                             .flex_row()
                             .gap(px(8.0))
-                            .child(div().text_color(c::online()).child(who.clone()))
+                            .child(div().text_color(c::accent()).child(who.clone()))
                             .child(div().w(px(7.0)).h(px(14.0)).bg(c::text().opacity(0.8)))
                             .child(div().text_color(c::ghost()).child(format!("# {cmd}"))),
                     ),

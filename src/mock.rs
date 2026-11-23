@@ -181,12 +181,12 @@ pub fn groups() -> Vec<Group> {
     let mut groups = vec![
         Group {
             name: "开发分组".into(),
-            color: 0x6b9dff,
+            color: 0x3fd0c9,
             nodes: vec![Node { id: NodeId(0), name: "test".into(), user_host: "dev@192.0.2.30".into(), stacks: test }],
         },
         Group {
             name: "生产分组".into(),
-            color: 0x4ce3a0,
+            color: 0xff8fb8,
             nodes: vec![
                 Node { id: NodeId(0), name: "emby".into(), user_host: "deploy@192.0.2.22".into(), stacks: emby_stacks },
                 Node { id: NodeId(0), name: "docker-host".into(), user_host: "deploy@192.0.2.21".into(), stacks: docker_host },
