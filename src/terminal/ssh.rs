@@ -94,12 +94,17 @@ impl Write for Input {
 
 /// 界面持有的一端。丢弃它就会断开连接。
 pub struct Handle {
+    input: tokio_mpsc::UnboundedSender<Vec<u8>>,
     resize: tokio_mpsc::UnboundedSender<(u16, u16)>,
     pub status: Arc<Mutex<Status>>,
     abort: tokio::task::AbortHandle,
 }
 
 impl Handle {
+    /// 往会话里直接写字节(用来补发终端组件漏掉的按键)
+    pub fn inputter(&self) -> tokio_mpsc::UnboundedSender<Vec<u8>> {
+        self.input.clone()
+    }
     pub fn resizer(&self) -> tokio_mpsc::UnboundedSender<(u16, u16)> {
         self.resize.clone()
     }
@@ -133,7 +138,7 @@ pub fn connect(conn: Conn, cols: usize, rows: usize) -> (Input, Output, Handle) 
         set(&st, Status::Closed(reason));
         // io 在这里释放,Output 读到 0
     });
-    (Input(in_tx), Output { rx: out_rx, left: Vec::new() }, Handle { resize: rs_tx, status, abort: join.abort_handle() })
+    (Input(in_tx.clone()), Output { rx: out_rx, left: Vec::new() }, Handle { input: in_tx, resize: rs_tx, status, abort: join.abort_handle() })
 }
 
 fn set(st: &Arc<Mutex<Status>>, s: Status) {

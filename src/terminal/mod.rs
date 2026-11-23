@@ -23,6 +23,7 @@ impl Home {
     fn start_session(&mut self, conn: Conn, window: &mut Window, cx: &mut Context<Self>) -> TermSession {
         let (inp, out, handle) = ssh::connect(conn.clone(), 80, 24);
         let resizer = handle.resizer();
+        let inputter = handle.inputter();
         let cfg = TerminalConfig {
             font_family: MONO.into(),
             font_size: px(TERM_FONT),
@@ -31,9 +32,26 @@ impl Home {
             ..Default::default()
         };
         let view = cx.new(|cx| {
-            TerminalView::new(inp, out, cfg, cx).with_resize_callback(move |c, r| {
-                let _ = resizer.send((c as u16, r as u16));
-            })
+            TerminalView::new(inp, out, cfg, cx)
+                .with_resize_callback(move |c, r| {
+                    let _ = resizer.send((c as u16, r as u16));
+                })
+                // gpui_xterm 把“带字符的按键”都先交给输入法,而回车、Tab 不会经输入法写回来,这里直接发
+                .with_key_handler(move |ev| {
+                    let m = &ev.keystroke.modifiers;
+                    if m.platform || m.control {
+                        return false;
+                    }
+                    let bytes: &[u8] = match (ev.keystroke.key.as_str(), m.shift, m.alt) {
+                        ("enter", _, false) => b"\r",
+                        ("enter", _, true) => b"\x1b\r",
+                        ("tab", false, false) => b"\t",
+                        ("tab", true, false) => b"\x1b[Z",
+                        _ => return false,
+                    };
+                    let _ = inputter.send(bytes.to_vec());
+                    true
+                })
         });
         let fh = view.read(cx).focus_handle().clone();
         window.focus(&fh, cx);
