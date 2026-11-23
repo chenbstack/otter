@@ -27,7 +27,7 @@ impl Home {
             font_family: MONO.into(),
             font_size: px(TERM_FONT),
             padding: Edges::all(px(TERM_PAD)),
-            colors: ColorPalette::builder().background(0x0F, 0x10, 0x16).foreground(0xEC, 0xED, 0xF5).cursor(0x7C, 0x86, 0xFF).build(),
+            colors: ColorPalette::builder().background(0x14, 0x15, 0x1C).foreground(0xEC, 0xED, 0xF5).cursor(0x7C, 0x86, 0xFF).build(),
             ..Default::default()
         };
         let view = cx.new(|cx| {
@@ -105,7 +105,7 @@ impl Home {
             .min_w_0()
             .min_h_0()
             .relative()
-            .bg(c::sunken())
+            .bg(c::bg())
             .child(div().size_full().child(t.view.clone()))
             .when(closed, |d| {
                 d.child(
