@@ -100,16 +100,11 @@ impl Home {
         let user = if user.is_empty() { "root".to_string() } else { user };
         let port = NodeForm::val(&f.port, cx).parse::<u16>().unwrap_or(22);
         let user_host = if port == 22 { format!("{user}@{host}") } else { format!("{user}@{host}:{port}") };
-        let latency = match f.test {
-            TestState::Ok(ms) => ms,
-            _ => 40 + (host.len() as u32 * 13) % 300,
-        };
         let g = f.group;
         let id = NodeId(self.next_id);
         self.next_id += 1;
-        self.groups[g].nodes.push(Node { id, name, user_host, latency_ms: Some(latency), stacks: vec![] });
+        self.groups[g].nodes.push(Node { id, name, user_host, stacks: vec![] });
         self.open_node(id);
-        self.collapsed.remove(&g);
         self.scroll = gpui_kit::component::VirtualListScrollHandle::new();
         self.close_form(cx);
     }

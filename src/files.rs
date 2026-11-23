@@ -16,7 +16,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{Home, MENU_W, MONO, SIDEBAR_W, TABBAR_H, TITLEBAR_H, c, icon, t};
+use super::{Home, MENU_W, MONO, TITLEBAR_H, c, icon, t};
 use crate::mock::{Node, NodeId};
 
 /// 服务器文件:三栏,通常正好盖满内容区
@@ -550,7 +550,7 @@ impl Home {
 
     /// 抽屉最多盖住内容区,不压节点树和节点菜单
     fn max_w(window: &Window) -> f32 {
-        f32::from(window.viewport_size().width) - SIDEBAR_W - MENU_W
+        f32::from(window.viewport_size().width) - MENU_W
     }
 
     fn listing(&self) -> Vec<Entry> {
@@ -798,7 +798,7 @@ impl Home {
 
     /// 文件标签页:占满整个标签内容区
     pub fn files_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let w = f32::from(window.viewport_size().width) - SIDEBAR_W;
+        let w = f32::from(window.viewport_size().width);
         self.files_panel(window, cx, w, true)
     }
 
@@ -808,10 +808,9 @@ impl Home {
         let show_preview = w >= PREVIEW_MIN;
 
         let node = self.node();
-        let online = node.online();
         let fs = &self.files;
         let query = fs.search.as_ref().map(|s| s.read(cx).value().trim().to_lowercase()).unwrap_or_default();
-        let all = if online { self.listing() } else { vec![] };
+        let all = self.listing();
         let entries: Vec<Entry> = all.iter().filter(|e| query.is_empty() || e.name.to_lowercase().contains(&query)).cloned().collect();
         let selected = fs.selected.as_ref().and_then(|n| all.iter().find(|e| &e.name == n)).cloned();
 
@@ -1165,9 +1164,7 @@ impl Home {
             .border_b_1()
             .border_color(c::border());
         let mut rows = div().id("file-rows").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().px(px(8.0)).py(px(4.0));
-        if !online {
-            rows = rows.child(super::empty_state(IconName::Unplug, "节点离线", "连不上节点,无法浏览文件"));
-        } else if entries.is_empty() {
+        if entries.is_empty() {
             let (t, s) = if query.is_empty() { ("空文件夹", "把文件拖到这里即可上传") } else { ("没有匹配的文件", "换个关键词试试") };
             rows = rows.child(super::empty_state(IconName::FolderOpen, t, s));
         }
@@ -1519,7 +1516,7 @@ impl Home {
             .when(tab_mode, |d| d.flex_1().min_w_0().min_h_0())
             .when(!tab_mode, |d| {
                 d.absolute()
-                    .top(px(TITLEBAR_H + TABBAR_H))
+                    .top(px(TITLEBAR_H))
                     .right_0()
                     .bottom_0()
                     .w(px(w))

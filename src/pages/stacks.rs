@@ -7,7 +7,7 @@ pub(crate) fn menu_count(node: &Node, page: Page) -> Option<usize> {
         Page::Overview => None,
         Page::Containers => Some(node.service_count()),
         Page::Stacks => Some(node.stacks.len()),
-        Page::Images => Some(if node.online() { 12 } else { 0 }),
+        Page::Images => Some(12),
         Page::Volumes => Some(0),
         Page::Databases => Some(0),
         Page::Websites => Some(0),
@@ -177,15 +177,13 @@ impl Home {
     }
 
     pub(crate) fn content(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
-        let width = f32::from(window.viewport_size().width) - SIDEBAR_W - MENU_W - CONTENT_PAD * 2.0;
+        let width = f32::from(window.viewport_size().width) - MENU_W - CONTENT_PAD * 2.0;
         let inner = width - 2.0 - STACK_BODY_PAD * 2.0;
         self.cols = (((inner + SVC_GAP) / (SVC_MIN_W + SVC_GAP)).floor() as usize).max(1);
         self.svc_w = (inner - SVC_GAP * (self.cols - 1) as f32) / self.cols as f32;
 
         let body: AnyElement = if self.page != Page::Stacks {
             empty_state(self.page.icon(), "这个页面还没重做", "本次只做了堆栈页").into_any_element()
-        } else if !self.node().online() {
-            empty_state(IconName::Unplug, "节点离线", "无法连接,堆栈信息暂不可读").into_any_element()
         } else if self.node().stacks.is_empty() {
             empty_state(IconName::Layers, "还没有堆栈", "这个节点上没有发现 Compose 项目").into_any_element()
         } else {
@@ -248,7 +246,7 @@ impl Home {
                     ),
             )
             .child(div().flex_1())
-            .when(self.page == Page::Stacks && node.online(), |d| {
+            .when(self.page == Page::Stacks, |d| {
                 d.child(
                     button("toggle-charts", if hide { IconName::Eye } else { IconName::EyeOff }, if hide { "显示图表" } else { "隐藏图表" })
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -259,7 +257,7 @@ impl Home {
                 .child(button("refresh", IconName::RefreshCw, "刷新"))
             });
 
-        let stats = (self.page == Page::Stacks && node.online()).then(|| self.summary());
+        let stats = (self.page == Page::Stacks).then(|| self.summary());
 
         div()
             .flex_1()

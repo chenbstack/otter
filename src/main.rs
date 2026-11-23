@@ -1,17 +1,17 @@
 //! dockyard 首页外观原型(mock 数据)。
 //!
-//! 三栏:节点树 / 节点菜单 / 内容区(堆栈页)。只为看外观和交互手感,没有任何真实连接。
+//! 标题栏(含标签)+ 内容区:节点页 / 节点标签(二级导航 + 页面)等。只为看外观和交互手感,没有任何真实连接。
 //! 色板沿用旧版 DeskPanel 的 theme.ts。
 
 mod files;
 mod mock;
 mod node_form;
+mod nodes;
 mod pages;
-mod sidebar;
+mod titlebar;
 mod ui;
 mod workspace;
 
-use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
@@ -21,13 +21,6 @@ use gpui_kit::*;
 use ui::*;
 use workspace::Workspace;
 use mock::{Group, Node, NodeId, Running, SPARK_N, Service, Stack};
-
-#[derive(Clone, Copy, PartialEq)]
-enum Filter {
-    All,
-    Online,
-    Offline,
-}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -82,8 +75,10 @@ struct Home {
     sel: NodeId,
     /// 下一个新节点的 id
     next_id: u32,
-    filter: Filter,
-    collapsed: HashSet<usize>,
+    /// 节点页的搜索框
+    node_search: Option<Entity<gpui_kit::component::input::InputState>>,
+    /// 节点页当前进入的分组(None = 全部节点)
+    node_group: Option<usize>,
     page: Page,
     hide_charts: bool,
     cols: usize,
@@ -105,13 +100,13 @@ impl Home {
         let groups = mock::groups();
         let sel = groups[1].nodes[0].id;
         let next_id = groups.iter().flat_map(|g| g.nodes.iter()).map(|n| n.id.0).max().unwrap_or(0) + 1;
-        let mut h = Self {
+        Self {
             groups,
             workspace: Workspace::default(),
             sel,
             next_id,
-            filter: Filter::All,
-            collapsed: HashSet::new(),
+            node_search: None,
+            node_group: None,
             page: Page::Stacks,
             hide_charts: false,
             cols: 2,
@@ -121,9 +116,7 @@ impl Home {
             form: None,
             files: files::Files::new(),
             fstore: files::Store::default(),
-        };
-        h.open_node(sel);
-        h
+        }
     }
 
     /// 节点所在的 (分组下标, 节点下标)。id 不存在时退回第一个节点。
@@ -148,16 +141,6 @@ impl Home {
 
     fn all_nodes(&self) -> impl Iterator<Item = &Node> {
         self.groups.iter().flat_map(|g| g.nodes.iter())
-    }
-
-    fn count(&self, f: Filter) -> usize {
-        self.all_nodes()
-            .filter(|n| match f {
-                Filter::All => true,
-                Filter::Online => n.online(),
-                Filter::Offline => !n.online(),
-            })
-            .count()
     }
 
     fn stack_height(&self, s: &Stack) -> f32 {
@@ -188,31 +171,25 @@ impl Render for Home {
                 window.request_animation_frame();
             }
         }
-        let titlebar = self.titlebar();
-        let sidebar = self.sidebar(cx);
-        let tabbar = self.tab_bar(cx);
-        let is_files_tab = self.workspace.active.is_some_and(|a| matches!(self.workspace.tabs[a].kind, workspace::TabKind::Files(_)));
-        let other_view = self.workspace.active.and_then(|a| {
-            let (g, n) = self.locate(self.workspace.tabs[a].node());
-            let node = &self.groups[g].nodes[n];
-            match &self.workspace.tabs[a].kind {
-                workspace::TabKind::Terminal { container, .. } => {
-                    Some(self.terminal_view(&node.name, &node.user_host, container.as_ref()))
-                }
-                workspace::TabKind::Logs { stack, svc, .. } => Some(self.logs_view(a, stack, svc, cx)),
-                _ => None,
+        let titlebar = self.titlebar(cx);
+        let active_kind = self.workspace.active.map(|a| &self.workspace.tabs[a].kind);
+        let is_files_tab = matches!(active_kind, Some(workspace::TabKind::Files(_)));
+        let body = match active_kind {
+            Some(workspace::TabKind::Terminal { container, .. }) => {
+                let node = self.node();
+                div().flex_1().min_h_0().flex().flex_col().child(self.terminal_view(&node.name, &node.user_host, container.as_ref()))
             }
-        });
-        let body = if let Some(v) = other_view {
-            div().flex_1().min_h_0().flex().flex_col().child(v)
-        } else if is_files_tab {
-            div().flex_1().min_h_0().flex().flex_col().child(self.files_tab(window, cx))
-        } else if self.workspace.active.is_some() {
-            let menu = self.menu(cx);
-            let content = self.content(window, cx);
-            div().flex_1().min_h_0().flex().flex_row().child(menu).child(content)
-        } else {
-            div().flex_1().min_h_0().flex().flex_col().child(empty_state(IconName::PanelTop, "没有打开的标签", "从左侧节点树选一个节点"))
+            Some(workspace::TabKind::Logs { stack, svc, .. }) => {
+                let a = self.workspace.active.unwrap_or(0);
+                div().flex_1().min_h_0().flex().flex_col().child(self.logs_view(a, stack, svc, cx))
+            }
+            Some(workspace::TabKind::Files(_)) => div().flex_1().min_h_0().flex().flex_col().child(self.files_tab(window, cx)),
+            Some(workspace::TabKind::Node(_)) => {
+                let menu = self.menu(cx);
+                let content = self.content(window, cx);
+                div().flex_1().min_h_0().flex().flex_row().child(menu).child(content)
+            }
+            Some(workspace::TabKind::Nodes) | None => div().flex_1().min_h_0().flex().flex_col().child(self.nodes_page(window, cx)),
         };
         let drawer = if is_files_tab { None } else { self.files_drawer(window, cx) };
         let dialog = self.node_dialog(window, cx);
@@ -224,15 +201,7 @@ impl Render for Home {
             .bg(c::bg())
             .text_color(c::text())
             .child(titlebar)
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_row()
-                    .child(sidebar)
-                    .child(div().flex_1().min_w_0().flex().flex_col().child(tabbar).child(body)),
-            )
+            .child(body)
             .children(drawer)
             .children(dialog)
     }
@@ -264,13 +233,14 @@ fn main() {
             titlebar: Some(TitlebarOptions {
                 title: Some("DeskPanel".into()),
                 appears_transparent: true,
-                traffic_light_position: Some(point(px(16.0), px(14.0))),
+                traffic_light_position: Some(point(px(16.0), px(16.0))),
             }),
             ..Default::default()
         };
         gpui_kit::open_window(options, cx, move |window, cx| {
             cx.new(|cx| {
                 let mut h = Home::new();
+                h.init_node_search(window, cx);
                 if let Some(n) = &node {
                     let mut it = n.split(',').filter_map(|x| x.parse::<usize>().ok());
                     if let (Some(g), Some(n)) = (it.next(), it.next()) {

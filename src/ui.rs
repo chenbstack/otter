@@ -2,7 +2,6 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::mock::SPARK_N;
@@ -74,10 +73,19 @@ pub mod t {
 pub const MONO: &str = "Menlo";
 
 // ---- 尺寸 --------------------------------------------------------------------
-pub const SIDEBAR_W: f32 = 260.0;
 pub const MENU_W: f32 = 200.0;
 pub const TITLEBAR_H: f32 = 46.0;
-pub const TABBAR_H: f32 = 36.0;
+/// 标题栏里的标签(胶囊)高度,垂直居中
+pub const TAB_H: f32 = 30.0;
+/// 标题栏左侧给红绿灯留的宽度
+pub const TITLEBAR_PAD_L: f32 = 84.0;
+/// 节点页卡片:最小宽度(决定列数)、高度、间距
+pub const NODE_CARD_MIN_W: f32 = 260.0;
+pub const NODE_CARD_H: f32 = 68.0;
+/// 节点页:卡片里的图标块边长、顶部搜索条和主按钮高度
+pub const NODE_ICON: f32 = 40.0;
+pub const NODE_BAR_H: f32 = 38.0;
+pub const NODE_CARD_GAP: f32 = 12.0;
 pub const CONTENT_PAD: f32 = 20.0;
 
 pub const STACK_HEADER_H: f32 = 50.0;
@@ -130,19 +138,6 @@ pub fn tag(label: impl Into<SharedString>) -> Div {
         .child(label.into())
 }
 
-/// 状态圆点 + 一圈柔光。
-pub fn status_dot(color: Rgba, on: bool) -> Div {
-    div()
-        .size(px(14.0))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .when(on, |d| d.bg(color.opacity(0.16)))
-        .child(div().size(px(6.0)).rounded_full().bg(color))
-}
-
 /// 迷你柱状图:越旧越淡,最新一根满色,读起来有"时间往右走"的方向感。
 pub fn spark(values: &[f32; SPARK_N], color: Rgba, h: f32, gap: f32) -> Div {
     let n = values.len() as f32;
@@ -160,10 +155,6 @@ pub fn spark(values: &[f32; SPARK_N], color: Rgba, h: f32, gap: f32) -> Div {
                 .rounded_t(px(1.5))
                 .bg(color.opacity(alpha))
         }))
-}
-
-pub fn latency_color(ms: u32) -> Rgba {
-    if ms >= 2000 { c::warn() } else { c::muted() }
 }
 
 pub fn empty_state(ic: IconName, title: &'static str, sub: &'static str) -> Div {

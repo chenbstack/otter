@@ -1,4 +1,4 @@
-//! 标签页工作区:标签模型、打开/激活/关闭规则、标签栏。
+//! 标签页工作区:标签模型、打开/激活/关闭规则。标签的外观在 `titlebar.rs`。
 
 use std::mem;
 
@@ -7,6 +7,8 @@ use crate::files::{Files, Target};
 
 /// 标签类型。P1 逐步增加终端、文件、日志。
 pub enum TabKind {
+    /// 节点页:固定在最左,全局唯一,不可关闭。
+    Nodes,
     /// 节点标签:二级导航 + 页面。每个节点最多一个。
     Node(NodeId),
     /// 文件标签:全尺寸文件管理。可以同一节点开多个。
@@ -35,18 +37,26 @@ impl Tab {
         Self { kind, page: Page::Stacks, scroll: VirtualListScrollHandle::new(), files, follow: true, log_scroll: ScrollHandle::new() }
     }
 
-    pub fn node(&self) -> NodeId {
+    /// 标签所属的节点;节点页不属于任何节点。
+    pub fn node(&self) -> Option<NodeId> {
         match &self.kind {
-            TabKind::Node(id) | TabKind::Files(id) => *id,
-            TabKind::Terminal { node, .. } | TabKind::Logs { node, .. } => *node,
+            TabKind::Nodes => None,
+            TabKind::Node(id) | TabKind::Files(id) => Some(*id),
+            TabKind::Terminal { node, .. } | TabKind::Logs { node, .. } => Some(*node),
         }
     }
 }
 
-#[derive(Default)]
 pub struct Workspace {
     pub tabs: Vec<Tab>,
     pub active: Option<usize>,
+}
+
+impl Default for Workspace {
+    /// 只有固定的节点页标签,并停在它上面。
+    fn default() -> Self {
+        Self { tabs: vec![Tab::new(TabKind::Nodes, Files::new())], active: Some(0) }
+    }
 }
 
 impl Home {
@@ -121,109 +131,29 @@ impl Home {
         mem::swap(&mut self.scroll, &mut ws.tabs[ix].scroll);
         mem::swap(&mut self.files, &mut ws.tabs[ix].files);
         ws.active = Some(ix);
-        self.sel = ws.tabs[ix].node();
+        if let Some(n) = ws.tabs[ix].node() {
+            self.sel = n;
+        }
     }
 
-    /// 关闭标签:关的是当前标签时激活右侧相邻,没有就左侧;全关后显示空状态。
+    /// 关闭标签:关的是当前标签时激活右侧相邻,没有就左侧(最左永远是节点页)。节点页不可关闭。
     pub(crate) fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         let ws = &mut self.workspace;
-        if ix >= ws.tabs.len() {
+        if ix >= ws.tabs.len() || matches!(ws.tabs[ix].kind, TabKind::Nodes) {
             return;
         }
         let was_active = ws.active == Some(ix);
         ws.tabs.remove(ix);
         if was_active {
             ws.active = None;
-            if ws.tabs.is_empty() {
-                self.files.open = false;
-            } else {
-                // 当前标签的实时状态随它一起丢弃,不必存回
-                let next = if ix < ws.tabs.len() { ix } else { ix - 1 };
-                self.activate(next);
-            }
+            // 当前标签的实时状态随它一起丢弃,不必存回
+            let next = if ix < ws.tabs.len() { ix } else { ix - 1 };
+            self.activate(next);
         } else if let Some(a) = ws.active {
             if ix < a {
                 ws.active = Some(a - 1);
             }
         }
         cx.notify();
-    }
-
-    pub(crate) fn tab_bar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let active = self.workspace.active;
-        let tabs = self.workspace.tabs.iter().enumerate().map(|(ix, tab)| {
-            let on = active == Some(ix);
-            let (title, online, kind_icon) = {
-                let (g, n) = self.locate(tab.node());
-                let node = &self.groups[g].nodes[n];
-                match &tab.kind {
-                    TabKind::Node(_) => (node.name.clone(), node.online(), None),
-                    TabKind::Files(_) => (format!("{} · 文件", node.name), node.online(), Some(IconName::FolderOpen)),
-                    TabKind::Terminal { container, n, .. } => {
-                        let who = container.as_ref().map_or(node.name.clone(), |(_, svc)| svc.clone());
-                        let title = if *n > 1 { format!("{who} · 终端 {n}") } else { format!("{who} · 终端") };
-                        (title, node.online(), Some(IconName::SquareTerminal))
-                    }
-                    TabKind::Logs { svc, .. } => (format!("{svc} · 日志"), node.online(), Some(IconName::ScrollText)),
-                }
-            };
-            let group: SharedString = format!("tab-{ix}").into();
-            div()
-                .id(("tab", ix))
-                .group(group.clone())
-                .h_full()
-                .flex_shrink_0()
-                .min_w(px(120.0))
-                .max_w(px(220.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .pl(px(12.0))
-                .pr(px(8.0))
-                .border_r_1()
-                .border_color(c::border())
-                .text_size(px(t::TYPE_CONTROL))
-                .cursor_pointer()
-                .when(on, |d| d.bg(c::bg()).text_color(c::text()).font_weight(FontWeight::MEDIUM))
-                .when(!on, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
-                .child(match kind_icon {
-                    Some(ic) => div().size(px(14.0)).flex_shrink_0().flex().items_center().justify_center().child(icon(ic, 13.0, if on { c::online() } else { c::ghost() })),
-                    None => status_dot(if online { c::online() } else { c::ghost() }, online),
-                })
-                .child(div().flex_1().min_w_0().truncate().child(title))
-                .child(
-                    div()
-                        .id(("tab-close", ix))
-                        .size(px(18.0))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(t::RADIUS_XS))
-                        .when(!on, |d| d.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0)))
-                        .hover(|s| s.bg(c::selected()))
-                        .child(icon(IconName::X, 12.0, c::muted()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.close_tab(ix, cx);
-                        })),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.activate(ix);
-                    cx.notify();
-                }))
-        });
-        div()
-            .id("tabbar")
-            .h(px(TABBAR_H))
-            .flex_shrink_0()
-            .flex()
-            .flex_row()
-            .bg(c::chrome())
-            .border_b_1()
-            .border_color(c::border())
-            .overflow_x_scroll()
-            .children(tabs)
     }
 }
