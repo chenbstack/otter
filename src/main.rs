@@ -175,6 +175,7 @@ impl Render for Home {
         }
         let titlebar = self.titlebar(cx);
         let active_kind = self.workspace.active.map(|a| &self.workspace.tabs[a].kind);
+        let is_term = matches!(active_kind, Some(workspace::TabKind::Terminal { container: None, .. })) && self.active_term().is_some();
         let is_files_tab = matches!(active_kind, Some(workspace::TabKind::Files(_)));
         let body = match active_kind {
             Some(workspace::TabKind::Terminal { container: None, .. }) if self.active_term().is_some() => {
@@ -205,6 +206,8 @@ impl Render for Home {
             .flex_col()
             .bg(c::bg())
             .text_color(c::text())
+            // 服务器终端标签用纯色底,不铺光晕,标题栏和终端画布才是同一个颜色
+            .when(!is_term, |d| d.child(backdrop()))
             .child(titlebar)
             .child(body)
             .children(drawer)

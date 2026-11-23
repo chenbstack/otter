@@ -9,49 +9,71 @@ use crate::mock::SPARK_N;
 // ---- 色板(来自 theme.ts,略微拉开层次)---------------------------------------
 pub mod c {
     use gpui_kit::{Rgba, rgb, rgba};
-    pub fn bg() -> Rgba { rgb(0x14151C) }
-    pub fn chrome() -> Rgba { rgb(0x101119) }
-    pub fn raised() -> Rgba { rgb(0x1B1D27) }
-    pub fn raised_hi() -> Rgba { rgb(0x222534) }
-    pub fn sunken() -> Rgba { rgb(0x0F1016) }
-    pub fn selected() -> Rgba { rgb(0x2A2D3E) }
-    pub fn hover() -> Rgba { rgba(0xFFFFFF0A) }
-    pub fn border() -> Rgba { rgb(0x262938) }
-    pub fn border_strong() -> Rgba { rgb(0x373B50) }
-    pub fn text() -> Rgba { rgb(0xECEDF5) }
-    pub fn secondary() -> Rgba { rgb(0xC7C9D6) }
-    pub fn muted() -> Rgba { rgb(0x8B8EA0) }
-    pub fn ghost() -> Rgba { rgb(0x5C6075) }
+    // 配色:Velum "Nocturne" 暗色(墨黑底 + 光晕 + 烟熏玻璃卡片)。表面色是半透明白/黑,叠在 `backdrop` 上
+    pub fn bg() -> Rgba { rgb(0x0B0A0F) }
+    pub fn chrome() -> Rgba { rgba(0x0B0A0F6B) }
+    pub fn raised() -> Rgba { rgba(0xFFFFFF1B) }
+    pub fn raised_hi() -> Rgba { rgba(0xFFFFFF2B) }
+    pub fn sunken() -> Rgba { rgba(0x00000080) }
+    pub fn selected() -> Rgba { rgba(0xFFFFFF2B) }
+    pub fn hover() -> Rgba { rgba(0xFFFFFF14) }
+    pub fn border() -> Rgba { rgba(0xFFFFFF1F) }
+    pub fn border_strong() -> Rgba { rgba(0xFFFFFF38) }
+    pub fn text() -> Rgba { rgb(0xF5F4F7) }
+    pub fn secondary() -> Rgba { rgb(0xC9C8D0) }
+    pub fn muted() -> Rgba { rgb(0x9E9DA9) }
+    pub fn ghost() -> Rgba { rgb(0x605F6C) }
     /// 强调色(按钮、选中、焦点);绿色 `online` 只表示成功/运行中/已连接
-    pub fn accent() -> Rgba { rgb(0x7C86FF) }
-    pub fn accent_soft() -> Rgba { rgba(0x7C86FF1F) }
-    pub fn online() -> Rgba { rgb(0x4ce3a0) }
-    pub fn warn() -> Rgba { rgb(0xe3b34c) }
-    pub fn danger() -> Rgba { rgb(0xe35c5c) }
-    pub fn online_soft() -> Rgba { rgba(0x4ce3a01F) }
-    pub fn warn_soft() -> Rgba { rgba(0xe3b34c1F) }
-    pub fn idle_soft() -> Rgba { rgba(0xFFFFFF0F) }
+    pub fn accent() -> Rgba { rgb(0x8B80FF) }
+    pub fn accent_soft() -> Rgba { rgba(0x8B80FF38) }
+    pub fn online() -> Rgba { rgb(0x46D9A0) }
+    pub fn warn() -> Rgba { rgb(0xFFB24A) }
+    pub fn danger() -> Rgba { rgb(0xFF5C6C) }
+    pub fn online_soft() -> Rgba { rgba(0x46D9A02B) }
+    pub fn warn_soft() -> Rgba { rgba(0xFFB24A2B) }
+    pub fn idle_soft() -> Rgba { rgba(0xFFFFFF14) }
     pub fn cpu() -> Rgba { rgb(0x7f89f0) }
     pub fn mem() -> Rgba { rgb(0xb18cf2) }
     pub fn net() -> Rgba { rgb(0x3fd0c9) }
     pub fn disk() -> Rgba { rgb(0xe8964c) }
-    // 弹窗
-    pub fn dialog() -> Rgba { rgb(0x1F2130) }
-    pub fn dialog_footer() -> Rgba { rgb(0x1B1D2A) }
-    pub fn dialog_border() -> Rgba { rgba(0xFFFFFF1A) }
-    pub fn line() -> Rgba { rgba(0xFFFFFF0F) }
-    pub fn field() -> Rgba { rgba(0xFFFFFF08) }
-    pub fn field_hover() -> Rgba { rgba(0xFFFFFF0C) }
-    pub fn field_border() -> Rgba { rgba(0xFFFFFF14) }
-    pub fn field_focus_bg() -> Rgba { rgba(0x7C86FF0A) }
-    pub fn seg_on() -> Rgba { rgba(0xFFFFFF14) }
-    pub fn label() -> Rgba { rgb(0xA2A5B8) }
-    pub fn on_accent() -> Rgba { rgb(0x0A0B1A) }
+    // 弹窗、抽屉:要盖住下层内容,所以不透明
+    pub fn dialog() -> Rgba { rgb(0x1A1822) }
+    pub fn dialog_footer() -> Rgba { rgb(0x15131C) }
+    pub fn dialog_border() -> Rgba { rgba(0xFFFFFF26) }
+    pub fn line() -> Rgba { rgba(0xFFFFFF14) }
+    pub fn field() -> Rgba { rgba(0xFFFFFF10) }
+    pub fn field_hover() -> Rgba { rgba(0xFFFFFF18) }
+    pub fn field_border() -> Rgba { rgba(0xFFFFFF1F) }
+    pub fn field_focus_bg() -> Rgba { rgba(0x8B80FF14) }
+    pub fn seg_on() -> Rgba { rgba(0xFFFFFF26) }
+    pub fn label() -> Rgba { rgb(0xA9A8B4) }
+    pub fn on_accent() -> Rgba { rgb(0xFFFFFF) }
     // 遮罩
     pub fn scrim_dialog() -> Rgba { rgba(0x0000008C) }
-    pub fn scrim_drop() -> Rgba { rgba(0x14151CE6) }
+    pub fn scrim_drop() -> Rgba { rgba(0x0B0A0FE6) }
     // 文件类型
     pub fn folder() -> Rgba { rgb(0x7fa8f0) }
+}
+
+/// 窗口底:墨黑上铺三团光晕(玫红、紫、蓝),各区域的半透明表面叠在它上面。
+/// GPUI 没有径向渐变,用一摞半透明同心圆近似。
+pub fn backdrop() -> Div {
+    use gpui_kit::{Rgba, rgba};
+    const LAYERS: usize = 40;
+    fn blob(x: f32, y: f32, radius: f32, hex: u32) -> impl Iterator<Item = Div> {
+        (0..LAYERS).map(move |i| {
+            let r = radius * (1.0 - i as f32 / LAYERS as f32);
+            let color: Rgba = rgba((hex << 8) | 0x12);
+            div().absolute().left(relative(x)).top(relative(y)).ml(px(-r)).mt(px(-r)).size(px(r * 2.0)).rounded_full().bg(color)
+        })
+    }
+    div()
+        .absolute()
+        .inset_0()
+        .overflow_hidden()
+        .children(blob(0.06, 0.0, 640.0, 0x3A1A2B))
+        .children(blob(1.0, 0.08, 600.0, 0x261D45))
+        .children(blob(0.72, 1.05, 680.0, 0x14264A))
 }
 
 /// 字号与圆角 token,标准值见 docs/design/tokens.md
@@ -65,12 +87,12 @@ pub mod t {
     pub const TYPE_CAPTION: f32 = 11.0;
     pub const TYPE_MICRO: f32 = 10.5;
 
-    pub const RADIUS_XS: f32 = 4.0;
-    pub const RADIUS_SM: f32 = 6.0;
-    pub const RADIUS_MD: f32 = 8.0;
-    pub const RADIUS_LG: f32 = 10.0;
-    pub const RADIUS_XL: f32 = 12.0;
-    pub const RADIUS_2XL: f32 = 14.0;
+    pub const RADIUS_XS: f32 = 6.0;
+    pub const RADIUS_SM: f32 = 8.0;
+    pub const RADIUS_MD: f32 = 11.0;
+    pub const RADIUS_LG: f32 = 14.0;
+    pub const RADIUS_XL: f32 = 18.0;
+    pub const RADIUS_2XL: f32 = 20.0;
 }
 
 pub const MONO: &str = "Menlo";

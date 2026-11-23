@@ -98,7 +98,6 @@ impl Home {
             .flex_shrink_0()
             .pl(px(TITLEBAR_PAD_L))
             .pr(px(CONTENT_PAD))
-            .bg(c::bg())
             .child(pinned)
             .child(div().w(px(1.0)).h(px(14.0)).mx(px(4.0)).flex_shrink_0().bg(c::border_strong()))
             .child(div().id("tabs").flex().flex_row().items_center().gap(px(4.0)).min_w_0().overflow_x_scroll().children(rest))

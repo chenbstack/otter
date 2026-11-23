@@ -1511,7 +1511,7 @@ impl Home {
             .relative()
             .flex()
             .flex_col()
-            .bg(c::bg())
+            .when(!tab_mode, |d| d.bg(c::dialog()))
             .occlude()
             .when(tab_mode, |d| d.flex_1().min_w_0().min_h_0())
             .when(!tab_mode, |d| {

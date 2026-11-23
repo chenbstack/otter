@@ -716,7 +716,7 @@ pub(crate) fn service_card(
         .rounded(px(t::RADIUS_LG))
         .border_1()
         .border_color(c::border())
-        .bg(c::bg())
+        .bg(c::sunken())
         .overflow_hidden()
         .child(head)
         .child(
