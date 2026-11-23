@@ -1,7 +1,7 @@
 //! SSH 会话:russh 跑在后台 tokio 运行时里,和界面之间用 channel 传字节。
 //!
 //! 对外是一对阻塞的 `Read`/`Write`(喂给 `gpui_xterm::TerminalView::new`)、
-//! 一个调整行列的句柄和一个状态。密码、口令、主机密钥确认都在终端里以提示行的形式完成。
+//! 一个调整行列的句柄和一个状态。密码、口令在终端里以提示行的形式输入;主机密钥确认由「连接中」页的卡片完成(`Handle::host_prompt/answer_host`)。
 
 use crate::logs;
 use std::io::{Read, Write};
@@ -9,16 +9,52 @@ use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use zeroize::Zeroizing;
+
 use russh::client;
 use russh::keys::{self, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
 use russh::{ChannelMsg, Disconnect};
 use tokio::sync::mpsc as tokio_mpsc;
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum AuthKind {
-    Agent,
-    Key { path: String },
-    Password,
+/// 私钥认证材料(PEM 文本和可选口令),用完即清零。
+#[derive(Clone)]
+pub struct KeyAuth {
+    pub pem: Zeroizing<String>,
+    pub passphrase: Option<Zeroizing<String>>,
+    /// 来源标签(导入时的路径),只用于日志
+    pub label: String,
+}
+
+/// 一个节点的认证方式,可叠加;连接时依次尝试 私钥 → SSH Agent → 密码。
+/// 三项都没有时,连接时在终端里问密码。
+#[derive(Clone, Default)]
+pub struct Auth {
+    pub key: Option<KeyAuth>,
+    pub agent: bool,
+    pub password: Option<Zeroizing<String>>,
+}
+
+impl std::fmt::Debug for Auth {
+    // 不输出任何秘密内容
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Auth {{ key: {}, agent: {}, password: {} }}", self.key.is_some(), self.agent, self.password.is_some())
+    }
+}
+
+impl Auth {
+    fn describe(&self) -> String {
+        let mut v = Vec::new();
+        if let Some(k) = &self.key {
+            v.push(format!("私钥 {}", k.label));
+        }
+        if self.agent {
+            v.push("SSH Agent".into());
+        }
+        if self.password.is_some() {
+            v.push("密码".into());
+        }
+        if v.is_empty() { "密码(手动输入)".into() } else { v.join("、") }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -26,7 +62,9 @@ pub struct Conn {
     pub host: String,
     pub port: u16,
     pub user: String,
-    pub auth: AuthKind,
+    pub auth: Auth,
+    /// 读取已保存的认证信息失败(如系统凭据库不可用);连接时直接报这个错
+    pub auth_error: Option<String>,
 }
 
 impl Conn {
@@ -37,7 +75,7 @@ impl Conn {
             Some((h, p)) if p.parse::<u16>().is_ok() => (h, p.parse().unwrap()),
             _ => (rest, 22),
         };
-        Conn { host: host.into(), port, user: user.into(), auth: AuthKind::Agent }
+        Conn { host: host.into(), port, user: user.into(), auth: Auth { agent: true, ..Default::default() }, auth_error: None }
     }
 }
 
@@ -49,6 +87,18 @@ pub enum Status {
     Connected,
     Closed(Option<String>),
 }
+
+/// 首次连接时等用户确认的主机密钥,界面的「连接中」页据此显示确认卡片。
+#[derive(Clone, Debug, PartialEq)]
+pub struct HostKeyPrompt {
+    pub host: String,
+    pub port: u16,
+    pub algo: String,
+    pub fingerprint: String,
+}
+
+/// 待确认的主机密钥 + 回复通道。
+type PendingHost = Arc<Mutex<Option<(HostKeyPrompt, Option<tokio::sync::oneshot::Sender<bool>>)>>>;
 
 /// 连接过程里的一步,界面的「连接中」页据此逐步展示。
 #[derive(Clone, Debug, PartialEq)]
@@ -116,6 +166,7 @@ pub struct Handle {
     resize: tokio_mpsc::UnboundedSender<(u16, u16)>,
     pub status: Arc<Mutex<Status>>,
     pub steps: Arc<Mutex<Vec<Step>>>,
+    host_prompt: PendingHost,
     abort: tokio::task::AbortHandle,
 }
 
@@ -129,6 +180,18 @@ impl Handle {
     }
     pub fn status(&self) -> Status {
         self.status.lock().map(|s| s.clone()).unwrap_or(Status::Closed(None))
+    }
+    /// 正在等用户确认的新主机指纹
+    pub fn host_prompt(&self) -> Option<HostKeyPrompt> {
+        self.host_prompt.lock().ok().and_then(|g| g.as_ref().map(|(p, _)| p.clone()))
+    }
+    /// 回答主机指纹确认:`true` 信任并继续,`false` 取消连接
+    pub fn answer_host(&self, yes: bool) {
+        if let Ok(mut g) = self.host_prompt.lock() {
+            if let Some(tx) = g.as_mut().and_then(|(_, tx)| tx.take()) {
+                let _ = tx.send(yes);
+            }
+        }
     }
     pub fn steps(&self) -> Vec<Step> {
         self.steps.lock().map(|s| s.clone()).unwrap_or_default()
@@ -152,10 +215,12 @@ pub fn connect(conn: Conn, cols: usize, rows: usize) -> (Input, Output, Handle) 
     let (rs_tx, rs_rx) = tokio_mpsc::unbounded_channel::<(u16, u16)>();
     let status = Arc::new(Mutex::new(Status::Connecting));
     let steps = Arc::new(Mutex::new(Vec::new()));
+    let host_prompt: PendingHost = Arc::new(Mutex::new(None));
     let st = status.clone();
     let steps_io = steps.clone();
+    let hp_io = host_prompt.clone();
     let join = runtime().spawn(async move {
-        let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone(), steps: steps_io };
+        let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone(), steps: steps_io, host_prompt: hp_io };
         let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
         logs::push(logs::Level::Info, &label, "开始连接");
         let res = run(&conn, cols as u16, rows as u16, io.clone(), rs_rx).await;
@@ -174,7 +239,7 @@ pub fn connect(conn: Conn, cols: usize, rows: usize) -> (Input, Output, Handle) 
         set(&st, Status::Closed(reason));
         // io 在这里释放,Output 读到 0
     });
-    (Input(in_tx.clone()), Output { rx: out_rx, left: Vec::new() }, Handle { input: in_tx, resize: rs_tx, status, steps, abort: join.abort_handle() })
+    (Input(in_tx.clone()), Output { rx: out_rx, left: Vec::new() }, Handle { input: in_tx, resize: rs_tx, status, steps, host_prompt, abort: join.abort_handle() })
 }
 
 fn set(st: &Arc<Mutex<Status>>, s: Status) {
@@ -189,9 +254,23 @@ struct Io {
     inp: Arc<tokio::sync::Mutex<tokio_mpsc::UnboundedReceiver<Vec<u8>>>>,
     status: Arc<Mutex<Status>>,
     steps: Arc<Mutex<Vec<Step>>>,
+    host_prompt: PendingHost,
 }
 
 impl Io {
+    /// 挂出主机指纹确认,等界面回答(取消、会话被丢弃都算拒绝)
+    async fn confirm_host(&self, prompt: HostKeyPrompt) -> bool {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Ok(mut g) = self.host_prompt.lock() {
+            *g = Some((prompt, Some(tx)));
+        }
+        let ans = rx.await.unwrap_or(false);
+        if let Ok(mut g) = self.host_prompt.lock() {
+            *g = None;
+        }
+        ans
+    }
+
     /// 开始下一步
     fn begin_step(&self, label: &'static str) {
         if let Ok(mut g) = self.steps.lock() {
@@ -294,19 +373,14 @@ async fn verify_host(io: &Io, host: &str, port: u16, key: &PublicKey) -> Result<
     match keys::known_hosts::check_known_hosts_path(host, port, key, &path) {
         Ok(true) => Ok(true),
         Ok(false) => {
-            io.say(&format!(
-                "首次连接 {host}:{port}\r\n{} 指纹:{fp}\r\n",
-                key.algorithm()
-            ));
-            let ans = io.ask("确认继续连接?(yes/no) ", true).await;
-            if matches!(ans.as_deref(), Some("yes")) {
+            logs::push(logs::Level::Info, &format!("{host}:{port}"), format!("首次连接,等待确认指纹 {fp}"));
+            let prompt = HostKeyPrompt { host: host.to_string(), port, algo: key.algorithm().to_string(), fingerprint: fp.to_string() };
+            if io.confirm_host(prompt).await {
                 let _ = keys::known_hosts::learn_known_hosts_path(host, port, key, &path);
                 logs::push(logs::Level::Info, &format!("{host}:{port}"), format!("已信任新主机 {fp}"));
-                io.say("已记住该主机。\r\n");
                 Ok(true)
             } else {
                 logs::push(logs::Level::Warn, &format!("{host}:{port}"), "未确认新主机,已取消连接");
-                io.say("\x1b[31m已取消。\x1b[0m\r\n");
                 io.fail_step("未确认新主机的指纹,已取消连接");
                 Ok(false)
             }
@@ -327,7 +401,7 @@ async fn verify_host(io: &Io, host: &str, port: u16, key: &PublicKey) -> Result<
     }
 }
 
-fn expand(path: &str) -> PathBuf {
+pub(crate) fn expand(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
         Some(rest) => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rest),
         None => PathBuf::from(path),
@@ -354,11 +428,7 @@ async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, mut resize: tokio_mpsc::
     logs::push(
         logs::Level::Info,
         &label,
-        match &conn.auth {
-            AuthKind::Agent => "开始认证(SSH Agent)".to_string(),
-            AuthKind::Key { path } => format!("开始认证(私钥 {path})"),
-            AuthKind::Password => "开始认证(密码)".to_string(),
-        },
+        format!("开始认证({})", conn.auth.describe()),
     );
     authenticate(conn, &io, &mut session).await?;
     io.done_step();
@@ -403,46 +473,78 @@ async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, mut resize: tokio_mpsc::
 }
 
 async fn authenticate(conn: &Conn, io: &Io, session: &mut client::Handle<Client>) -> Result<(), String> {
-    let user = conn.user.clone();
-    let ok = match &conn.auth {
-        AuthKind::Password => {
-            let pw = io.ask(&format!("{}@{} 的密码:", conn.user, conn.host), false).await.ok_or("已取消")?;
-            let r = session.authenticate_password(user, pw).await.map_err(|e| e.to_string())?;
-            r.success()
-        }
-        AuthKind::Key { path } => {
-            let p = expand(path);
-            let key = match keys::load_secret_key(&p, None) {
-                Ok(k) => k,
-                Err(keys::Error::KeyIsEncrypted) => {
-                    let pass = io.ask(&format!("私钥 {path} 的口令:"), false).await.ok_or("已取消")?;
-                    keys::load_secret_key(&p, Some(&pass)).map_err(|e| format!("私钥口令不对或私钥无法读取:{e}"))?
-                }
-                Err(e) => return Err(format!("读取私钥 {path} 失败:{e}")),
-            };
-            let hash = session.best_supported_rsa_hash().await.map_err(|e| e.to_string())?.flatten();
-            session.authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash)).await.map_err(|e| e.to_string())?.success()
-        }
-        AuthKind::Agent => {
-            let mut agent = keys::agent::client::AgentClient::connect_env().await.map_err(|e| format!("连不上 SSH Agent:{e}"))?;
-            let ids = agent.request_identities().await.map_err(|e| format!("读取 Agent 密钥失败:{e}"))?;
-            if ids.is_empty() {
-                return Err("SSH Agent 里没有密钥(可先 ssh-add)".into());
+    if let Some(e) = &conn.auth_error {
+        return Err(e.clone());
+    }
+    let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
+    let auth = &conn.auth;
+    let mut errors: Vec<String> = Vec::new();
+
+    if let Some(k) = &auth.key {
+        match try_key(conn, io, session, k).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => errors.push(format!("私钥 {} 被服务器拒绝", k.label)),
+            Err(e) => {
+                logs::push(logs::Level::Warn, &label, e.clone());
+                errors.push(e);
             }
-            let hash = session.best_supported_rsa_hash().await.map_err(|e| e.to_string())?.flatten();
-            let mut done = false;
-            for id in ids {
-                let keys::agent::AgentIdentity::PublicKey { key, .. } = id else { continue };
-                let r = session.authenticate_publickey_with(user.clone(), key, hash, &mut agent).await.map_err(|e| e.to_string())?;
-                if r.success() {
-                    done = true;
-                    break;
-                }
-            }
-            done
         }
+    }
+    if auth.agent {
+        match try_agent(conn, session).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => errors.push("SSH Agent 里的密钥都被服务器拒绝".into()),
+            Err(e) => {
+                logs::push(logs::Level::Warn, &label, e.clone());
+                errors.push(e);
+            }
+        }
+    }
+    let password = match &auth.password {
+        Some(p) => Some(p.clone()),
+        // 什么都没配置:在终端里问密码
+        None if auth.key.is_none() && !auth.agent => Some(Zeroizing::new(io.ask(&format!("{}@{} 的密码:", conn.user, conn.host), false).await.ok_or("已取消")?)),
+        None => None,
     };
-    if ok { Ok(()) } else { Err("认证失败".into()) }
+    if let Some(pw) = password {
+        let r = session.authenticate_password(conn.user.clone(), pw.as_str().to_string()).await.map_err(|e| e.to_string())?;
+        if r.success() {
+            return Ok(());
+        }
+        errors.push("密码不对或服务器不允许密码登录".into());
+    }
+    Err(if errors.is_empty() { "认证失败".into() } else { errors.join(";") })
+}
+
+async fn try_key(conn: &Conn, io: &Io, session: &mut client::Handle<Client>, k: &KeyAuth) -> Result<bool, String> {
+    let pass = k.passphrase.as_ref().map(|p| p.as_str().to_string());
+    let key = match keys::decode_secret_key(&k.pem, pass.as_deref()) {
+        Ok(key) => key,
+        Err(keys::Error::KeyIsEncrypted) => {
+            let p = Zeroizing::new(io.ask(&format!("私钥 {} 的口令:", k.label), false).await.ok_or("已取消")?);
+            keys::decode_secret_key(&k.pem, Some(p.as_str())).map_err(|e| format!("私钥口令不对或私钥无法读取:{e}"))?
+        }
+        Err(e) => return Err(format!("读取私钥 {} 失败:{e}", k.label)),
+    };
+    let hash = session.best_supported_rsa_hash().await.map_err(|e| e.to_string())?.flatten();
+    Ok(session.authenticate_publickey(conn.user.clone(), PrivateKeyWithHashAlg::new(Arc::new(key), hash)).await.map_err(|e| e.to_string())?.success())
+}
+
+async fn try_agent(conn: &Conn, session: &mut client::Handle<Client>) -> Result<bool, String> {
+    let mut agent = keys::agent::client::AgentClient::connect_env().await.map_err(|e| format!("连不上 SSH Agent:{e}"))?;
+    let ids = agent.request_identities().await.map_err(|e| format!("读取 Agent 密钥失败:{e}"))?;
+    if ids.is_empty() {
+        return Err("SSH Agent 里没有密钥(可先 ssh-add)".into());
+    }
+    let hash = session.best_supported_rsa_hash().await.map_err(|e| e.to_string())?.flatten();
+    for id in ids {
+        let keys::agent::AgentIdentity::PublicKey { key, .. } = id else { continue };
+        let r = session.authenticate_publickey_with(conn.user.clone(), key, hash, &mut agent).await.map_err(|e| e.to_string())?;
+        if r.success() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

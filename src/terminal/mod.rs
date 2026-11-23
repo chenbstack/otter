@@ -85,7 +85,12 @@ impl Home {
     /// 重新连接:丢弃旧会话,用同样的连接信息开新会话。
     fn reconnect_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(a) = self.workspace.active else { return };
-        let Some(conn) = self.workspace.tabs[a].term.as_ref().map(|t| t.conn.clone()) else { return };
+        let Some(old) = self.workspace.tabs[a].term.as_ref().map(|t| t.conn.clone()) else { return };
+        // 节点可能刚被编辑过,重新从库里读认证信息
+        let conn = match self.workspace.tabs[a].node() {
+            Some(id) => self.conn_for(id),
+            None => old,
+        };
         self.workspace.tabs[a].term = None;
         let session = self.start_session(conn, window, cx);
         self.workspace.tabs[a].term = Some(session);

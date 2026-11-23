@@ -186,7 +186,11 @@ impl Home {
             .filter(|n| query.is_empty() || n.name.to_lowercase().contains(&query) || n.user_host.to_lowercase().contains(&query))
             .collect();
         if nodes.is_empty() {
-            list = list.child(empty_state(IconName::Search, "没有匹配的节点", "换个关键词或筛选条件"));
+            if self.all_nodes().next().is_none() {
+                list = list.child(empty_state(IconName::Server, "还没有节点", "点右上角「新建节点」添加第一台服务器"));
+            } else {
+                list = list.child(empty_state(IconName::Search, "没有匹配的节点", "换个关键词或筛选条件"));
+            }
         } else {
             let label = if searching { "搜索结果" } else { "节点" };
             let cards: Vec<_> = nodes.into_iter().map(|n| self.node_card(n, card_w, cx)).collect();
@@ -275,7 +279,7 @@ impl Home {
             )
             .child(
                 div()
-                    .id(("node-manage", id.0 as usize))
+                    .id(("node-edit", id.0 as usize))
                     .size(px(24.0))
                     .flex_shrink_0()
                     .flex()
@@ -285,11 +289,11 @@ impl Home {
                     .opacity(0.0)
                     .group_hover(format!("node-card-{}", id.0), |s| s.opacity(1.0))
                     .hover(|s| s.bg(c::hover()))
-                    .child(icon(IconName::Settings2, 14.0, c::muted()))
-                    .tooltip(|_, cx| cx.new(|_| crate::files::Tip("管理".into())).into())
+                    .child(icon(IconName::Pencil, 14.0, c::muted()))
+                    .tooltip(|_, cx| cx.new(|_| crate::files::Tip("编辑".into())).into())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
-                        this.open_node(id, Some(crate::workspace::NodeMode::Containers), window, cx);
+                        this.open_edit_node(id, window, cx);
                     })),
             )
             .on_click(cx.listener(move |this, _, window, cx| {

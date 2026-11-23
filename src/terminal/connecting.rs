@@ -1,6 +1,6 @@
 //! 「连接中」页:点节点卡片后先显示它,逐步展示连接过程;失败时留在这页显示原因,可重试。
 //! 没有卡片:整页居中排版,大图标 + 标题 + 横向步骤条 + 失败原因 + 操作。
-//! 密码、口令、主机密钥确认要在终端里输入,所以进入这些等待时自动切到终端画布。
+//! 首次连接的主机指纹确认以卡片形式显示在本页(信任并继续 / 取消);密码、口令仍在终端里输入,进入等待时自动切到终端画布。
 
 use ::gpui::{Animation, AnimationExt as _, bounce, ease_in_out, ease_out_quint, linear};
 use std::time::Duration;
@@ -126,6 +126,108 @@ impl Home {
             .child(div().text_size(px(t::TYPE_MICRO)).font_weight(FontWeight::SEMIBOLD).text_color(c::muted()).child("连接日志"))
             .child(log_rows);
 
+        // 首次连接的主机指纹确认:卡片替代下面的日志和操作按钮
+        let prompt = tab.term.as_ref().and_then(|t| t.handle.host_prompt());
+        let confirm = prompt.as_ref().map(|p| {
+            let row = |k: &'static str, v: String, mono: bool| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .gap(px(12.0))
+                    .child(div().w(px(40.0)).flex_shrink_0().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(k))
+                    .child(div().flex_1().min_w_0().text_size(px(if mono { t::TYPE_CONTROL } else { t::TYPE_BODY })).when(mono, |d| d.font_family(MONO)).text_color(c::text()).child(v))
+            };
+            div()
+                .w_full()
+                .mt(px(28.0))
+                .p(px(18.0))
+                .flex()
+                .flex_col()
+                .gap(px(14.0))
+                .rounded(px(t::RADIUS_LG))
+                .bg(c::dialog())
+                .border_1()
+                .border_color(c::dialog_border())
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .size(px(36.0))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(t::RADIUS_MD))
+                                .bg(c::accent_soft())
+                                .child(icon(IconName::FingerprintPattern, 18.0, c::accent())),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child("首次连接这台服务器"))
+                                .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child("dockyard 还不认识它。请核对指纹与服务器一致,再继续;继续后会记住这台主机。")),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .p(px(12.0))
+                        .rounded(px(t::RADIUS_MD))
+                        .bg(c::field())
+                        .border_1()
+                        .border_color(c::field_border())
+                        .child(row("主机", format!("{}:{}", p.host, p.port), true))
+                        .child(row("算法", p.algo.clone(), true))
+                        .child(row("指纹", p.fingerprint.clone(), true)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .child(button("host-deny", IconName::X, "取消").on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(t) = this.workspace.tabs.get(a).and_then(|t| t.term.as_ref()) {
+                                t.handle.answer_host(false);
+                            }
+                            cx.notify();
+                        })))
+                        .child(
+                            div()
+                                .id("host-accept")
+                                .h(px(30.0))
+                                .px(px(14.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .rounded(px(t::RADIUS_MD))
+                                .bg(c::accent())
+                                .text_color(c::on_accent())
+                                .text_size(px(t::TYPE_CONTROL))
+                                .font_weight(FontWeight::MEDIUM)
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.88))
+                                .child(icon(IconName::Check, 13.0, c::on_accent()))
+                                .child("信任并继续")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(t) = this.workspace.tabs.get(a).and_then(|t| t.term.as_ref()) {
+                                        t.handle.answer_host(true);
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                )
+        });
+
         let title = if failed { format!("无法连接 {name}") } else { format!("正在连接 {name}") };
         let actions = div()
             .flex()
@@ -201,8 +303,8 @@ impl Home {
                 .child(div().text_size(px(20.0)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(title))
                 .child(div().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::ghost()).child(conn))
                 .child(div().w_full().mt(px(32.0)).flex().flex_row().children((0..n).map(col)))
-                .child(div().mt(px(28.0)).child(actions))
-                .child(log_area)
+                .children(confirm)
+                .when(prompt.is_none(), |d| d.child(div().mt(px(28.0)).child(actions)).child(log_area))
                 // 页面进入:淡入并从下方轻轻升起
                 .with_animation("conn-enter", Animation::new(Duration::from_millis(420)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(16.0 * (1.0 - t)))),
         )

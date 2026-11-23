@@ -163,7 +163,7 @@ impl Home {
             }
             NodeMode::Terminal => {
                 if self.workspace.tabs[a].term.is_none() {
-                    let conn = crate::terminal::ssh::Conn::parse(&self.node().user_host);
+                    let conn = self.conn_for(self.node().id);
                     let session = self.start_session(conn, window, cx);
                     self.workspace.tabs[a].term = Some(session);
                 }

@@ -6,6 +6,8 @@
 mod files;
 mod known_hosts;
 mod logs;
+mod secrets;
+mod store;
 mod mock;
 mod node_form;
 mod nodes;
@@ -100,6 +102,10 @@ struct Home {
     shot: Option<(String, u32)>,
     /// 添加 / 编辑节点弹窗
     form: Option<node_form::NodeForm>,
+    /// 本地配置库;`--demo` 或库打不开时为 None
+    store: Option<store::Store>,
+    /// 秘密加密器;第一次用到时才向系统凭据库取主密钥(避免启动就弹授权)
+    vault: Option<secrets::Vault>,
     /// 当前标签的文件视图状态(节点标签里是抽屉,文件标签里是主体),随标签切换
     files: files::Files,
     /// 各文件视图共享的 mock 上传/新建/删除状态
@@ -107,11 +113,30 @@ struct Home {
 }
 
 impl Home {
-    fn new() -> Self {
-        let groups = mock::groups();
-        let sel = groups[1].nodes[0].id;
+    /// `demo`:载入 mock 示例数据且不碰本地库(`--demo`;截图也用它,保证画面可复现)。
+    /// 否则打开本地库;库打不开时给出日志并退回空列表(此时新增的节点只在内存里)。
+    fn new(demo: bool) -> Self {
+        let mut store = None;
+        let groups = if demo {
+            mock::groups()
+        } else {
+            match store::Store::open_default().and_then(|s| s.load_groups().map(|g| (s, g))) {
+                Ok((s, g)) => {
+                    store = Some(s);
+                    g
+                }
+                Err(e) => {
+                    logs::push(logs::Level::Error, "本地库", &format!("{e};本次运行的节点不会保存"));
+                    vec![Group { id: 0, name: "未分组".into(), color: 0x7d8ea6, nodes: vec![] }]
+                }
+            }
+        };
+        // 没有节点时 sel 为 0(「无」)
+        let sel = groups.iter().flat_map(|g| g.nodes.iter()).map(|n| n.id).next().unwrap_or(NodeId(0));
         let next_id = groups.iter().flat_map(|g| g.nodes.iter()).map(|n| n.id.0).max().unwrap_or(0) + 1;
         Self {
+            store,
+            vault: None,
             groups,
             workspace: Workspace::default(),
             sel,
@@ -244,6 +269,10 @@ fn main() {
     let plain = args.iter().any(|a| a == "--plain");
     let page: Option<usize> = arg("--page").and_then(|v| v.parse().ok());
     let add = args.iter().any(|a| a == "--add");
+    // --empty:截图用,空节点列表(不读写本地库)
+    let empty = args.iter().any(|a| a == "--empty");
+    // --demo 或 --shot:用 mock 示例数据,不读写本地库
+    let demo = args.iter().any(|a| a == "--demo") || shot.is_some();
     // --tabs n:节点名,f:节点名[@堆栈/服务]  清空后依次打开标签;--active k 激活第 k 个(从 0 起)
     let tabs_arg = arg("--tabs");
     let active_arg: Option<usize> = arg("--active").and_then(|v| v.parse().ok());
@@ -272,7 +301,11 @@ fn main() {
         };
         gpui_kit::open_window(options, cx, move |window, cx| {
             cx.new(|cx| {
-                let mut h = Home::new();
+                let mut h = Home::new(demo);
+                if empty {
+                    h.groups = vec![Group { id: 0, name: "未分组".into(), color: 0x7d8ea6, nodes: vec![] }];
+                    h.sel = NodeId(0);
+                }
                 h.init_node_search(window, cx);
                 if let Some(n) = &node {
                     let mut it = n.split(',').filter_map(|x| x.parse::<usize>().ok());
@@ -342,8 +375,10 @@ fn main() {
                     h.activate(0);
                     h.set_nodes_view(nodes::NodesView::ALL[k.min(3)], cx);
                 }
-                for st in h.node_mut().stacks.iter_mut().take(expand) {
-                    st.expanded = true;
+                if h.all_nodes().next().is_some() {
+                    for st in h.node_mut().stacks.iter_mut().take(expand) {
+                        st.expanded = true;
+                    }
                 }
                 h.hide_charts = plain;
                 if let Some(p) = page {
@@ -352,6 +387,9 @@ fn main() {
                 h.shot = shot.clone().map(|p| (p, 0));
                 if add {
                     h.open_add_node(window, cx);
+                    if std::env::var_os("DOCKYARD_ADD_MENU").is_some() {
+                        h.debug_open_group_menu();
+                    }
                 }
                 if let Some(t) = &files_arg {
                     let target = match t.split_once('/') {

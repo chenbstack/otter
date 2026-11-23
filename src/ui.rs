@@ -2,6 +2,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::mock::SPARK_N;
@@ -38,14 +39,11 @@ pub mod c {
     pub fn disk() -> Rgba { rgb(0xe8964c) }
     // 弹窗、抽屉:要盖住下层内容,所以不透明
     pub fn dialog() -> Rgba { rgb(0x15141F) }
-    pub fn dialog_footer() -> Rgba { rgb(0x100F19) }
     pub fn dialog_border() -> Rgba { rgba(0x9A94E02A) }
     pub fn line() -> Rgba { rgba(0x9A94E016) }
     pub fn field() -> Rgba { rgba(0x9A94E00A) }
     pub fn field_hover() -> Rgba { rgba(0x9A94E014) }
     pub fn field_border() -> Rgba { rgba(0x9A94E022) }
-    pub fn field_focus_bg() -> Rgba { rgba(0x8B80FF14) }
-    pub fn label() -> Rgba { rgb(0xA9A8B4) }
     pub fn on_accent() -> Rgba { rgb(0xFFFFFF) }
     // 遮罩
     pub fn scrim_dialog() -> Rgba { rgba(0x0000008C) }
@@ -197,6 +195,187 @@ pub fn modal(
         .child(panel)
 }
 
+// ---- 表单输入框与下拉选择 ------------------------------------------------------
+
+/// 独立的描边输入框:左侧图标 + 内容(只靠占位符说明字段,不写标签);聚焦描边变强调色,出错变红。
+pub fn field(ic: IconName, focused: bool, error: bool, content: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .h(px(42.0))
+        .pl(px(14.0))
+        .pr(px(8.0))
+        .rounded(px(t::RADIUS_MD))
+        .bg(c::field())
+        .border_1()
+        .border_color(if error {
+            c::danger().opacity(0.7)
+        } else if focused {
+            c::accent().opacity(0.65)
+        } else {
+            c::field_border()
+        })
+        .child(icon(ic, 16.0, if focused { c::accent() } else { c::ghost() }))
+        .child(content)
+}
+
+/// 下拉里的一项:可选色块 / 图标、标题、可选说明。
+#[derive(Clone)]
+pub struct MenuItem {
+    pub label: SharedString,
+    pub sub: Option<SharedString>,
+    pub icon: Option<IconName>,
+    pub color: Option<u32>,
+}
+
+impl MenuItem {
+    pub fn new(label: impl Into<SharedString>) -> Self {
+        Self { label: label.into(), sub: None, icon: None, color: None }
+    }
+    pub fn sub(mut self, s: impl Into<SharedString>) -> Self {
+        self.sub = Some(s.into());
+        self
+    }
+    pub fn icon(mut self, i: IconName) -> Self {
+        self.icon = Some(i);
+        self
+    }
+    pub fn color(mut self, c: u32) -> Self {
+        self.color = Some(c);
+        self
+    }
+}
+
+/// 菜单相对触发元素的展开方向。
+#[derive(Clone, Copy)]
+pub enum MenuSide {
+    Below,
+    Above,
+}
+
+/// 下拉菜单浮层:绝对定位在最近的 `.relative()` 祖先里,铺满它的宽度,`offset` 是离它边缘的距离。
+/// 用 `deferred` 最后绘制,盖在后面的输入框之上;点菜单外面触发 `on_dismiss`。
+/// `selected` 的项右侧画勾。展开状态由调用方持有(和 `modal` 一样,组件不存状态)。
+pub fn dropdown_menu(
+    id: &'static str,
+    items: Vec<MenuItem>,
+    selected: Option<usize>,
+    side: MenuSide,
+    offset: f32,
+    on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
+    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
+) -> Deferred {
+    dropdown_menu_impl(id, items, selected, side, offset, false, on_pick, on_dismiss)
+}
+
+/// 紧凑版下拉菜单:行更矮、字号和图标更小,用于工具栏里的「更多」这类操作菜单。
+pub fn dropdown_menu_compact(
+    id: &'static str,
+    items: Vec<MenuItem>,
+    selected: Option<usize>,
+    side: MenuSide,
+    offset: f32,
+    on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
+    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
+) -> Deferred {
+    dropdown_menu_impl(id, items, selected, side, offset, true, on_pick, on_dismiss)
+}
+
+fn dropdown_menu_impl(
+    id: &'static str,
+    items: Vec<MenuItem>,
+    selected: Option<usize>,
+    side: MenuSide,
+    offset: f32,
+    compact: bool,
+    on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
+    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
+) -> Deferred {
+    let on_pick = std::rc::Rc::new(on_pick);
+    let menu = div()
+        .id(id)
+        .absolute()
+        .left_0()
+        .right_0()
+        .when(matches!(side, MenuSide::Below), |d| d.top(px(offset)))
+        .when(matches!(side, MenuSide::Above), |d| d.bottom(px(offset)))
+        .p(px(if compact { 3.0 } else { 4.0 }))
+        .flex()
+        .flex_col()
+        .rounded(px(if compact { t::RADIUS_MD } else { t::RADIUS_LG }))
+        .bg(c::dialog())
+        .border_1()
+        .border_color(c::dialog_border())
+        .shadow_lg()
+        .occlude()
+        .on_mouse_down_out(move |_, window, cx| on_dismiss(window, cx))
+        .children(items.into_iter().enumerate().map(|(i, it)| {
+            let pick = on_pick.clone();
+            div()
+                .id((id, i + 1))
+                .min_h(px(if compact { 30.0 } else if it.sub.is_some() { 52.0 } else { 36.0 }))
+                .px(px(if compact { 9.0 } else { 12.0 }))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(if compact { 8.0 } else { 10.0 }))
+                .rounded(px(if compact { t::RADIUS_SM } else { t::RADIUS_MD }))
+                .cursor_pointer()
+                .hover(|s| s.bg(c::field_hover()))
+                .when_some(it.color, |d, col| d.child(div().size(px(8.0)).flex_shrink_0().rounded(px(2.0)).bg(rgb(col))))
+                .when_some(it.icon, |d, ic| d.child(icon(ic, if compact { 14.0 } else { 18.0 }, c::muted())))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(div().text_size(px(if compact { t::TYPE_CONTROL } else { t::TYPE_BODY })).text_color(c::text()).child(it.label))
+                        .when_some(it.sub, |d, sub| d.child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(sub))),
+                )
+                .when(selected == Some(i), |d| d.child(icon(IconName::Check, 14.0, c::accent())))
+                .on_click(move |_, window, cx| pick(i, window, cx))
+        }));
+    deferred(menu).with_priority(1)
+}
+
+/// 下拉选择:`field` 样式的触发框(左图标 + 当前值 + 上下箭头),点开向下展开 `dropdown_menu`。
+/// `items[selected]` 就是当前值;`open` 由调用方持有。
+pub fn select(
+    id: &'static str,
+    ic: IconName,
+    items: Vec<MenuItem>,
+    selected: usize,
+    open: bool,
+    on_toggle: impl Fn(&mut Window, &mut App) + 'static,
+    on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
+    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
+) -> Div {
+    let cur = items.get(selected).cloned().unwrap_or_else(|| MenuItem::new(""));
+    let trigger = div()
+        .id((id, 0usize))
+        .flex_1()
+        .h_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .cursor_pointer()
+        .text_size(px(t::TYPE_BODY))
+        .text_color(c::text())
+        .when_some(cur.color, |d, col| d.child(div().size(px(8.0)).rounded(px(2.0)).bg(rgb(col))))
+        .child(div().flex_1().child(cur.label))
+        .child(icon(IconName::ChevronsUpDown, 14.0, c::ghost()))
+        .on_click(move |_, window, cx| on_toggle(window, cx));
+    div()
+        .relative()
+        .child(field(ic, open, false, trigger))
+        .when(open, |d| d.child(dropdown_menu(id, items, Some(selected), MenuSide::Below, 46.0, on_pick, on_dismiss)))
+}
+
 /// 窗口底:墨黑上铺三团光晕(玫红、紫、蓝),各区域的半透明表面叠在它上面。
 /// GPUI 没有径向渐变,用一摞半透明同心圆近似。
 pub fn backdrop() -> Div {
@@ -241,6 +420,10 @@ pub const MONO: &str = "Menlo";
 
 // ---- 尺寸 --------------------------------------------------------------------
 pub const MENU_W: f32 = 200.0;
+/// 表单里「添加认证方式」这类下拉菜单卡片的宽度(比输入框窄,放得下两行文字)
+pub const DROPDOWN_W: f32 = 260.0;
+/// 工具栏「更多」这类紧凑操作菜单的宽度
+pub const DROPDOWN_COMPACT_W: f32 = 148.0;
 pub const TITLEBAR_H: f32 = 46.0;
 /// 标题栏里的标签(胶囊)高度,垂直居中
 pub const TAB_H: f32 = 30.0;

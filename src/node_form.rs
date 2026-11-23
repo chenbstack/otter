@@ -1,6 +1,6 @@
 //! 添加 / 编辑节点的弹窗表单。
 //!
-//! 目前只接了"添加";字段和布局按编辑复用来设计(标题、提交按钮文案由 `NodeForm::editing` 决定)。
+//! 添加和编辑共用(编辑由 `open_edit_node` 预填;密码、私钥等认证字段暂不回填)(标题、提交按钮文案由 `NodeForm::editing` 决定)。
 
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{Home, MONO, c, icon, t};
-use crate::ui::{Glass as _, GlassHover as _, GlassStyle};
+use crate::ui::{Glass as _, GlassHover as _, GlassStyle, MenuItem, MenuSide, dropdown_menu, field, select};
 use crate::mock::{Node, NodeId};
 
 #[derive(Clone, PartialEq)]
@@ -32,6 +32,8 @@ pub struct NodeForm {
     password: Entity<InputState>,
     key_path: Entity<InputState>,
     passphrase: Entity<InputState>,
+    note: Entity<InputState>,
+    tags: Entity<InputState>,
     /// 认证方式是叠加的(参考 Termius):用户名 + 密码始终显示,私钥、SSH Agent 按需添加
     use_key: bool,
     use_agent: bool,
@@ -39,7 +41,13 @@ pub struct NodeForm {
     /// 「添加认证方式」下拉是否展开
     add_menu: bool,
     group: usize,
+    /// 分组下拉是否展开
+    group_menu: bool,
     test: TestState,
+    /// 编辑时库里已有的认证信息
+    existing_auth: Option<AuthRow>,
+    /// 已保存的秘密读不出来(凭据库不可用等):保存时不动认证信息,避免把它们清掉
+    auth_locked: bool,
     /// 点过提交后才显示必填项的错误态,避免一打开就满屏红框
     tried: bool,
 }
@@ -58,21 +66,130 @@ impl NodeForm {
             password: cx.new(|cx| InputState::new(window, cx).placeholder("SSH 密码").masked(true)),
             key_path: input("~/.ssh/id_ed25519", "~/.ssh/id_ed25519", window, cx),
             passphrase: cx.new(|cx| InputState::new(window, cx).placeholder("可选,没有可留空").masked(true)),
+            note: input("备注(可选)", "", window, cx),
+            tags: input("标签,用逗号分隔", "", window, cx),
             use_key: false,
             use_agent: false,
             show_pwd: false,
             add_menu: false,
             group,
+            group_menu: false,
             test: TestState::Idle,
             tried: false,
+            existing_auth: None,
+            auth_locked: false,
         };
-        let focus = form.name.focus_handle(cx);
+        let focus = form.host.focus_handle(cx);
         window.focus(&focus, cx);
         form
     }
 
     fn val(state: &Entity<InputState>, cx: &App) -> String {
         state.read(cx).value().trim().to_string()
+    }
+}
+
+// ---- 认证信息的读写 -----------------------------------------------------------
+use crate::store::{AuthRow, SLOT_KEY, SLOT_PASSPHRASE, SLOT_PASSWORD};
+use zeroize::Zeroizing;
+
+fn aad(id: NodeId, slot: &str) -> Vec<u8> {
+    format!("{}:{slot}", id.0).into_bytes()
+}
+
+impl Home {
+    fn ensure_vault(&mut self) -> Result<(), String> {
+        if self.vault.is_none() {
+            self.vault = Some(crate::secrets::Vault::open()?);
+        }
+        Ok(())
+    }
+
+    fn open_slot(&self, row: &AuthRow, id: NodeId, slot: &str) -> Result<Option<Zeroizing<String>>, String> {
+        let Some((nonce, ct)) = row.secret(slot) else { return Ok(None) };
+        let vault = self.vault.as_ref().ok_or("主密钥未就绪")?;
+        let plain = vault.open_secret(nonce, ct, &aad(id, slot))?;
+        String::from_utf8(plain.to_vec()).map(|s| Some(Zeroizing::new(s))).map_err(|_| "已保存的内容不是有效文本".to_string())
+    }
+
+    /// 连接用:节点地址 + 解密后的认证信息。读取失败不会 panic,错误放进 `auth_error` 在连接页显示。
+    pub(crate) fn conn_for(&mut self, id: NodeId) -> crate::terminal::ssh::Conn {
+        use crate::terminal::ssh::{Auth, Conn, KeyAuth};
+        let mut conn = Conn::parse(&self.node_by_id(id).map(|n| n.user_host.clone()).unwrap_or_default());
+        let Some(row) = self.store.as_ref().map(|s| s.load_auth(id)) else { return conn };
+        let row = match row {
+            Ok(r) => r,
+            Err(e) => {
+                conn.auth_error = Some(format!("读取认证信息失败:{e}"));
+                return conn;
+            }
+        };
+        // 还没保存过任何认证信息的旧节点保持原来的行为:SSH Agent
+        if !row.use_agent && row.secrets.is_empty() && row.key_label.is_empty() {
+            return conn;
+        }
+        if !row.secrets.is_empty() {
+            if let Err(e) = self.ensure_vault() {
+                conn.auth_error = Some(e);
+                return conn;
+            }
+        }
+        let read = || -> Result<Auth, String> {
+            let key = match self.open_slot(&row, id, SLOT_KEY)? {
+                Some(pem) => Some(KeyAuth { pem, passphrase: self.open_slot(&row, id, SLOT_PASSPHRASE)?, label: row.key_label.clone() }),
+                None => None,
+            };
+            Ok(Auth { key, agent: row.use_agent, password: self.open_slot(&row, id, SLOT_PASSWORD)? })
+        };
+        match read() {
+            Ok(a) => conn.auth = a,
+            Err(e) => conn.auth_error = Some(e),
+        }
+        conn
+    }
+
+    fn node_by_id(&self, id: NodeId) -> Option<&Node> {
+        self.groups.iter().flat_map(|g| g.nodes.iter()).find(|n| n.id == id)
+    }
+
+    /// 从弹窗读出要保存的认证信息并加密。`existing` 是编辑时库里已有的(私钥路径没变就沿用旧密文)。
+    fn build_auth(&self, id: NodeId, existing: Option<&AuthRow>, cx: &App) -> Result<AuthRow, String> {
+        let f = self.form.as_ref().ok_or("弹窗已关闭")?;
+        let seal = |slot: &str, plain: &[u8]| -> Result<(String, Vec<u8>, Vec<u8>), String> {
+            let (n, c) = self.vault.as_ref().ok_or("主密钥未就绪")?.seal(plain, &aad(id, slot))?;
+            Ok((slot.to_string(), n, c))
+        };
+        let mut row = AuthRow { use_agent: f.use_agent, ..Default::default() };
+        let pw = f.password.read(cx).value().to_string();
+        if !pw.is_empty() {
+            row.secrets.push(seal(SLOT_PASSWORD, pw.as_bytes())?);
+        }
+        let path = NodeForm::val(&f.key_path, cx);
+        if f.use_key && !path.is_empty() {
+            row.key_label = path.clone();
+            let same = existing.filter(|e| e.key_label == path).and_then(|e| e.secret(SLOT_KEY).map(|(n, c)| (n.to_vec(), c.to_vec())));
+            match same {
+                Some((n, c)) => row.secrets.push((SLOT_KEY.into(), n, c)),
+                None => {
+                    let pem = std::fs::read_to_string(crate::terminal::ssh::expand(&path)).map_err(|e| format!("读取私钥 {path} 失败:{e}"))?;
+                    match russh::keys::decode_secret_key(&pem, None) {
+                        Ok(_) | Err(russh::keys::Error::KeyIsEncrypted) => {}
+                        Err(e) => return Err(format!("{path} 不是有效的私钥:{e}")),
+                    }
+                    row.secrets.push(seal(SLOT_KEY, pem.as_bytes())?);
+                }
+            }
+            let pass = f.passphrase.read(cx).value().to_string();
+            if !pass.is_empty() {
+                row.secrets.push(seal(SLOT_PASSPHRASE, pass.as_bytes())?);
+            }
+        }
+        Ok(row)
+    }
+
+    /// 这次提交是否会写入秘密(决定要不要提前向系统凭据库取主密钥)
+    fn form_has_secrets(&self, cx: &App) -> bool {
+        self.form.as_ref().is_some_and(|f| !f.password.read(cx).value().is_empty() || (f.use_key && !NodeForm::val(&f.key_path, cx).is_empty()))
     }
 }
 
@@ -84,12 +201,99 @@ impl Home {
         cx.notify();
     }
 
+    /// 打开编辑弹窗:用已有节点的值预填
+    pub fn open_edit_node(&mut self, id: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+        let (gi, ni) = self.locate(id);
+        let Some(n) = self.groups.get(gi).and_then(|g| g.nodes.get(ni)).filter(|n| n.id == id) else { return };
+        let conn = crate::terminal::ssh::Conn::parse(&n.user_host);
+        let (name, note, tags) = (n.name.clone(), n.note.clone(), n.tags.join(", "));
+        let mut f = NodeForm::new(gi, window, cx);
+        f.editing = Some(id);
+        let set = |s: &Entity<InputState>, v: String, window: &mut Window, cx: &mut App| s.update(cx, |s, cx| s.set_value(v, window, cx));
+        set(&f.name, name, window, cx);
+        set(&f.host, conn.host, window, cx);
+        set(&f.port, conn.port.to_string(), window, cx);
+        set(&f.user, conn.user, window, cx);
+        set(&f.note, note, window, cx);
+        set(&f.tags, tags, window, cx);
+        // 回显认证信息:密码、私钥路径、口令、是否用 Agent
+        if let Some(row) = self.store.as_ref().map(|s| s.load_auth(id)) {
+            match row {
+                Ok(row) => {
+                    f.use_agent = row.use_agent;
+                    if !row.key_label.is_empty() {
+                        f.use_key = true;
+                        set(&f.key_path, row.key_label.clone(), window, cx);
+                    }
+                    let mut err = None;
+                    if !row.secrets.is_empty() {
+                        err = self.ensure_vault().err();
+                    }
+                    if err.is_none() {
+                        for (slot, input) in [(SLOT_PASSWORD, &f.password), (SLOT_PASSPHRASE, &f.passphrase)] {
+                            match self.open_slot(&row, id, slot) {
+                                Ok(Some(v)) => set(input, v.to_string(), window, cx),
+                                Ok(None) => {}
+                                Err(e) => err = Some(e),
+                            }
+                        }
+                    }
+                    if let Some(e) = err {
+                        f.auth_locked = true;
+                        f.test = TestState::Err(format!("无法读取已保存的密码/私钥:{e}。保存时不会改动它们").into());
+                    }
+                    f.existing_auth = Some(row);
+                }
+                Err(e) => {
+                    f.auth_locked = true;
+                    f.test = TestState::Err(format!("读取认证信息失败:{e}").into());
+                }
+            }
+        }
+        self.form = Some(f);
+        cx.notify();
+    }
+
+    /// 调试:截图时展开分组下拉(DOCKYARD_ADD_MENU=1)
+    pub(crate) fn debug_open_group_menu(&mut self) {
+        if let Some(f) = &mut self.form {
+            // DOCKYARD_ADD_MENU=auth 展开「添加认证方式」,其他值展开分组下拉
+            if std::env::var("DOCKYARD_ADD_MENU").as_deref() == Ok("auth") {
+                f.add_menu = true;
+            } else {
+                f.group_menu = true;
+            }
+        }
+    }
+
+    /// 分组下拉:`Some(i)` = 选中第 i 个并收起;`None` = 切换展开
+    fn set_group_menu(&mut self, pick: Option<usize>, cx: &mut Context<Self>) {
+        if let Some(f) = &mut self.form {
+            match pick {
+                Some(i) => {
+                    f.group = i;
+                    f.group_menu = false;
+                }
+                None => f.group_menu = !f.group_menu,
+            }
+            cx.notify();
+        }
+    }
+
+    fn close_menus(&mut self, cx: &mut Context<Self>) {
+        if let Some(f) = &mut self.form {
+            f.group_menu = false;
+            f.add_menu = false;
+            cx.notify();
+        }
+    }
+
     fn close_form(&mut self, cx: &mut Context<Self>) {
         self.form = None;
         cx.notify();
     }
 
-    fn submit_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn submit_form(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(f) = &mut self.form else { return };
         f.tried = true;
         let name = NodeForm::val(&f.name, cx);
@@ -101,14 +305,103 @@ impl Home {
         let user = NodeForm::val(&f.user, cx);
         let user = if user.is_empty() { "root".to_string() } else { user };
         let port = NodeForm::val(&f.port, cx).parse::<u16>().unwrap_or(22);
-        let user_host = if port == 22 { format!("{user}@{host}") } else { format!("{user}@{host}:{port}") };
-        let g = f.group;
-        let id = NodeId(self.next_id);
-        self.next_id += 1;
-        self.groups[g].nodes.push(Node { id, name, user_host, stacks: vec![] });
-        self.open_node(id, Some(crate::workspace::NodeMode::Containers), window, cx);
-        self.scroll = gpui_kit::component::VirtualListScrollHandle::new();
+        let note = NodeForm::val(&f.note, cx);
+        let tags: Vec<String> = NodeForm::val(&f.tags, cx).split(|c| c == ',' || c == '，').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+        let g = f.group.min(self.groups.len() - 1);
+        let editing = f.editing;
+        let locked = f.auth_locked;
+        let existing = f.existing_auth.clone();
+        let user_host = crate::store::user_host(&user, &host, port);
+        // 有秘密要写时先取主密钥;取不到就整体失败,不写半截
+        if self.store.is_some() && !locked && self.form_has_secrets(cx) {
+            if let Err(e) = self.ensure_vault() {
+                self.form_error(e, cx);
+                return;
+            }
+        }
+        // 先把私钥文件读好、校验好(失败不会留下半个节点)
+        let pre = if self.store.is_some() && !locked && editing.is_some() { editing.map(|id| self.build_auth(id, existing.as_ref(), cx)) } else { None };
+        if let Some(Err(e)) = &pre {
+            self.form_error(e.clone(), cx);
+            return;
+        }
+        let id = match editing {
+            Some(id) => {
+                if let Some(store) = &mut self.store {
+                    let new = crate::store::NewNode { group_id: self.groups[g].id, name: &name, user: &user, host: &host, port, note: &note, tags: &tags };
+                    if let Err(e) = store.update_node(id, &new) {
+                        crate::logs::push(crate::logs::Level::Error, "本地库", &format!("保存节点失败: {e}"));
+                        self.form_error(format!("保存失败:{e}"), cx);
+                        return;
+                    }
+                }
+                id
+            }
+            None => match &mut self.store {
+                Some(store) => {
+                    let new = crate::store::NewNode { group_id: self.groups[g].id, name: &name, user: &user, host: &host, port, note: &note, tags: &tags };
+                    match store.add_node(&new) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            crate::logs::push(crate::logs::Level::Error, "本地库", &format!("保存节点失败: {e}"));
+                            self.form_error(format!("保存失败:{e}"), cx);
+                            return;
+                        }
+                    }
+                }
+                None => {
+                    let id = NodeId(self.next_id);
+                    self.next_id += 1;
+                    id
+                }
+            },
+        };
+        // 认证信息(新增时要等拿到节点 id 才能加密,密文绑定了 id)
+        if self.store.is_some() && !locked {
+            let row = match pre {
+                Some(Ok(r)) => Ok(r),
+                _ => self.build_auth(id, existing.as_ref(), cx),
+            };
+            let saved = row.and_then(|r| self.store.as_mut().unwrap().save_auth(id, &r));
+            if let Err(e) = saved {
+                crate::logs::push(crate::logs::Level::Error, "本地库", &format!("保存认证信息失败: {e}"));
+                // 新增时节点已经写进库了:先放进列表,避免重试产生重复
+                if editing.is_none() {
+                    self.groups[g].nodes.push(Node { id, name: name.clone(), user_host: user_host.clone(), note: note.clone(), tags: tags.clone(), stacks: vec![] });
+                    self.form.as_mut().map(|f| f.editing = Some(id));
+                }
+                self.form_error(format!("节点已保存,但认证信息没存上:{e}"), cx);
+                return;
+            }
+        }
+
+        if editing.is_some() {
+            let old_g = self.locate(id).0;
+            if let Some(pos) = self.groups[old_g].nodes.iter().position(|n| n.id == id) {
+                let mut node = self.groups[old_g].nodes.remove(pos);
+                node.name = name;
+                node.user_host = user_host;
+                node.note = note;
+                node.tags = tags;
+                if old_g == g {
+                    self.groups[g].nodes.insert(pos, node);
+                } else {
+                    self.groups[g].nodes.push(node);
+                }
+            }
+        } else {
+            self.groups[g].nodes.push(Node { id, name, user_host, note, tags, stacks: vec![] });
+            self.sel = id;
+            self.scroll = gpui_kit::component::VirtualListScrollHandle::new();
+        }
         self.close_form(cx);
+    }
+
+    fn form_error(&mut self, msg: String, cx: &mut Context<Self>) {
+        if let Some(f) = &mut self.form {
+            f.test = TestState::Err(msg.into());
+        }
+        cx.notify();
     }
 
     /// 模拟测试连接:等一会儿,主机为空或以 "bad" 开头则失败。
@@ -179,81 +472,14 @@ fn input_cell(state: &Entity<InputState>, mono: bool) -> Div {
         .child(Input::new(state).appearance(false).with_size(px(13.0 / 0.875)))
 }
 
-/// 分组容器里的一行:固定宽标签 + 内容;`last` 的行不画底部分隔线
-fn form_row(label: &'static str, focused: bool, error: bool, last: bool, content: impl IntoElement) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(10.0))
-        .min_h(px(46.0))
-        .pl(px(16.0))
-        .pr(px(8.0))
-        .when(!last, |d| d.border_b_1().border_color(c::line()))
-        .when(error, |d| d.bg(c::danger().opacity(0.07)))
-        .when(!error && focused, |d| d.bg(c::field_focus_bg()))
-        .child(
-            div()
-                .w(px(60.0))
-                .flex_shrink_0()
-                .text_size(px(t::TYPE_CONTROL))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(if error {
-                    c::danger()
-                } else if focused {
-                    c::text()
-                } else {
-                    c::label()
-                })
-                .child(label),
-        )
-        .child(content)
-}
-
-/// 带小标题的分组容器
-fn form_group(title: &'static str, rows: Vec<Div>) -> Div {
+/// 小节:粗体标题 + 一组字段(节与节之间由调用方画分隔线)
+fn section(title: &'static str, rows: Vec<Div>) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(8.0))
-        .child(div().px(px(4.0)).text_size(px(t::TYPE_CAPTION)).font_weight(FontWeight::SEMIBOLD).text_color(c::ghost()).child(title))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .rounded(px(t::RADIUS_LG))
-                .bg(c::field())
-                .border_1()
-                .border_color(c::field_border())
-                .overflow_hidden()
-                .children(rows),
-        )
-}
-
-/// 下拉菜单里的一项:图标 + 标题 + 说明
-fn menu_item(id: &'static str, ic: IconName, title: &'static str, sub: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(12.0))
-        .min_h(px(52.0))
-        .px(px(12.0))
-        .rounded(px(t::RADIUS_MD))
-        .cursor_pointer()
-        .hover(|s| s.bg(c::field_hover()))
-        .child(icon(ic, 18.0, c::muted()))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(div().text_size(px(t::TYPE_BODY)).text_color(c::text()).child(title))
-                .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(sub)),
-        )
+        .gap(px(10.0))
+        .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::BOLD).text_color(c::text()).child(title))
+        .children(rows)
 }
 
 /// 行尾的小图标按钮(移除)
@@ -297,51 +523,26 @@ impl Home {
         let host_err = f.tried && NodeForm::val(&f.host, cx).is_empty();
         let focus = |s: &Entity<InputState>, cx: &Context<Self>| s.focus_handle(cx).is_focused(window);
 
-        // 分组:彩色药丸单选
-        let groups = div().flex_1().flex().flex_row().flex_wrap().gap(px(6.0)).py(px(9.0)).children(self.groups.iter().enumerate().map(|(gi, g)| {
-            let on = f.group == gi;
-            div()
-                .id(("fg", gi))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(7.0))
-                .h(px(26.0))
-                .px(px(11.0))
-                .rounded_full()
-                .border_1()
-                .cursor_pointer()
-                .text_size(px(t::TYPE_CONTROL))
-                .when(on, |d| d.border_color(rgb(g.color).opacity(0.6)).bg(rgb(g.color).opacity(0.14)).text_color(c::text()))
-                .when(!on, |d| d.border_color(c::field_border()).text_color(c::muted()).hover(|s| s.bg(c::field_hover())))
-                .child(div().size(px(7.0)).rounded(px(2.0)).bg(rgb(g.color)))
-                .child(g.name.clone())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(f) = &mut this.form {
-                        f.group = gi;
-                        cx.notify();
-                    }
-                }))
-        }));
+        // 分组:下拉选择
+        let this = cx.entity();
+        let (t1, t2, t3) = (this.clone(), this.clone(), this);
+        let group_select = select(
+            "group-menu",
+            IconName::Folder,
+            self.groups.iter().map(|g| MenuItem::new(g.name.clone()).color(g.color)).collect(),
+            f.group.min(self.groups.len() - 1),
+            f.group_menu,
+            move |_, cx| t1.update(cx, |h, cx| h.set_group_menu(None, cx)),
+            move |i, _, cx| t2.update(cx, |h, cx| h.set_group_menu(Some(i), cx)),
+            move |_, cx| t3.update(cx, |h, cx| h.close_menus(cx)),
+        );
 
         // ---- 连接 ----
-        let host_cell = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .child(input_cell(&f.host, true))
-            .child(div().w(px(1.0)).h(px(18.0)).bg(c::line()))
-            .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child("端口"))
-            .child(input_cell(&f.port, true).flex_none().w(px(64.0)));
-        let conn = form_group(
+        let conn = section(
             "连接",
             vec![
-                form_row("名称", focus(&f.name, cx), name_err, false, input_cell(&f.name, false)),
-                form_row("主机", focus(&f.host, cx) || focus(&f.port, cx), host_err, false, host_cell),
-                form_row("分组", false, false, true, groups),
+                field(IconName::Globe, focus(&f.host, cx), host_err, input_cell(&f.host, true)),
+                field(IconName::Server, focus(&f.name, cx), name_err, input_cell(&f.name, false)),
             ],
         );
 
@@ -358,36 +559,20 @@ impl Home {
             .hover(|s| s.bg(c::hover()))
             .child(icon(if f.show_pwd { IconName::EyeOff } else { IconName::Eye }, 15.0, c::muted()))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_pwd(window, cx)));
-        // 已添加的方式:私钥(路径 + 口令)、SSH Agent,每项可移除
-        let mut extra: Vec<(&'static str, bool, Div)> = vec![];
+        let mut cred_rows: Vec<Div> = vec![
+            field(IconName::Hash, focus(&f.port, cx), false, div().flex_1().min_w_0().flex().flex_row().items_center().gap(px(8.0)).child(div().text_size(px(t::TYPE_BODY)).text_color(c::muted()).child("SSH 端口")).child(input_cell(&f.port, true))),
+            field(IconName::User, focus(&f.user, cx), false, input_cell(&f.user, true)),
+            field(
+                IconName::LockKeyhole,
+                focus(&f.password, cx),
+                false,
+                div().flex_1().min_w_0().flex().flex_row().items_center().gap(px(4.0)).child(input_cell(&f.password, false)).child(eye),
+            ),
+        ];
         if f.use_key {
-            extra.push((
-                "私钥",
+            cred_rows.push(field(
+                IconName::KeyRound,
                 focus(&f.key_path, cx),
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(input_cell(&f.key_path, true))
-                    .child(
-                        ctl_btn("browse-key", Some(IconName::FolderOpen), "浏览", 28.0)
-                            .on_click(cx.listener(|this, _, window, cx| this.browse_key(window, cx))),
-                    )
-                    .child(x_btn("rm-key").on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(f) = &mut this.form {
-                            f.use_key = false;
-                            cx.notify();
-                        }
-                    }))),
-            ));
-            extra.push(("口令", focus(&f.passphrase, cx), input_cell(&f.passphrase, false)));
-        }
-        if f.use_agent {
-            extra.push((
-                "Agent",
                 false,
                 div()
                     .flex_1()
@@ -396,7 +581,30 @@ impl Home {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().flex_1().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child("使用本机 ssh-agent 中已加载的密钥"))
+                    .child(input_cell(&f.key_path, true))
+                    .child(ctl_btn("browse-key", Some(IconName::FolderOpen), "浏览", 28.0).on_click(cx.listener(|this, _, window, cx| this.browse_key(window, cx))))
+                    .child(x_btn("rm-key").on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(f) = &mut this.form {
+                            f.use_key = false;
+                            cx.notify();
+                        }
+                    }))),
+            ));
+            cred_rows.push(field(IconName::Lock, focus(&f.passphrase, cx), false, input_cell(&f.passphrase, false)));
+        }
+        if f.use_agent {
+            cred_rows.push(field(
+                IconName::FingerprintPattern,
+                false,
+                false,
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(div().flex_1().text_size(px(t::TYPE_BODY)).text_color(c::muted()).child("使用本机 ssh-agent 中的密钥"))
                     .child(x_btn("rm-agent").on_click(cx.listener(|this, _, _, cx| {
                         if let Some(f) = &mut this.form {
                             f.use_agent = false;
@@ -404,21 +612,6 @@ impl Home {
                         }
                     }))),
             ));
-        }
-        let mut cred_rows = vec![
-            form_row("用户名", focus(&f.user, cx), false, false, input_cell(&f.user, true)),
-        ];
-        let pwd_row = form_row(
-            "密码",
-            focus(&f.password, cx),
-            false,
-            extra.is_empty(),
-            div().flex_1().min_w_0().flex().flex_row().items_center().gap(px(4.0)).child(input_cell(&f.password, false)).child(eye),
-        );
-        cred_rows.push(pwd_row);
-        let n = extra.len();
-        for (i, (label, focused, content)) in extra.into_iter().enumerate() {
-            cred_rows.push(form_row(label, focused, false, i + 1 == n, content));
         }
 
         // 「+ 添加私钥、SSH Agent」链接,点开下拉(向上展开,盖在表单上)
@@ -431,50 +624,42 @@ impl Home {
         }
         let add_link = (!remaining.is_empty()).then(|| {
             let menu = f.add_menu.then(|| {
-                div()
-                    .id("add-auth-menu")
-                    .absolute()
-                    .left_0()
-                    .bottom(px(38.0))
-                    .w(px(320.0))
-                    .p(px(4.0))
-                    .flex()
-                    .flex_col()
-                    .rounded(px(t::RADIUS_LG))
-                    .bg(c::dialog())
-                    .border_1()
-                    .border_color(c::dialog_border())
-                    .shadow_lg()
-                    .occlude()
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        if let Some(f) = &mut this.form {
-                            f.add_menu = false;
-                            cx.notify();
-                        }
-                    }))
-                    .when(!f.use_key, |d| {
-                        d.child(menu_item("menu-key", IconName::KeyRound, "私钥", "使用本机的私钥文件").on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(f) = &mut this.form {
-                                f.use_key = true;
+                let mut items = vec![];
+                let mut kinds = vec![];
+                if !f.use_key {
+                    items.push(MenuItem::new("私钥").sub("使用本机的私钥文件").icon(IconName::KeyRound));
+                    kinds.push(true);
+                }
+                if !f.use_agent {
+                    items.push(MenuItem::new("SSH Agent").sub("使用本机 ssh-agent 中的密钥").icon(IconName::FingerprintPattern));
+                    kinds.push(false);
+                }
+                let (t1, t2) = (cx.entity(), cx.entity());
+                dropdown_menu(
+                    "add-auth-menu",
+                    items,
+                    None,
+                    MenuSide::Above,
+                    38.0,
+                    move |i, _, cx| {
+                        let key = kinds[i];
+                        t1.update(cx, |h, cx| {
+                            if let Some(f) = &mut h.form {
+                                if key { f.use_key = true } else { f.use_agent = true }
                                 f.add_menu = false;
                                 cx.notify();
                             }
-                        })))
-                    })
-                    .when(!f.use_agent, |d| {
-                        d.child(menu_item("menu-agent", IconName::FingerprintPattern, "SSH Agent", "使用本机 ssh-agent 中的密钥").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if let Some(f) = &mut this.form {
-                                    f.use_agent = true;
-                                    f.add_menu = false;
-                                    cx.notify();
-                                }
-                            },
-                        )))
-                    })
+                        })
+                    },
+                    move |_, cx| t2.update(cx, |h, cx| h.close_menus(cx)),
+                )
             });
+            // 外层是横向容器,里面的可点元素只占文字宽度,点右边空白不触发
             div()
                 .relative()
+                .w(px(crate::ui::DROPDOWN_W))
+                .flex()
+                .flex_row()
                 .child(
                     div()
                         .id("add-auth")
@@ -500,9 +685,17 @@ impl Home {
                 )
                 .children(menu)
         });
-        let cred = form_group("SSH 认证", cred_rows).children(add_link);
+        let cred = section("SSH 认证", cred_rows).children(add_link);
+        let general = section(
+            "通用",
+            vec![
+                group_select,
+                field(IconName::Tag, focus(&f.tags, cx), false, input_cell(&f.tags, false)),
+                field(IconName::FileText, focus(&f.note, cx), false, input_cell(&f.note, false)),
+            ],
+        );
 
-        let body = div().flex().flex_col().gap(px(20.0)).px(px(24.0)).pt(px(6.0)).pb(px(22.0)).child(conn).child(cred);
+        let body = div().flex().flex_col().gap(px(18.0)).px(px(24.0)).pt(px(4.0)).pb(px(22.0)).child(conn).child(div().h(px(1.0)).bg(c::line())).child(general).child(div().h(px(1.0)).bg(c::line())).child(cred);
 
         let test_result = match &f.test {
             TestState::Idle => None,
@@ -521,7 +714,6 @@ impl Home {
             .py(px(14.0))
             .border_t_1()
             .border_color(c::line())
-            .bg(c::dialog_footer())
             .child(ctl_btn("test-conn", Some(IconName::Zap), "测试连接", 34.0).on_click(cx.listener(|this, _, _, cx| this.test_connection(cx))))
             .when_some(test_result, |d, (ic, color, text)| {
                 d.child(
@@ -569,19 +761,6 @@ impl Home {
             .pb(px(18.0))
             .child(
                 div()
-                    .size(px(40.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(t::RADIUS_LG))
-                    .border_1()
-                    .border_color(c::accent().opacity(0.28))
-                    .bg(c::accent_soft())
-                    .child(icon(IconName::Server, 20.0, c::accent())),
-            )
-            .child(
-                div()
                     .flex_1()
                     .flex()
                     .flex_col()
@@ -612,12 +791,13 @@ impl Home {
 
         Some(crate::ui::modal(
             "node-dialog",
-            520.0,
+            440.0,
             cx.listener(|this, e: &KeyDownEvent, window, cx| match e.keystroke.key.as_str() {
                 "escape" => {
                     match this.form.as_mut() {
-                        Some(f) if f.add_menu => {
+                        Some(f) if f.add_menu || f.group_menu => {
                             f.add_menu = false;
+                            f.group_menu = false;
                             cx.notify();
                         }
                         _ => this.close_form(cx),

@@ -47,6 +47,8 @@ pub struct Node {
     pub id: NodeId,
     pub name: String,
     pub user_host: String,
+    pub note: String,
+    pub tags: Vec<String>,
     pub stacks: Vec<Stack>,
 }
 
@@ -57,6 +59,8 @@ impl Node {
 }
 
 pub struct Group {
+    /// 库里的分组 id;mock 分组为 0
+    pub id: i64,
     pub name: String,
     pub color: u32,
     pub nodes: Vec<Node>,
@@ -180,24 +184,27 @@ pub fn groups() -> Vec<Group> {
     let sg = big(&mut r, 4);
     let mut groups = vec![
         Group {
+            id: 0,
             name: "开发分组".into(),
             color: 0x5DBBFF,
-            nodes: vec![Node { id: NodeId(0), name: "test".into(), user_host: "dev@192.0.2.30".into(), stacks: test }],
+            nodes: vec![Node { id: NodeId(0), name: "test".into(), user_host: "dev@192.0.2.30".into(), note: String::new(), tags: vec![], stacks: test }],
         },
         Group {
+            id: 0,
             name: "生产分组".into(),
             color: 0xFF5C93,
             nodes: vec![
-                Node { id: NodeId(0), name: "emby".into(), user_host: "deploy@192.0.2.22".into(), stacks: emby_stacks },
-                Node { id: NodeId(0), name: "docker-host".into(), user_host: "deploy@192.0.2.21".into(), stacks: docker_host },
-                Node { id: NodeId(0), name: "big-cluster".into(), user_host: "ops@198.51.100.21".into(), stacks: cluster },
-                Node { id: NodeId(0), name: "hk-edge-01".into(), user_host: "root@198.51.100.8".into(), stacks: vec![] },
+                Node { id: NodeId(0), name: "emby".into(), user_host: "deploy@192.0.2.22".into(), note: String::new(), tags: vec![], stacks: emby_stacks },
+                Node { id: NodeId(0), name: "docker-host".into(), user_host: "deploy@192.0.2.21".into(), note: String::new(), tags: vec![], stacks: docker_host },
+                Node { id: NodeId(0), name: "big-cluster".into(), user_host: "ops@198.51.100.21".into(), note: String::new(), tags: vec![], stacks: cluster },
+                Node { id: NodeId(0), name: "hk-edge-01".into(), user_host: "root@198.51.100.8".into(), note: String::new(), tags: vec![], stacks: vec![] },
             ],
         },
         Group {
+            id: 0,
             name: "未分组".into(),
             color: 0x7d8ea6,
-            nodes: vec![Node { id: NodeId(0), name: "sg-gateway".into(), user_host: "ubuntu@203.0.113.2".into(), stacks: sg }],
+            nodes: vec![Node { id: NodeId(0), name: "sg-gateway".into(), user_host: "ubuntu@203.0.113.2".into(), note: String::new(), tags: vec![], stacks: sg }],
         },
     ];
     // 按出现顺序分配 id,从 1 开始
