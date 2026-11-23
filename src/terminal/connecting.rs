@@ -83,7 +83,8 @@ impl Home {
             let left_on = i > 0 && matches!(steps.get(i - 1).map(|s| &s.state), Some(StepState::Done));
             let right_on = matches!(state, Some(StepState::Done));
             // 正在进行的步骤后面那段线呼吸,表示在往下一步走
-            let right: AnyElement = if matches!(state, Some(StepState::Running)) {
+            // 最后一步右侧没有下一步,线只占位不显示(否则会多出一截)
+            let right: AnyElement = if matches!(state, Some(StepState::Running)) && i + 1 < n {
                 div()
                     .flex_1()
                     .h(px(1.0))
