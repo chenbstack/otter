@@ -3,6 +3,7 @@
 //! 对外是一对阻塞的 `Read`/`Write`(喂给 `gpui_xterm::TerminalView::new`)、
 //! 一个调整行列的句柄和一个状态。密码、口令、主机密钥确认都在终端里以提示行的形式完成。
 
+use crate::logs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
@@ -127,10 +128,16 @@ pub fn connect(conn: Conn, cols: usize, rows: usize) -> (Input, Output, Handle) 
     let st = status.clone();
     let join = runtime().spawn(async move {
         let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone() };
+        let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
+        logs::push(logs::Level::Info, &label, "开始连接");
         let res = run(&conn, cols as u16, rows as u16, io.clone(), rs_rx).await;
         let reason = match res {
-            Ok(()) => None,
+            Ok(()) => {
+                logs::push(logs::Level::Info, &label, "连接已关闭");
+                None
+            }
             Err(e) => {
+                logs::push(logs::Level::Error, &label, e.clone());
                 io.say(&format!("\r\n\x1b[31m{e}\x1b[0m\r\n"));
                 Some(e)
             }
@@ -198,7 +205,7 @@ impl Io {
     }
 }
 
-fn known_hosts_file() -> PathBuf {
+pub(crate) fn known_hosts_file() -> PathBuf {
     let base = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     base.join("Library/Application Support/dockyard/known_hosts")
 }
@@ -239,14 +246,17 @@ async fn verify_host(io: &Io, host: &str, port: u16, key: &PublicKey) -> Result<
             let ans = io.ask("确认继续连接?(yes/no) ", true).await;
             if matches!(ans.as_deref(), Some("yes")) {
                 let _ = keys::known_hosts::learn_known_hosts_path(host, port, key, &path);
+                logs::push(logs::Level::Info, &format!("{host}:{port}"), format!("已信任新主机 {fp}"));
                 io.say("已记住该主机。\r\n");
                 Ok(true)
             } else {
+                logs::push(logs::Level::Warn, &format!("{host}:{port}"), "未确认新主机,已取消连接");
                 io.say("\x1b[31m已取消。\x1b[0m\r\n");
                 Ok(false)
             }
         }
         Err(keys::Error::KeyChanged { .. }) => {
+            logs::push(logs::Level::Error, &format!("{host}:{port}"), format!("主机密钥与记录不一致,已拒绝连接(新指纹 {fp})"));
             io.say(&format!(
                 "\x1b[1;31m警告:{host}:{port} 的主机密钥与记录不一致!\x1b[0m\r\n新指纹:{fp}\r\n可能存在中间人攻击,已拒绝连接。若服务器确实重装过,请先从\r\n{} 中删除该主机的记录。\r\n",
                 path.display()
@@ -279,6 +289,7 @@ async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, mut resize: tokio_mpsc::
         })?;
 
     authenticate(conn, &io, &mut session).await?;
+    logs::push(logs::Level::Info, &format!("{}@{}:{}", conn.user, conn.host, conn.port), "认证成功");
 
     let mut ch = session.channel_open_session().await.map_err(|e| format!("打开会话失败:{e}"))?;
     ch.request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| format!("申请终端失败:{e}"))?;

@@ -114,6 +114,8 @@ pub const NODE_BAR_H: f32 = 34.0;
 pub const TERM_FONT: f32 = 13.0;
 pub const TERM_PAD: f32 = 8.0;
 pub const NODE_CARD_GAP: f32 = 10.0;
+/// 节点页左侧栏宽度
+pub const NODES_SIDE_W: f32 = 184.0;
 pub const CONTENT_PAD: f32 = 20.0;
 
 pub const STACK_HEADER_H: f32 = 50.0;

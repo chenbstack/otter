@@ -5,6 +5,37 @@ use gpui_kit::component::input::{Input, InputState};
 
 use super::*;
 
+/// 节点页侧栏的四个视图
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum NodesView {
+    Hosts,
+    Keychain,
+    KnownHosts,
+    Logs,
+}
+
+impl NodesView {
+    pub(crate) const ALL: [NodesView; 4] = [NodesView::Hosts, NodesView::Keychain, NodesView::KnownHosts, NodesView::Logs];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            NodesView::Hosts => "主机",
+            NodesView::Keychain => "钥匙串",
+            NodesView::KnownHosts => "已知主机",
+            NodesView::Logs => "日志",
+        }
+    }
+
+    pub(crate) fn icon(self) -> IconName {
+        match self {
+            NodesView::Hosts => IconName::Server,
+            NodesView::Keychain => IconName::KeyRound,
+            NodesView::KnownHosts => IconName::ShieldCheck,
+            NodesView::Logs => IconName::ScrollText,
+        }
+    }
+}
+
 impl Home {
     /// 创建搜索输入框(需要 window 和 cx,所以不放在 `new` 里)
     pub(crate) fn init_node_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -15,7 +46,8 @@ impl Home {
         }
     }
 
-    pub(crate) fn nodes_page(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+    /// 「主机」视图:搜索条、分组、节点卡片网格
+    pub(super) fn hosts_view(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let query = self.node_search.as_ref().map(|s| s.read(cx).value().trim().to_lowercase()).unwrap_or_default();
         let searching = !query.is_empty();
 

@@ -208,3 +208,29 @@ pub fn groups() -> Vec<Group> {
     }
     groups
 }
+
+/// 钥匙串里的一条凭据(mock)
+pub struct Credential {
+    pub name: String,
+    pub kind: CredKind,
+    /// 私钥路径或「密码」
+    pub detail: String,
+    /// 被几个节点使用
+    pub used_by: usize,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum CredKind {
+    Key,
+    Password,
+}
+
+pub fn credentials() -> Vec<Credential> {
+    let k = |name: &str, detail: &str, used_by| Credential { name: name.into(), kind: CredKind::Key, detail: detail.into(), used_by };
+    vec![
+        k("默认私钥", "~/.ssh/id_ed25519", 4),
+        k("生产环境私钥", "~/.ssh/prod_ed25519", 2),
+        Credential { name: "测试机 root".into(), kind: CredKind::Password, detail: "密码".into(), used_by: 1 },
+        k("CI 部署私钥", "~/.ssh/deploy_rsa", 0),
+    ]
+}

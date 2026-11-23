@@ -1822,6 +1822,7 @@ dependencies = [
 name = "dockyard"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-macos",

@@ -4,9 +4,12 @@
 //! 色板沿用旧版 DeskPanel 的 theme.ts。
 
 mod files;
+mod known_hosts;
+mod logs;
 mod mock;
 mod node_form;
 mod nodes;
+mod nodes_side;
 mod pages;
 mod terminal;
 mod titlebar;
@@ -80,6 +83,11 @@ struct Home {
     node_search: Option<Entity<gpui_kit::component::input::InputState>>,
     /// 节点页当前进入的分组(None = 全部节点)
     node_group: Option<usize>,
+    /// 节点页侧栏当前视图
+    nodes_view: nodes::NodesView,
+    /// 已知主机视图的缓存(切到该视图或删除后重新读文件)
+    known_hosts: Vec<known_hosts::KnownHost>,
+    credentials: Vec<mock::Credential>,
     page: Page,
     hide_charts: bool,
     cols: usize,
@@ -108,6 +116,9 @@ impl Home {
             next_id,
             node_search: None,
             node_group: None,
+            nodes_view: nodes::NodesView::Hosts,
+            known_hosts: Vec::new(),
+            credentials: mock::credentials(),
             page: Page::Stacks,
             hide_charts: false,
             cols: 2,
@@ -234,6 +245,8 @@ fn main() {
     let fcd = arg("--fcd");
     // --ssh user@host[:port]  把第一个节点的连接地址改成它,并直接打开它的终端
     let ssh_arg = arg("--ssh");
+    // --nview 0..3  节点页侧栏视图:主机、钥匙串、已知主机、日志(配合 --active 0)
+    let nview: Option<usize> = arg("--nview").and_then(|v| v.parse().ok());
 
     gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx| {
         gpui_kit::init(cx);
@@ -305,6 +318,10 @@ fn main() {
                     let id = h.groups[0].nodes[0].id;
                     h.groups[0].nodes[0].user_host = addr.clone();
                     h.open_server_terminal(id, window, cx);
+                }
+                if let Some(k) = nview {
+                    h.activate(0);
+                    h.set_nodes_view(nodes::NodesView::ALL[k.min(3)], cx);
                 }
                 for st in h.node_mut().stacks.iter_mut().take(expand) {
                     st.expanded = true;

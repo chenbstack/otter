@@ -59,11 +59,14 @@ impl Home {
         let status = handle.status.clone();
         cx.spawn(async move |this, cx| {
             let mut last = None;
+            let mut log_ver = crate::logs::version();
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
                 let now = status.lock().map(|s| s.clone()).unwrap_or(Status::Closed(None));
-                if last.as_ref() != Some(&now) {
+                let ver = crate::logs::version();
+                if last.as_ref() != Some(&now) || ver != log_ver {
                     last = Some(now.clone());
+                    log_ver = ver;
                     if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }
