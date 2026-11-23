@@ -1,6 +1,7 @@
 //! 终端:`gpui_xterm` 负责模拟与渲染,这里负责把它接到 SSH 通道上,并画终端标签。
 
 pub(crate) mod connecting;
+pub mod highlight;
 pub mod ssh;
 
 use ::gpui::{Animation, AnimationExt as _, Transformation, ease_out_quint, percentage};
@@ -166,6 +167,7 @@ impl Home {
             font_size: px(TERM_FONT),
             padding: Edges::all(px(TERM_PAD)),
             colors: term_palette(),
+            highlighter: Some(highlight::highlighter()),
             ..Default::default()
         };
         let view = cx.new(|cx| {
@@ -274,6 +276,22 @@ impl Home {
                         _ => {}
                     }
                 })
+                // Cmd+Shift+H:开关关键字高亮并记住。目前还没有设置页,先用快捷键
+                .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                    let m = &ev.keystroke.modifiers;
+                    if !(m.platform && m.shift) || m.control || m.alt || ev.keystroke.key != "h" {
+                        return;
+                    }
+                    let on = !highlight::enabled();
+                    highlight::set_enabled(on);
+                    if let Some(st) = this.store.as_ref() {
+                        let _ = st.set_setting(highlight::SETTING_KEY, if on { "on" } else { "off" });
+                    }
+                    if let Some(view) = this.active_term().map(|t| t.view.clone()) {
+                        view.update(cx, |_, cx| cx.notify());
+                    }
+                    cx.stop_propagation();
+                }))
             })
             .when(closed, |d| {
                 d.child(

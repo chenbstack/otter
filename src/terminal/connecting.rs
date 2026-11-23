@@ -136,7 +136,7 @@ impl Home {
                     .text_size(px(t::TYPE_MICRO))
                     .font_family(MONO)
                     .child(div().w(px(56.0)).flex_shrink_0().text_color(c::ghost()).child(e.time))
-                    .child(div().flex_1().min_w_0().truncate().text_color(col).child(e.msg))
+                    .child(div().flex_1().min_w_0().text_color(col).child(e.msg))
                     .with_animation(("conn-log-row", i), Animation::new(Duration::from_millis(300)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
             })
             .collect();
