@@ -249,9 +249,8 @@ impl Home {
                     .text_color(c::ghost())
                     .child(format!("{} 服务", n.service_count())),
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_node(id);
-                cx.notify();
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_server_terminal(id, window, cx);
             }))
     }
 }

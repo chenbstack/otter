@@ -30,11 +30,13 @@ pub struct Tab {
     /// 日志标签:是否跟随最新,以及日志列表的滚动句柄(只在日志标签里用,不随标签切换交换)
     pub follow: bool,
     pub log_scroll: ScrollHandle,
+    /// 服务器终端标签的 SSH 会话;关闭标签即丢弃,连接随之断开
+    pub term: Option<crate::terminal::TermSession>,
 }
 
 impl Tab {
-    fn new(kind: TabKind, files: Files) -> Self {
-        Self { kind, page: Page::Stacks, scroll: VirtualListScrollHandle::new(), files, follow: true, log_scroll: ScrollHandle::new() }
+    pub(crate) fn new(kind: TabKind, files: Files) -> Self {
+        Self { kind, page: Page::Stacks, scroll: VirtualListScrollHandle::new(), files, follow: true, log_scroll: ScrollHandle::new(), term: None }
     }
 
     /// 标签所属的节点;节点页不属于任何节点。

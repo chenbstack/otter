@@ -85,6 +85,10 @@ pub const NODE_CARD_H: f32 = 68.0;
 /// 节点页:卡片里的图标块边长、顶部搜索条和主按钮高度
 pub const NODE_ICON: f32 = 40.0;
 pub const NODE_BAR_H: f32 = 34.0;
+/// 终端标签的工具栏高度、终端字号、终端画布内边距
+pub const TERM_BAR_H: f32 = 36.0;
+pub const TERM_FONT: f32 = 13.0;
+pub const TERM_PAD: f32 = 8.0;
 pub const NODE_CARD_GAP: f32 = 12.0;
 pub const CONTENT_PAD: f32 = 20.0;
 

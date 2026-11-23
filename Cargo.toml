@@ -5,7 +5,10 @@ edition = "2024"
 default-run = "dockyard"
 
 [dependencies]
-gpui-kit = "*"
+gpui_xterm = "0.3.0"
+russh = "0.65"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+gpui-kit = "=0.9.1"
 # 仅为用 Window::render_to_image 离屏截图:直接给底层 crate 开 test-support,靠特性统一生效
 gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 gpui-macos = { package = "gpui-pre-macos", version = "=0.3.12", features = ["test-support"] }

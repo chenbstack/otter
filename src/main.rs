@@ -8,6 +8,7 @@ mod mock;
 mod node_form;
 mod nodes;
 mod pages;
+mod terminal;
 mod titlebar;
 mod ui;
 mod workspace;
@@ -158,7 +159,8 @@ impl Render for Home {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some((path, frames)) = &mut self.shot {
             *frames += 1;
-            if *frames == 10 {
+            let target: u32 = std::env::var("DOCKYARD_SHOT_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+            if *frames == target {
                 match window.render_to_image() {
                     Ok(img) => match img.save(&*path) {
                         Ok(()) => println!("截图已保存: {path}"),
@@ -175,6 +177,9 @@ impl Render for Home {
         let active_kind = self.workspace.active.map(|a| &self.workspace.tabs[a].kind);
         let is_files_tab = matches!(active_kind, Some(workspace::TabKind::Files(_)));
         let body = match active_kind {
+            Some(workspace::TabKind::Terminal { container: None, .. }) if self.active_term().is_some() => {
+                div().flex_1().min_h_0().flex().flex_col().child(self.ssh_terminal_view(cx))
+            }
             Some(workspace::TabKind::Terminal { container, .. }) => {
                 let node = self.node();
                 div().flex_1().min_h_0().flex().flex_col().child(self.terminal_view(&node.name, &node.user_host, container.as_ref()))
@@ -224,6 +229,8 @@ fn main() {
     let files_arg = arg("--files");
     let fsel = arg("--fsel");
     let fcd = arg("--fcd");
+    // --ssh user@host[:port]  把第一个节点的连接地址改成它,并直接打开它的终端
+    let ssh_arg = arg("--ssh");
 
     gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx| {
         gpui_kit::init(cx);
@@ -290,6 +297,11 @@ fn main() {
                     if let Some(k) = active_arg.filter(|k| *k < h.workspace.tabs.len()) {
                         h.activate(k);
                     }
+                }
+                if let Some(addr) = &ssh_arg {
+                    let id = h.groups[0].nodes[0].id;
+                    h.groups[0].nodes[0].user_host = addr.clone();
+                    h.open_server_terminal(id, window, cx);
                 }
                 for st in h.node_mut().stacks.iter_mut().take(expand) {
                     st.expanded = true;
