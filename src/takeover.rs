@@ -346,6 +346,7 @@ impl Home {
         match method {
             "send_input" => {
                 let text = params.get("text").and_then(Value::as_str).unwrap_or("");
+                let execute = params.get("execute").and_then(Value::as_bool).unwrap_or(false);
                 if text.len() > INPUT_MAX {
                     let _ = reply.send(Err(RpcError::new("bad_request", format!("单次输入最多 {INPUT_MAX} 字节"))));
                     return;
@@ -354,10 +355,15 @@ impl Home {
                     let _ = reply.send(Err(RpcError::new("not_connected", "终端已断开")));
                     return;
                 }
-                let _ = term.handle.inputter().send(text.as_bytes().to_vec());
-                alog(format!("→ {node} 输入:{}", clip(&text.replace('\n', "⏎").replace('\r', "⏎"), LOG_TEXT_MAX)));
-                set_action(self, format!("输入:{}", clip(&text.replace(['\n', '\r'], " "), 40)));
-                let _ = reply.send(Ok(json!({ "sent": text.len() })));
+                let mut bytes = text.as_bytes().to_vec();
+                if execute {
+                    bytes.push(b'\r');
+                }
+                let _ = term.handle.inputter().send(bytes);
+                let shown = clip(&text.replace(['\n', '\r'], "⏎"), LOG_TEXT_MAX);
+                alog(format!("→ {node} 输入:{shown}{}", if execute { " ⏎" } else { "" }));
+                set_action(self, format!("{}:{}", if execute { "执行" } else { "输入" }, clip(&text.replace(['\n', '\r'], " "), 40)));
+                let _ = reply.send(Ok(json!({ "sent": text.len(), "executed": execute })));
             }
             "send_key" => {
                 let key = params.get("key").and_then(Value::as_str).unwrap_or("");
