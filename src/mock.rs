@@ -128,7 +128,7 @@ fn stack(name: &str, services: Vec<Service>) -> Stack {
     Stack { name: name.into(), services, expanded: false }
 }
 
-/// emby 节点:和旧版截图里的内容一致,方便对比外观。
+/// media-server 节点:一组常见的自托管服务。
 fn emby(r: &mut Rng) -> Vec<Stack> {
     vec![
         stack("admin", vec![svc(r, "watchtower", "containrrr/watchtower", true, &["8080/tcp"])]),
@@ -193,24 +193,24 @@ pub fn groups() -> Vec<Group> {
             id: 0,
             name: "开发分组".into(),
             color: 0x5DBBFF,
-            nodes: vec![Node { id: NodeId(0), name: "test".into(), user_host: "dev@192.0.2.30".into(), note: String::new(), tags: vec![], stacks: test, os: crate::osinfo::OsKind::MacOs, created_at: 0, last_connected: 0 }],
+            nodes: vec![Node { id: NodeId(0), name: "dev-mac".into(), user_host: "dev@192.0.2.10".into(), note: String::new(), tags: vec![], stacks: test, os: crate::osinfo::OsKind::MacOs, created_at: 0, last_connected: 0 }],
         },
         Group {
             id: 0,
             name: "生产分组".into(),
             color: 0xFF5C93,
             nodes: vec![
-                Node { id: NodeId(0), name: "emby".into(), user_host: "deploy@192.0.2.22".into(), note: String::new(), tags: vec![], stacks: emby_stacks, os: crate::osinfo::OsKind::Debian, created_at: 0, last_connected: 0 },
-                Node { id: NodeId(0), name: "docker-host".into(), user_host: "deploy@192.0.2.21".into(), note: String::new(), tags: vec![], stacks: docker_host, os: crate::osinfo::OsKind::Ubuntu, created_at: 0, last_connected: 0 },
+                Node { id: NodeId(0), name: "media-server".into(), user_host: "deploy@192.0.2.21".into(), note: String::new(), tags: vec![], stacks: emby_stacks, os: crate::osinfo::OsKind::Debian, created_at: 0, last_connected: 0 },
+                Node { id: NodeId(0), name: "app-server".into(), user_host: "deploy@192.0.2.22".into(), note: String::new(), tags: vec![], stacks: docker_host, os: crate::osinfo::OsKind::Ubuntu, created_at: 0, last_connected: 0 },
                 Node { id: NodeId(0), name: "big-cluster".into(), user_host: "ops@198.51.100.21".into(), note: String::new(), tags: vec![], stacks: cluster, os: crate::osinfo::OsKind::Rocky, created_at: 0, last_connected: 0 },
-                Node { id: NodeId(0), name: "hk-edge-01".into(), user_host: "root@198.51.100.8".into(), note: String::new(), tags: vec![], stacks: vec![], os: crate::osinfo::OsKind::Alpine, created_at: 0, last_connected: 0 },
+                Node { id: NodeId(0), name: "edge-01".into(), user_host: "root@198.51.100.8".into(), note: String::new(), tags: vec![], stacks: vec![], os: crate::osinfo::OsKind::Alpine, created_at: 0, last_connected: 0 },
             ],
         },
         Group {
             id: 0,
             name: "未分组".into(),
             color: 0x7d8ea6,
-            nodes: vec![Node { id: NodeId(0), name: "sg-gateway".into(), user_host: "ubuntu@203.0.113.2".into(), note: String::new(), tags: vec![], stacks: sg, os: crate::osinfo::OsKind::Ubuntu, created_at: 0, last_connected: 0 }],
+            nodes: vec![Node { id: NodeId(0), name: "gateway".into(), user_host: "ubuntu@203.0.113.2".into(), note: String::new(), tags: vec![], stacks: sg, os: crate::osinfo::OsKind::Ubuntu, created_at: 0, last_connected: 0 }],
         },
     ];
     // 按出现顺序分配 id,从 1 开始
