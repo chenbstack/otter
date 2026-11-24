@@ -657,7 +657,14 @@ pub mod t {
     pub const RADIUS_2XL: f32 = 20.0;
 }
 
+/// 等宽字体:终端和界面里所有等宽文字。字体名必须是该系统上真有的,否则会退回成比例字体,
+/// 终端里按固定格子摆放就会出现字符间距忽大忽小(Windows 上没有 Menlo 就是这样)。
+#[cfg(target_os = "macos")]
 pub const MONO: &str = "Menlo";
+#[cfg(target_os = "windows")]
+pub const MONO: &str = "Consolas";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const MONO: &str = "DejaVu Sans Mono";
 
 // ---- 尺寸 --------------------------------------------------------------------
 pub const MENU_W: f32 = 200.0;
