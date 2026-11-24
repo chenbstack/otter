@@ -64,6 +64,8 @@ pub struct Tab {
     /// 节点标签里「另一种模式」的文件视图状态:非 SFTP 模式时存 SFTP 的,SFTP 模式时存抽屉的。
     /// 进出 SFTP 模式时与 `Home.files` 对调(见 `set_mode`)。
     pub stash: Files,
+    /// 容器模式的 Docker 连接(真实数据);关闭标签即丢弃
+    pub docker: Option<crate::docker::Docker>,
 }
 
 impl Tab {
@@ -78,6 +80,7 @@ impl Tab {
             term: None,
             mode: NodeMode::Containers,
             stash: Files::new(),
+            docker: None,
         }
     }
 

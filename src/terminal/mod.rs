@@ -17,6 +17,7 @@ const OVERLAY_SPIN_MS: u64 = 900;
 const OVERLAY_FADE_MS: u64 = 220;
 const OVERLAY_SCRIM: f32 = 0.62;
 const OVERLAY_PILL_H: f32 = 44.0;
+const BADGE_H: f32 = 32.0;
 
 /// 一个服务器终端标签持有的东西。丢弃即断开连接。
 pub struct TermSession {
@@ -98,7 +99,31 @@ impl Home {
                 .with_animation("recon-spin", Animation::new(std::time::Duration::from_millis(OVERLAY_SPIN_MS)).repeat(), |i, t| i.transform(Transformation::rotate(percentage(t))))
                 .into_any_element()
         };
-        // 一条紧凑的胶囊:图标 + 一行文字(+ 重新连接),居中压在压暗的内容上
+        // 自动重连中:不遮挡内容,只在右下角显示一个小状态,重连完自动消失
+        if !lost {
+            return Some(
+                div()
+                    .id("reconnect-badge")
+                    .absolute()
+                    .right(px(16.0))
+                    .bottom(px(16.0))
+                    .child(
+                        div().rounded(px(BADGE_H / 2.0)).bg(c::bg()).child(
+                            div()
+                                .h(px(BADGE_H))
+                                .px(px(12.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .glass(BADGE_H / 2.0, GlassStyle::CARD)
+                                .child(glyph)
+                                .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::text()).child(format!("{title} · {sub}"))),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        // 一条紧凑的胶囊:图标 + 一行文字 + 重新连接,居中压在压暗的内容上
         Some(
             div()
                 .id("reconnect-overlay")

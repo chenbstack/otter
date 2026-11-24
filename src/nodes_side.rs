@@ -9,7 +9,7 @@ impl Home {
     pub(crate) fn nodes_page(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let body = match self.nodes_view {
             NodesView::Hosts => self.hosts_view(window, cx),
-            NodesView::Keychain => self.keychain_view(),
+            NodesView::Keychain => self.keychain_view(cx),
             NodesView::KnownHosts => self.known_hosts_view(cx),
             NodesView::Logs => self.logs_page(cx),
         };
@@ -19,7 +19,7 @@ impl Home {
     fn view_count(&self, v: NodesView) -> usize {
         match v {
             NodesView::Hosts => self.groups.iter().map(|g| g.nodes.len()).sum(),
-            NodesView::Keychain => self.credentials.len(),
+            NodesView::Keychain => self.keys.len(),
             NodesView::KnownHosts => self.known_hosts.len(),
             NodesView::Logs => crate::logs::len(),
         }
@@ -83,7 +83,7 @@ impl Home {
     }
 
     /// 非主机视图的外壳:标题、副标题、右侧操作,下面是内容
-    fn side_view(title: &'static str, sub: &'static str, action: Option<Stateful<Div>>, body: AnyElement) -> Div {
+    pub(crate) fn side_view(title: &'static str, sub: &'static str, action: Option<Stateful<Div>>, body: AnyElement) -> Div {
         div()
             .flex_1()
             .min_w_0()
@@ -116,59 +116,12 @@ impl Home {
     }
 
     /// 玻璃质感的行容器(与节点卡片同一套底色和描边)
-    fn glass_row(id: impl Into<ElementId>) -> Stateful<Div> {
+    pub(crate) fn glass_row(id: impl Into<ElementId>) -> Stateful<Div> {
         div().id(id).glass(t::RADIUS_LG, GlassStyle::CARD).flex().flex_row().items_center().gap(px(12.0)).px(px(14.0)).min_h(px(46.0))
     }
 
-    fn rows_scroll(id: &'static str, rows: Vec<Stateful<Div>>) -> Stateful<Div> {
+    pub(crate) fn rows_scroll(id: &'static str, rows: Vec<Stateful<Div>>) -> Stateful<Div> {
         div().id(id).flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap(px(6.0)).px(px(CONTENT_PAD)).pb(px(CONTENT_PAD)).children(rows)
-    }
-
-    // ---- 钥匙串 ----
-
-    fn keychain_view(&self) -> Div {
-        let rows: Vec<_> = self
-            .credentials
-            .iter()
-            .enumerate()
-            .map(|(i, cr)| {
-                let key = cr.kind == mock::CredKind::Key;
-                Self::glass_row(("cred", i))
-                    .child(
-                        div()
-                            .size(px(32.0))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(t::RADIUS_MD))
-                            .border_1()
-                            .border_color(c::accent().opacity(0.28))
-                            .bg(c::accent_soft())
-                            .child(icon(if key { IconName::KeyRound } else { IconName::Lock }, 16.0, c::accent())),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(div().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(cr.name.clone()))
-                            .child(div().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(cr.detail.clone())),
-                    )
-                    .child(tag(if key { "私钥" } else { "密码" }))
-                    .child(
-                        div()
-                            .w(px(72.0))
-                            .flex_shrink_0()
-                            .text_size(px(t::TYPE_CAPTION))
-                            .text_color(c::muted())
-                            .child(if cr.used_by == 0 { "未使用".to_string() } else { format!("{} 个节点", cr.used_by) }),
-                    )
-            })
-            .collect();
-        Self::side_view("钥匙串", "示例数据:真实凭据将接入系统钥匙串,目前不保存任何密码", None, Self::rows_scroll("keychain-scroll", rows).into_any_element())
     }
 
     // ---- 已知主机 ----

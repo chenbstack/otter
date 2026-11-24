@@ -3,7 +3,9 @@
 //! 标题栏(含标签)+ 内容区:节点页 / 节点标签(二级导航 + 页面)等。只为看外观和交互手感,没有任何真实连接。
 //! 色板沿用旧版 DeskPanel 的 theme.ts。
 
+mod docker;
 mod files;
+mod keychain;
 mod known_hosts;
 mod logs;
 mod secrets;
@@ -84,7 +86,12 @@ struct Home {
     nodes_view: nodes::NodesView,
     /// 已知主机视图的缓存(切到该视图或删除后重新读文件)
     known_hosts: Vec<known_hosts::KnownHost>,
-    credentials: Vec<mock::Credential>,
+    /// 钥匙串里的密钥(含被几个节点使用)
+    keys: Vec<store::KeyRow>,
+    /// 钥匙串页的弹窗:添加 / 重命名 / 删除
+    key_modal: Option<keychain::KeyModal>,
+    /// 刚复制过公钥的密钥 id(图标短暂变成对勾)
+    key_copied: Option<i64>,
     page: Page,
     hide_charts: bool,
     cols: usize,
@@ -101,6 +108,10 @@ struct Home {
     vault: Option<secrets::Vault>,
     /// 当前标签的文件视图状态(节点标签里是抽屉,文件标签里是主体),随标签切换
     files: files::Files,
+    /// 演示模式(mock 数据,不连服务器)
+    demo: bool,
+    /// 容器模式各页的界面状态和当前快照
+    dock: pages::dockerpages::DockUi,
     /// 各文件视图共享的 mock 上传/新建/删除状态
     fstore: files::Store,
 }
@@ -129,6 +140,11 @@ impl Home {
         // 没有节点时 sel 为 0(「无」)
         let sel = groups.iter().flat_map(|g| g.nodes.iter()).map(|n| n.id).next().unwrap_or(NodeId(0));
         let next_id = groups.iter().flat_map(|g| g.nodes.iter()).map(|n| n.id.0).max().unwrap_or(0) + 1;
+        let keys = match &store {
+            Some(s) => s.list_keys().unwrap_or_default(),
+            None if demo => mock::keys(),
+            None => vec![],
+        };
         Self {
             store,
             vault: None,
@@ -141,7 +157,9 @@ impl Home {
             tab_menu: None,
             nodes_view: nodes::NodesView::Hosts,
             known_hosts: Vec::new(),
-            credentials: mock::credentials(),
+            keys,
+            key_modal: None,
+            key_copied: None,
             page: Page::Stacks,
             hide_charts: false,
             cols: 2,
@@ -150,6 +168,8 @@ impl Home {
             shot: None,
             form: None,
             files: files::Files::new(),
+            demo,
+            dock: pages::dockerpages::DockUi::new(),
             fstore: files::Store::default(),
         }
     }
@@ -207,6 +227,7 @@ impl Render for Home {
                 window.request_animation_frame();
             }
         }
+        self.sync_docker(window, cx);
         let titlebar = self.titlebar(cx);
         let active_kind = self.workspace.active.map(|a| &self.workspace.tabs[a].kind);
         let mode = self.workspace.active.map(|a| self.workspace.tabs[a].mode);
@@ -238,7 +259,7 @@ impl Render for Home {
         let overlay = self.reconnect_overlay(cx);
         let body = div().relative().flex_1().min_h_0().flex().flex_col().child(body).children(overlay);
         let drawer = if is_files_tab { None } else { self.files_drawer(window, cx) };
-        let dialog = self.node_dialog(window, cx);
+        let dialog = self.node_dialog(window, cx).or_else(|| self.key_modal_view(window, cx));
         div()
             .size_full()
             .relative()
@@ -371,6 +392,9 @@ fn main() {
                 if let Some(k) = nview {
                     h.activate(0);
                     h.set_nodes_view(nodes::NodesView::ALL[k.min(3)], cx);
+                    if let Ok(kind) = std::env::var("DOCKYARD_KEY_MODAL") {
+                        h.debug_key_modal(&kind, window, cx);
+                    }
                 }
                 if h.all_nodes().next().is_some() {
                     for st in h.node_mut().stacks.iter_mut().take(expand) {
@@ -384,6 +408,9 @@ fn main() {
                 h.shot = shot.clone().map(|p| (p, 0));
                 if add {
                     h.open_add_node(window, cx);
+                    if std::env::var_os("DOCKYARD_FORM_KEY").is_some() {
+                        h.debug_form_key();
+                    }
                     if std::env::var_os("DOCKYARD_ADD_MENU").is_some() {
                         h.debug_open_group_menu();
                     }

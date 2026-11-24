@@ -2,13 +2,13 @@
 
 use super::super::*;
 
-pub(crate) fn menu_count(node: &Node, page: Page) -> Option<usize> {
+pub(crate) fn menu_count(node: &Node, snap: &crate::docker::Snapshot, page: Page) -> Option<usize> {
     match page {
         Page::Overview => None,
-        Page::Containers => Some(node.service_count()),
+        Page::Containers => Some(snap.containers.len()),
         Page::Stacks => Some(node.stacks.len()),
-        Page::Images => Some(12),
-        Page::Volumes => Some(0),
+        Page::Images => Some(snap.images.len()),
+        Page::Volumes => Some(snap.volumes.len()),
     }
 }
 
@@ -18,6 +18,21 @@ pub(crate) struct Agg {
     mem_mb: f32,
     cpu_s: [f32; SPARK_N],
     mem_s: [f32; SPARK_N],
+}
+
+impl Agg {
+    pub(crate) fn cpu(&self) -> f32 {
+        self.cpu
+    }
+    pub(crate) fn mem_mb(&self) -> f32 {
+        self.mem_mb
+    }
+    pub(crate) fn cpu_s(&self) -> [f32; SPARK_N] {
+        self.cpu_s
+    }
+    pub(crate) fn mem_s(&self) -> [f32; SPARK_N] {
+        self.mem_s
+    }
 }
 
 pub(crate) fn aggregate<'a>(svcs: impl Iterator<Item = &'a Service>) -> Agg {
@@ -78,7 +93,7 @@ impl Home {
             );
         for (i, p) in Page::ALL.into_iter().enumerate() {
             let active = self.page == p;
-            let count = menu_count(node, p);
+            let count = menu_count(node, &self.dock.snap, p);
             col = col.child(
                 div()
                     .id(("m", i))
@@ -132,8 +147,12 @@ impl Home {
         self.cols = (((inner + SVC_GAP) / (SVC_MIN_W + SVC_GAP)).floor() as usize).max(1);
         self.svc_w = (inner - SVC_GAP * (self.cols - 1) as f32) / self.cols as f32;
 
-        let body: AnyElement = if self.page != Page::Stacks {
-            empty_state(self.page.icon(), "这个页面还没重做", "本次只做了堆栈页").into_any_element()
+        let gate = self.docker_gate(cx);
+        let gated = gate.is_some();
+        let body: AnyElement = if let Some(g) = gate {
+            g
+        } else if self.page != Page::Stacks {
+            self.docker_page(cx)
         } else if self.node().stacks.is_empty() {
             empty_state(IconName::Layers, "还没有堆栈", "这个节点上没有发现 Compose 项目").into_any_element()
         } else {
@@ -160,7 +179,6 @@ impl Home {
                 .into_any_element()
         };
 
-        let node = self.node();
         let hide = self.hide_charts;
         let header = div()
             .flex()
@@ -189,22 +207,25 @@ impl Home {
                         div()
                             .text_size(px(t::TYPE_CONTROL))
                             .text_color(c::muted())
-                            .child(format!("{} 上的 Compose 项目", node.name)),
+                            .child(self.dock_subtitle()),
                     ),
             )
             .child(div().flex_1())
-            .when(self.page == Page::Stacks, |d| {
-                d.child(
-                    button("toggle-charts", if hide { IconName::Eye } else { IconName::EyeOff }, if hide { "显示图表" } else { "隐藏图表" })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.hide_charts = !this.hide_charts;
-                            cx.notify();
-                        })),
-                )
-                .child(button("refresh", IconName::RefreshCw, "刷新"))
+            .when(!gated, |d| {
+                d.gap(px(8.0))
+                    .when(matches!(self.page, Page::Stacks | Page::Overview), |d| {
+                        d.child(
+                            button("toggle-charts", if hide { IconName::Eye } else { IconName::EyeOff }, if hide { "显示图表" } else { "隐藏图表" })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.hide_charts = !this.hide_charts;
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .children(self.dock_header_actions(cx))
             });
 
-        let stats = (self.page == Page::Stacks).then(|| self.summary());
+        let stats = (self.page == Page::Stacks && !gated).then(|| self.summary());
 
         div()
             .flex_1()
@@ -213,9 +234,11 @@ impl Home {
             .flex()
             .flex_col()
             .px(px(CONTENT_PAD))
+            .relative()
             .child(header)
             .children(stats)
             .child(body)
+            .children(self.dock_overlays(cx))
     }
 
     /// 页头下方的一排汇总卡片。

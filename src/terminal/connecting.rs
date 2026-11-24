@@ -15,6 +15,8 @@ pub(crate) enum ConnTarget {
     Terminal(usize),
     /// 参数:文件页是标签(true)还是抽屉(false),决定「取消」关谁
     Sftp(bool),
+    /// 容器模式自己建的 Docker 连接(没有终端可复用时)
+    Docker,
 }
 
 pub(crate) const SFTP_STEP_LABELS: [&str; 3] = ["连接服务器", "身份认证", "打开 SFTP"];
@@ -38,6 +40,13 @@ impl Home {
                     }
                     _ => (String::new(), String::new(), tab.log_scroll.clone()),
                 }
+            }
+            ConnTarget::Docker => {
+                let (g, n) = self.locate(self.sel);
+                let node = &self.groups[g].nodes[n];
+                let c = super::ssh::Conn::parse(&node.user_host);
+                let scroll = self.workspace.active.and_then(|a| self.workspace.tabs.get(a)).map(|t| t.log_scroll.clone()).unwrap_or_default();
+                (node.name.clone(), format!("{}@{}:{}", c.user, c.host, c.port), scroll)
             }
             ConnTarget::Sftp(_) => {
                 let (g, n) = self.locate(self.files.node());
@@ -199,6 +208,12 @@ impl Home {
                                 this.files.drop_sftp();
                                 cx.notify();
                             }
+                            ConnTarget::Docker => {
+                                if let Some(t) = this.workspace.active.and_then(|a| this.workspace.tabs.get_mut(a)) {
+                                    t.docker = None;
+                                }
+                                cx.notify();
+                            }
                         })),
                 )
                 .child(button("conn-logs", IconName::ScrollText, "查看日志").on_click(cx.listener(|this, _, _, cx| {
@@ -210,6 +225,11 @@ impl Home {
             .child(button("conn-close", IconName::X, if failed { "关闭" } else { "取消" }).on_click(cx.listener(move |this, _, _, cx| match target {
             ConnTarget::Terminal(a) => this.close_tab(a, cx),
             ConnTarget::Sftp(tab) => this.close_sftp_page(tab, cx),
+            ConnTarget::Docker => {
+                if let Some(a) = this.workspace.active {
+                    this.close_tab(a, cx);
+                }
+            }
         })));
 
         // 图标区:连接中向外扩散两圈涟漪;失败时图标左右抖一下
@@ -271,6 +291,11 @@ impl Home {
             ConnTarget::Sftp(_) => {
                 if let Some(s) = self.files.sftp_ref() {
                     s.answer_host(yes);
+                }
+            }
+            ConnTarget::Docker => {
+                if let Some(d) = self.workspace.active.and_then(|a| self.workspace.tabs.get(a)).and_then(|t| t.docker.as_ref()) {
+                    d.answer_host(yes);
                 }
             }
         }

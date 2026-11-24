@@ -1876,6 +1876,7 @@ dependencies = [
  "gpui-pre-macos",
  "gpui_xterm",
  "keyring",
+ "rand 0.10.3",
  "regex",
  "rusqlite",
  "russh",

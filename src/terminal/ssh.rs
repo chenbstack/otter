@@ -292,7 +292,6 @@ pub fn connect(conn: Conn, cols: usize, rows: usize) -> (Input, Output, Handle) 
             attempt += 1;
             set(&st, Status::Reconnecting(attempt as u32));
             logs::push(logs::Level::Warn, &label, format!("{lost},{delay} 秒后自动重连({attempt}/{})", RECONNECT_DELAYS.len()));
-            io.say(&format!("\r\n\x1b[33m[{lost}:{delay} 秒后自动重连({attempt}/{})]\x1b[0m\r\n", RECONNECT_DELAYS.len()));
             // 断线期间敲的键不要在重连后一股脑发出去
             {
                 let mut g = io.inp.lock().await;

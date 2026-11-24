@@ -36,6 +36,11 @@ pub struct NodeForm {
     tags: Entity<InputState>,
     /// 认证方式是叠加的(参考 Termius):用户名 + 密码始终显示,私钥、SSH Agent 按需添加
     use_key: bool,
+    /// 私钥来源:true = 本机文件路径(旧方式),false = 钥匙串里的密钥(`key_id`)
+    key_path_mode: bool,
+    key_id: Option<i64>,
+    /// 钥匙串密钥下拉是否展开
+    key_menu: bool,
     use_agent: bool,
     show_pwd: bool,
     /// 「添加认证方式」下拉是否展开
@@ -69,6 +74,9 @@ impl NodeForm {
             note: input("备注(可选)", "", window, cx),
             tags: input("标签,用逗号分隔", "", window, cx),
             use_key: false,
+            key_path_mode: false,
+            key_id: None,
+            key_menu: false,
             use_agent: false,
             show_pwd: false,
             add_menu: false,
@@ -98,7 +106,7 @@ fn aad(id: NodeId, slot: &str) -> Vec<u8> {
 }
 
 impl Home {
-    fn ensure_vault(&mut self) -> Result<(), String> {
+    pub(crate) fn ensure_vault(&mut self) -> Result<(), String> {
         if self.vault.is_none() {
             self.vault = Some(crate::secrets::Vault::open()?);
         }
@@ -125,19 +133,24 @@ impl Home {
             }
         };
         // 还没保存过任何认证信息的旧节点保持原来的行为:SSH Agent
-        if !row.use_agent && row.secrets.is_empty() && row.key_label.is_empty() {
+        if !row.use_agent && row.secrets.is_empty() && row.key_label.is_empty() && row.key_id.is_none() {
             return conn;
         }
-        if !row.secrets.is_empty() {
+        if !row.secrets.is_empty() || row.key_id.is_some() {
             if let Err(e) = self.ensure_vault() {
                 conn.auth_error = Some(e);
                 return conn;
             }
         }
         let read = || -> Result<Auth, String> {
-            let key = match self.open_slot(&row, id, SLOT_KEY)? {
-                Some(pem) => Some(KeyAuth { pem, passphrase: self.open_slot(&row, id, SLOT_PASSPHRASE)?, label: row.key_label.clone() }),
-                None => None,
+            // 引用了钥匙串里的密钥就用它,否则用节点自己存的私钥
+            let key = if let Some(kid) = row.key_id {
+                Some(self.load_key_auth(kid)?)
+            } else {
+                match self.open_slot(&row, id, SLOT_KEY)? {
+                    Some(pem) => Some(KeyAuth { pem, passphrase: self.open_slot(&row, id, SLOT_PASSPHRASE)?, label: row.key_label.clone() }),
+                    None => None,
+                }
             };
             Ok(Auth { key, agent: row.use_agent, password: self.open_slot(&row, id, SLOT_PASSWORD)? })
         };
@@ -160,12 +173,15 @@ impl Home {
             Ok((slot.to_string(), n, c))
         };
         let mut row = AuthRow { use_agent: f.use_agent, ..Default::default() };
+        if f.use_key && !f.key_path_mode {
+            row.key_id = f.key_id;
+        }
         let pw = f.password.read(cx).value().to_string();
         if !pw.is_empty() {
             row.secrets.push(seal(SLOT_PASSWORD, pw.as_bytes())?);
         }
         let path = NodeForm::val(&f.key_path, cx);
-        if f.use_key && !path.is_empty() {
+        if f.use_key && f.key_path_mode && !path.is_empty() {
             row.key_label = path.clone();
             let same = existing.filter(|e| e.key_label == path).and_then(|e| e.secret(SLOT_KEY).map(|(n, c)| (n.to_vec(), c.to_vec())));
             match same {
@@ -189,7 +205,7 @@ impl Home {
 
     /// 这次提交是否会写入秘密(决定要不要提前向系统凭据库取主密钥)
     fn form_has_secrets(&self, cx: &App) -> bool {
-        self.form.as_ref().is_some_and(|f| !f.password.read(cx).value().is_empty() || (f.use_key && !NodeForm::val(&f.key_path, cx).is_empty()))
+        self.form.as_ref().is_some_and(|f| !f.password.read(cx).value().is_empty() || (f.use_key && f.key_path_mode && !NodeForm::val(&f.key_path, cx).is_empty()))
     }
 }
 
@@ -221,8 +237,12 @@ impl Home {
             match row {
                 Ok(row) => {
                     f.use_agent = row.use_agent;
-                    if !row.key_label.is_empty() {
+                    if row.key_id.is_some() {
                         f.use_key = true;
+                        f.key_id = row.key_id;
+                    } else if !row.key_label.is_empty() {
+                        f.use_key = true;
+                        f.key_path_mode = true;
                         set(&f.key_path, row.key_label.clone(), window, cx);
                     }
                     let mut err = None;
@@ -252,6 +272,16 @@ impl Home {
         }
         self.form = Some(f);
         cx.notify();
+    }
+
+    /// 调试:截图时直接显示钥匙串密钥选择行(DOCKYARD_FORM_KEY=1)
+    pub(crate) fn debug_form_key(&mut self) {
+        let first = self.keys.first().map(|k| k.id);
+        if let Some(f) = &mut self.form {
+            f.use_key = true;
+            f.key_id = first;
+            f.key_path_mode = first.is_none();
+        }
     }
 
     /// 调试:截图时展开分组下拉(DOCKYARD_ADD_MENU=1)
@@ -284,6 +314,7 @@ impl Home {
         if let Some(f) = &mut self.form {
             f.group_menu = false;
             f.add_menu = false;
+            f.key_menu = false;
             cx.notify();
         }
     }
@@ -394,6 +425,7 @@ impl Home {
             self.sel = id;
             self.scroll = gpui_kit::component::VirtualListScrollHandle::new();
         }
+        self.reload_keys();
         self.close_form(cx);
     }
 
@@ -461,7 +493,7 @@ impl Home {
 // 焦点用整行淡紫底表示,错误用整行淡红底 + 红标签。
 
 /// 一行里的输入:无边框,撑满剩余宽度
-fn input_cell(state: &Entity<InputState>, mono: bool) -> Div {
+pub(crate) fn input_cell(state: &Entity<InputState>, mono: bool) -> Div {
     div()
         .flex_1()
         .min_w_0()
@@ -473,7 +505,7 @@ fn input_cell(state: &Entity<InputState>, mono: bool) -> Div {
 }
 
 /// 小节:粗体标题 + 一组字段(节与节之间由调用方画分隔线)
-fn section(title: &'static str, rows: Vec<Div>) -> Div {
+pub(crate) fn section(title: &'static str, rows: Vec<Div>) -> Div {
     div()
         .flex()
         .flex_col()
@@ -498,7 +530,7 @@ fn x_btn(id: &'static str) -> Stateful<Div> {
 }
 
 /// 弹窗里的次要按钮:玻璃 CONTROL 样式
-fn ctl_btn(id: &'static str, ic: Option<IconName>, text: &'static str, h: f32) -> Stateful<Div> {
+pub(crate) fn ctl_btn(id: &'static str, ic: Option<IconName>, text: &'static str, h: f32) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -569,7 +601,40 @@ impl Home {
                 div().flex_1().min_w_0().flex().flex_row().items_center().gap(px(4.0)).child(input_cell(&f.password, false)).child(eye),
             ),
         ];
-        if f.use_key {
+        if f.use_key && !f.key_path_mode {
+            // 从钥匙串选一把密钥;最后一项切到「本机文件」的旧方式
+            let mut items: Vec<MenuItem> = self.keys.iter().map(|k| MenuItem::new(k.name.clone()).sub(k.algo.trim_start_matches("ssh-").to_string()).icon(IconName::KeyRound)).collect();
+            items.push(MenuItem::new("使用密钥文件…").sub("直接读取本机的私钥文件").icon(IconName::FileKey));
+            let n_keys = self.keys.len();
+            let ids: Vec<i64> = self.keys.iter().map(|k| k.id).collect();
+            let sel = f.key_id.and_then(|id| ids.iter().position(|&x| x == id)).unwrap_or(n_keys);
+            let (k1, k2, k3) = (cx.entity(), cx.entity(), cx.entity());
+            let sel_el = select(
+                "key-select",
+                IconName::KeyRound,
+                items,
+                sel,
+                f.key_menu,
+                move |_, cx| k1.update(cx, |h, cx| { if let Some(f) = &mut h.form { f.key_menu = !f.key_menu; cx.notify(); } }),
+                move |i, _, cx| {
+                    k2.update(cx, |h, cx| {
+                        if let Some(f) = &mut h.form {
+                            if i < n_keys { f.key_id = Some(ids[i]) } else { f.key_id = None; f.key_path_mode = true }
+                            f.key_menu = false;
+                            cx.notify();
+                        }
+                    })
+                },
+                move |_, cx| k3.update(cx, |h, cx| h.close_menus(cx)),
+            );
+            cred_rows.push(div().flex().flex_row().items_center().gap(px(6.0)).child(div().flex_1().min_w_0().child(sel_el)).child(x_btn("rm-key").on_click(cx.listener(|this, _, _, cx| {
+                if let Some(f) = &mut this.form {
+                    f.use_key = false;
+                    f.key_id = None;
+                    cx.notify();
+                }
+            }))));
+        } else if f.use_key {
             cred_rows.push(field(
                 IconName::KeyRound,
                 focus(&f.key_path, cx),
@@ -627,7 +692,7 @@ impl Home {
                 let mut items = vec![];
                 let mut kinds = vec![];
                 if !f.use_key {
-                    items.push(MenuItem::new("私钥").sub("使用本机的私钥文件").icon(IconName::KeyRound));
+                    items.push(MenuItem::new("私钥").sub("使用钥匙串里的密钥或本机的私钥文件").icon(IconName::KeyRound));
                     kinds.push(true);
                 }
                 if !f.use_agent {
@@ -645,7 +710,14 @@ impl Home {
                         let key = kinds[i];
                         t1.update(cx, |h, cx| {
                             if let Some(f) = &mut h.form {
-                                if key { f.use_key = true } else { f.use_agent = true }
+                                if key {
+                                    f.use_key = true;
+                                    // 钥匙串里有密钥就默认选第一把,没有就退回填文件路径
+                                    f.key_path_mode = h.keys.is_empty();
+                                    f.key_id = h.keys.first().map(|k| k.id);
+                                } else {
+                                    f.use_agent = true
+                                }
                                 f.add_menu = false;
                                 cx.notify();
                             }
@@ -795,7 +867,8 @@ impl Home {
             cx.listener(|this, e: &KeyDownEvent, window, cx| match e.keystroke.key.as_str() {
                 "escape" => {
                     match this.form.as_mut() {
-                        Some(f) if f.add_menu || f.group_menu => {
+                        Some(f) if f.add_menu || f.group_menu || f.key_menu => {
+                            f.key_menu = false;
                             f.add_menu = false;
                             f.group_menu = false;
                             cx.notify();

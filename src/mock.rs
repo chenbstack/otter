@@ -216,28 +216,21 @@ pub fn groups() -> Vec<Group> {
     groups
 }
 
-/// 钥匙串里的一条凭据(mock)
-pub struct Credential {
-    pub name: String,
-    pub kind: CredKind,
-    /// 私钥路径或「密码」
-    pub detail: String,
-    /// 被几个节点使用
-    pub used_by: usize,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum CredKind {
-    Key,
-    Password,
-}
-
-pub fn credentials() -> Vec<Credential> {
-    let k = |name: &str, detail: &str, used_by| Credential { name: name.into(), kind: CredKind::Key, detail: detail.into(), used_by };
+/// 钥匙串示例数据(仅 `--demo` 和截图)
+pub fn keys() -> Vec<crate::store::KeyRow> {
+    let k = |id, name: &str, algo: &str, fp: &str, enc, used_by| crate::store::KeyRow {
+        id,
+        name: name.into(),
+        algo: algo.into(),
+        public_key: format!("{algo} AAAAdemo"),
+        fingerprint: format!("SHA256:{fp}"),
+        has_passphrase: enc,
+        source: String::new(),
+        used_by,
+    };
     vec![
-        k("默认私钥", "~/.ssh/id_ed25519", 4),
-        k("生产环境私钥", "~/.ssh/prod_ed25519", 2),
-        Credential { name: "测试机 root".into(), kind: CredKind::Password, detail: "密码".into(), used_by: 1 },
-        k("CI 部署私钥", "~/.ssh/deploy_rsa", 0),
+        k(1, "默认私钥", "ssh-ed25519", "k3Qw0Zr8mYb1tqLx7VnE5uJdA2cHfGp9oSiUe4RyXaM", false, 4),
+        k(2, "生产环境私钥", "ssh-ed25519", "Pz9LmN2vBq7TcXaR4eWjH1sKfYd8UoGi5AtVn3E6bQw", true, 2),
+        k(3, "CI 部署私钥", "ssh-rsa", "d7HsJw3QxN0fLpZ8vRtYb2mCkU5eGa1oIiVn9AqXr4E", false, 0),
     ]
 }

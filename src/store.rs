@@ -80,6 +80,25 @@ const MIGRATIONS: &[&str] = &[
          key   TEXT PRIMARY KEY,
          value TEXT NOT NULL
      );",
+    // v4:钥匙串里的密钥对(元数据)和加密后的私钥/口令;节点可以引用其中一把
+    "CREATE TABLE keys (
+         id             INTEGER PRIMARY KEY,
+         name           TEXT NOT NULL,
+         algo           TEXT NOT NULL,
+         public_key     TEXT NOT NULL,
+         fingerprint    TEXT NOT NULL,
+         has_passphrase INTEGER NOT NULL DEFAULT 0,
+         source         TEXT NOT NULL DEFAULT '',
+         created_at     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+     );
+     CREATE TABLE key_secrets (
+         key_id     INTEGER NOT NULL REFERENCES keys(id) ON DELETE CASCADE,
+         slot       TEXT NOT NULL,
+         nonce      BLOB NOT NULL,
+         ciphertext BLOB NOT NULL,
+         PRIMARY KEY (key_id, slot)
+     );
+     ALTER TABLE node_auth ADD COLUMN key_id INTEGER REFERENCES keys(id) ON DELETE SET NULL;",
 ];
 
 /// 秘密槽位
@@ -93,9 +112,38 @@ pub struct AuthRow {
     pub use_agent: bool,
     /// 私钥的来源标签(导入时的文件路径,仅用于显示)
     pub key_label: String,
+    /// 引用的钥匙串密钥(有它就不用节点自己的私钥)
+    pub key_id: Option<i64>,
     /// (槽位, nonce, 密文)
     pub secrets: Vec<(String, Vec<u8>, Vec<u8>)>,
 }
+
+/// 钥匙串里的一把密钥(不含私钥)
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeyRow {
+    pub id: i64,
+    pub name: String,
+    pub algo: String,
+    /// OpenSSH 单行格式
+    pub public_key: String,
+    pub fingerprint: String,
+    pub has_passphrase: bool,
+    /// 来源:导入的文件路径,或「生成」
+    pub source: String,
+    pub used_by: usize,
+}
+
+pub struct NewKey<'a> {
+    pub name: &'a str,
+    pub algo: &'a str,
+    pub public_key: &'a str,
+    pub fingerprint: &'a str,
+    pub has_passphrase: bool,
+    pub source: &'a str,
+}
+
+/// 钥匙串密钥的秘密槽位:只有私钥 PEM(钥匙串不保存口令);沿用节点的槽位名
+pub const KEY_SLOT_PRIVATE: &str = SLOT_KEY;
 
 impl AuthRow {
     pub fn secret(&self, slot: &str) -> Option<(&[u8], &[u8])> {
@@ -204,9 +252,9 @@ impl Store {
         let e = |e: rusqlite::Error| e.to_string();
         let tx = self.conn.transaction().map_err(e)?;
         tx.execute(
-            "INSERT INTO node_auth (node_id, use_agent, key_label) VALUES (?1, ?2, ?3)
-             ON CONFLICT(node_id) DO UPDATE SET use_agent=excluded.use_agent, key_label=excluded.key_label",
-            params![id.0, a.use_agent, a.key_label],
+            "INSERT INTO node_auth (node_id, use_agent, key_label, key_id) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(node_id) DO UPDATE SET use_agent=excluded.use_agent, key_label=excluded.key_label, key_id=excluded.key_id",
+            params![id.0, a.use_agent, a.key_label, a.key_id],
         )
         .map_err(e)?;
         tx.execute("DELETE FROM secrets WHERE node_id=?1", params![id.0]).map_err(e)?;
@@ -219,14 +267,17 @@ impl Store {
     pub fn load_auth(&self, id: NodeId) -> Result<AuthRow, String> {
         let e = |e: rusqlite::Error| e.to_string();
         let mut row = AuthRow::default();
-        if let Some((agent, label)) = self
+        if let Some((agent, label, key_id)) = self
             .conn
-            .query_row("SELECT use_agent, key_label FROM node_auth WHERE node_id=?1", params![id.0], |r| Ok((r.get::<_, bool>(0)?, r.get::<_, String>(1)?)))
+            .query_row("SELECT use_agent, key_label, key_id FROM node_auth WHERE node_id=?1", params![id.0], |r| {
+                Ok((r.get::<_, bool>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<i64>>(2)?))
+            })
             .optional()
             .map_err(e)?
         {
             row.use_agent = agent;
             row.key_label = label;
+            row.key_id = key_id;
         }
         let mut st = self.conn.prepare("SELECT slot, nonce, ciphertext FROM secrets WHERE node_id=?1").map_err(e)?;
         row.secrets = st
@@ -235,6 +286,69 @@ impl Store {
             .collect::<Result<_, _>>()
             .map_err(e)?;
         Ok(row)
+    }
+
+    // ---- 钥匙串 ----
+
+    /// 所有密钥(按添加顺序),带被几个节点引用。
+    pub fn list_keys(&self) -> Result<Vec<KeyRow>, String> {
+        let e = |e: rusqlite::Error| e.to_string();
+        let mut st = self
+            .conn
+            .prepare(
+                "SELECT k.id, k.name, k.algo, k.public_key, k.fingerprint, k.has_passphrase, k.source,
+                        (SELECT COUNT(*) FROM node_auth a WHERE a.key_id = k.id)
+                 FROM keys k ORDER BY k.id",
+            )
+            .map_err(e)?;
+        st.query_map([], |r| {
+            Ok(KeyRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                algo: r.get(2)?,
+                public_key: r.get(3)?,
+                fingerprint: r.get(4)?,
+                has_passphrase: r.get(5)?,
+                source: r.get(6)?,
+                used_by: r.get::<_, i64>(7)? as usize,
+            })
+        })
+        .map_err(e)?
+        .collect::<Result<_, _>>()
+        .map_err(e)
+    }
+
+    /// 新增密钥。密文绑定了密钥 id,所以先插入拿到 id,再由 `seal` 生成密文;任何一步失败整体回滚。
+    pub fn add_key(&mut self, k: &NewKey, seal: impl FnOnce(i64) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>, String>) -> Result<i64, String> {
+        let e = |e: rusqlite::Error| e.to_string();
+        let tx = self.conn.transaction().map_err(e)?;
+        tx.execute(
+            "INSERT INTO keys (name, algo, public_key, fingerprint, has_passphrase, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![k.name, k.algo, k.public_key, k.fingerprint, k.has_passphrase, k.source],
+        )
+        .map_err(e)?;
+        let id = tx.last_insert_rowid();
+        for (slot, nonce, ct) in seal(id)? {
+            tx.execute("INSERT INTO key_secrets (key_id, slot, nonce, ciphertext) VALUES (?1, ?2, ?3, ?4)", params![id, slot, nonce, ct]).map_err(e)?;
+        }
+        tx.commit().map_err(e)?;
+        Ok(id)
+    }
+
+    pub fn key_secrets(&self, id: i64) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>, String> {
+        let e = |e: rusqlite::Error| e.to_string();
+        let mut st = self.conn.prepare("SELECT slot, nonce, ciphertext FROM key_secrets WHERE key_id=?1").map_err(e)?;
+        st.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(e)?.collect::<Result<_, _>>().map_err(e)
+    }
+
+    pub fn rename_key(&self, id: i64, name: &str) -> Result<(), String> {
+        let n = self.conn.execute("UPDATE keys SET name=?1 WHERE id=?2", params![name, id]).map_err(|e| e.to_string())?;
+        if n == 0 { Err("密钥不存在".into()) } else { Ok(()) }
+    }
+
+    /// 删除密钥;引用它的节点的 `key_id` 自动置空。
+    pub fn delete_key(&self, id: i64) -> Result<(), String> {
+        self.conn.execute("DELETE FROM keys WHERE id=?1", params![id]).map(|_| ()).map_err(|e| e.to_string())
     }
 
     /// 更新节点(含换分组、重写标签)。
@@ -317,7 +431,7 @@ mod tests {
         let gid = s.load_groups().unwrap()[0].id;
         let id = s.add_node(&NewNode { group_id: gid, name: "x", user: "root", host: "h", port: 22, note: "", tags: &[] }).unwrap();
         assert!(s.load_auth(id).unwrap().secrets.is_empty());
-        let a = AuthRow { use_agent: true, key_label: "~/k".into(), secrets: vec![(SLOT_PASSWORD.into(), vec![1], vec![2]), (SLOT_KEY.into(), vec![3], vec![4])] };
+        let a = AuthRow { use_agent: true, key_label: "~/k".into(), key_id: None, secrets: vec![(SLOT_PASSWORD.into(), vec![1], vec![2]), (SLOT_KEY.into(), vec![3], vec![4])] };
         s.save_auth(id, &a).unwrap();
         let got = s.load_auth(id).unwrap();
         assert!(got.use_agent);
@@ -330,6 +444,28 @@ mod tests {
         s.conn.execute("DELETE FROM nodes WHERE id=?1", params![id.0]).unwrap();
         let n: i64 = s.conn.query_row("SELECT COUNT(*) FROM secrets", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0, "删除节点要级联删除秘密");
+    }
+
+    #[test]
+    fn keys_crud_usage_and_cascade() {
+        let mut s = Store::open_memory().unwrap();
+        let gid = s.load_groups().unwrap()[0].id;
+        let node = s.add_node(&NewNode { group_id: gid, name: "n", user: "root", host: "h", port: 22, note: "", tags: &[] }).unwrap();
+        let k = NewKey { name: "k1", algo: "ssh-ed25519", public_key: "ssh-ed25519 AAAA", fingerprint: "SHA256:x", has_passphrase: false, source: "生成" };
+        // seal 失败要整体回滚
+        assert!(s.add_key(&k, |_| Err("boom".into())).is_err());
+        assert!(s.list_keys().unwrap().is_empty());
+        let id = s.add_key(&k, |id| Ok(vec![(SLOT_KEY.into(), vec![id as u8], vec![9])])).unwrap();
+        assert_eq!(s.key_secrets(id).unwrap().len(), 1);
+        s.save_auth(node, &AuthRow { key_id: Some(id), ..Default::default() }).unwrap();
+        assert_eq!(s.list_keys().unwrap()[0].used_by, 1);
+        assert_eq!(s.load_auth(node).unwrap().key_id, Some(id));
+        s.rename_key(id, "k2").unwrap();
+        assert_eq!(s.list_keys().unwrap()[0].name, "k2");
+        s.delete_key(id).unwrap();
+        assert!(s.list_keys().unwrap().is_empty());
+        assert!(s.key_secrets(id).unwrap().is_empty());
+        assert_eq!(s.load_auth(node).unwrap().key_id, None);
     }
 
     #[test]
