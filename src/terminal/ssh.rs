@@ -243,7 +243,7 @@ impl Drop for Handle {
     }
 }
 
-pub fn connect(conn: Conn, cols: usize, rows: usize) -> (Input, Output, Handle) {
+pub fn connect(conn: Conn, cols: usize, rows: usize, activity: Arc<super::Activity>) -> (Input, Output, Handle) {
     let (out_tx, out_rx) = std_mpsc::channel::<Vec<u8>>();
     let (in_tx, in_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
     let (rs_tx, rs_rx) = tokio_mpsc::unbounded_channel::<(u16, u16)>();
@@ -258,7 +258,7 @@ pub fn connect(conn: Conn, cols: usize, rows: usize) -> (Input, Output, Handle) 
     let link: Link = Arc::new(Mutex::new(None));
     let (ever_io, epoch_io, link_io) = (ever.clone(), epoch.clone(), link.clone());
     let join = runtime().spawn(async move {
-        let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone(), steps: steps_io, host_prompt: hp_io, ever: ever_io, epoch: epoch_io, link: link_io };
+        let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone(), steps: steps_io, host_prompt: hp_io, ever: ever_io, epoch: epoch_io, link: link_io, activity };
         let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
         logs::push(logs::Level::Info, &label, "开始连接");
         let size = Arc::new(Mutex::new((cols as u16, rows as u16)));
@@ -328,6 +328,8 @@ pub(crate) struct Io {
     ever: Arc<AtomicBool>,
     epoch: Arc<AtomicU32>,
     link: Link,
+    /// 终端的执行状态;SFTP 用的无界面会话里是个用不上的占位
+    activity: Arc<super::Activity>,
 }
 
 impl Io {
@@ -335,7 +337,7 @@ impl Io {
     pub(crate) fn headless(host_prompt: PendingHost, steps: Arc<Mutex<Vec<Step>>>) -> Io {
         let (out, _) = std_mpsc::channel();
         let (_, inp) = tokio_mpsc::unbounded_channel();
-        Io { out, inp: Arc::new(tokio::sync::Mutex::new(inp)), status: Arc::new(Mutex::new(Status::Connecting)), steps, host_prompt, ever: Arc::new(AtomicBool::new(false)), epoch: Arc::new(AtomicU32::new(0)), link: Arc::new(Mutex::new(None)) }
+        Io { out, inp: Arc::new(tokio::sync::Mutex::new(inp)), status: Arc::new(Mutex::new(Status::Connecting)), steps, host_prompt, ever: Arc::new(AtomicBool::new(false)), epoch: Arc::new(AtomicU32::new(0)), link: Arc::new(Mutex::new(None)), activity: Arc::default() }
     }
 
     /// 挂出主机指纹确认,等界面回答(取消、会话被丢弃都算拒绝)
@@ -550,6 +552,7 @@ async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, resize: &mut tokio_mpsc:
         tokio::select! {
             data = inp.recv() => match data {
                 Some(d) => {
+                    io.activity.on_input(&d);
                     if let Err(e) = ch.data(&d[..]).await {
                         break Err(e.to_string());
                     }
@@ -682,7 +685,7 @@ mod tests {
         let Ok(target) = std::env::var("OTTER_TEST_SSH") else { return };
         let ready = std::env::var("OTTER_TEST_READY").expect("OTTER_TEST_READY");
         let conn = Conn::parse(&target);
-        let (_i, _o, h) = connect(conn.clone(), 80, 24);
+        let (_i, _o, h) = connect(conn.clone(), 80, 24, Default::default());
         let wait = |secs: u64, what: &str, f: &dyn Fn() -> bool| {
             let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
             while std::time::Instant::now() < end {

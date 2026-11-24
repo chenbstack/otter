@@ -17,8 +17,8 @@ use crate::workspace::{NodeMode, TabKind};
 use crate::ui::*;
 use crate::{Home, icon};
 
-/// 超过这么久没有任何调用,自动释放(`wait_for` 等待期间不算)
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// 超过这么久没有任何调用,自动释放(`wait_for` 等待期间不算)。目前与 `MAX_DURATION` 相同
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// 单次接管的最长时长
 pub const MAX_DURATION: Duration = Duration::from_secs(30 * 60);
 /// `send_input` 单次最多字节

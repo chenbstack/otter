@@ -136,7 +136,14 @@ const MIGRATIONS: &[&str] = &[
          created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
          PRIMARY KEY (client_name, parent_exe, node_id)
      );",
+    // v7:节点最近一次连上的时间(Unix 秒,0 = 没连过),节点页按它排序
+    "ALTER TABLE nodes ADD COLUMN last_connected_at INTEGER NOT NULL DEFAULT 0;",
 ];
+
+/// 当前 Unix 时间(秒)
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
 
 /// 一条「总是允许」的 agent 接管授权。
 pub struct AgentGrant {
@@ -269,14 +276,14 @@ impl Store {
             tags.entry(id).or_default().push(tag);
         }
 
-        let mut st = self.conn.prepare("SELECT id, group_id, name, user, host, port, note, os FROM nodes ORDER BY position, id").map_err(e)?;
+        let mut st = self.conn.prepare("SELECT id, group_id, name, user, host, port, note, os, created_at, last_connected_at FROM nodes ORDER BY position, id").map_err(e)?;
         let rows = st
             .query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, u16>(5)?, r.get::<_, String>(6)?, r.get::<_, String>(7)?))
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, u16>(5)?, r.get::<_, String>(6)?, r.get::<_, String>(7)?, r.get::<_, i64>(8)?, r.get::<_, i64>(9)?))
             })
             .map_err(e)?;
         for row in rows {
-            let (id, gid, name, user, host, port, note, os) = row.map_err(e)?;
+            let (id, gid, name, user, host, port, note, os, created_at, last_connected) = row.map_err(e)?;
             if let Some(g) = groups.iter_mut().find(|g| g.id == gid) {
                 g.nodes.push(Node {
                     id: NodeId(id as u32),
@@ -286,6 +293,8 @@ impl Store {
                     tags: tags.remove(&id).unwrap_or_default(),
                     stacks: vec![],
                     os: crate::osinfo::OsKind::from_key(&os),
+                    created_at,
+                    last_connected,
                 });
             }
         }
@@ -469,6 +478,15 @@ impl Store {
         Ok(())
     }
 
+    /// 记下节点最近一次连上的时间;节点不存在返回错误。
+    pub fn set_node_connected(&mut self, id: NodeId, ts: i64) -> Result<(), String> {
+        let n = self.conn.execute("UPDATE nodes SET last_connected_at=?1 WHERE id=?2", params![ts, id.0]).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err(format!("节点 {} 不存在", id.0));
+        }
+        Ok(())
+    }
+
     /// 改分组的名称和颜色;分组不存在返回错误。
     pub fn update_group(&mut self, id: i64, name: &str, color: u32) -> Result<(), String> {
         let n = self.conn.execute("UPDATE groups SET name=?1, color=?2 WHERE id=?3", params![name, color, id]).map_err(|e| e.to_string())?;
@@ -619,6 +637,19 @@ mod tests {
         let left: i64 = s.conn.query_row("SELECT COUNT(*) FROM node_tags", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 0);
         assert!(s.delete_group(g2).is_err());
+    }
+
+    #[test]
+    fn node_times_are_loaded_and_connect_time_updates() {
+        let mut s = Store::open_memory().unwrap();
+        let gid = s.load_groups().unwrap()[0].id;
+        let id = s.add_node(&NewNode { group_id: gid, name: "a", user: "u", host: "h", port: 22, note: "", tags: &[] }).unwrap();
+        let n = &s.load_groups().unwrap()[0].nodes[0];
+        assert!(n.created_at > 0, "添加时间由库默认值写入");
+        assert_eq!(n.last_connected, 0, "没连过是 0");
+        s.set_node_connected(id, 1_700_000_000).unwrap();
+        assert_eq!(s.load_groups().unwrap()[0].nodes[0].last_connected, 1_700_000_000);
+        assert!(s.set_node_connected(NodeId(9999), 1).is_err());
     }
 
     #[test]

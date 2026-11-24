@@ -99,9 +99,19 @@ impl Tab {
     }
 
     /// 标签所属的节点;节点页不属于任何节点。
-    /// 标签里正在执行任务:终端有持续输出,或 agent 正在 `wait_for` 等命令跑完。
+    /// 标签里正在执行任务时,这一轮已经转了多久(毫秒);没在执行为 `None`。
+    /// 终端刚提交命令或有持续输出就算;agent 正在 `wait_for` 等命令跑完也算(从全局时钟取相位)。
+    pub fn busy_elapsed_ms(&self) -> Option<u64> {
+        self.term.as_ref().and_then(|t| t.activity.elapsed_ms()).or_else(|| {
+            self.takeover.as_ref().is_some_and(|k| k.waiting).then(|| {
+                static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+                START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+            })
+        })
+    }
+
     pub fn busy(&self) -> bool {
-        self.term.as_ref().is_some_and(|t| t.activity.busy()) || self.takeover.as_ref().is_some_and(|k| k.waiting)
+        self.busy_elapsed_ms().is_some()
     }
 
     pub fn node(&self) -> Option<NodeId> {

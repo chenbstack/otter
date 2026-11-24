@@ -97,6 +97,38 @@ impl Home {
     }
 
     /// 「主机」视图:搜索条、分组、节点卡片网格
+    /// 终端连上了就记下「最近连接」时间:每个 (标签, 连接代数) 只记一次,重连也算。
+    pub(crate) fn sync_last_connected(&mut self) {
+        if self.demo {
+            return;
+        }
+        let now = crate::store::now_secs();
+        let mut done: Vec<NodeId> = vec![];
+        for tab in &self.workspace.tabs {
+            let (Some(id), Some(t)) = (tab.node(), tab.term.as_ref()) else { continue };
+            if t.handle.status() == crate::terminal::ssh::Status::Connected && self.connect_noted.insert((tab.id, t.handle.generation())) {
+                done.push(id);
+            }
+        }
+        for id in done {
+            if let Some(Err(e)) = self.store.as_mut().map(|s| s.set_node_connected(id, now)) {
+                crate::logs::push(crate::logs::Level::Error, "本地库", format!("记录最近连接时间失败: {e}"));
+            }
+            if let Some(n) = self.groups.iter_mut().flat_map(|g| g.nodes.iter_mut()).find(|n| n.id == id) {
+                n.last_connected = now;
+            }
+        }
+    }
+
+    fn set_node_sort(&mut self, sort: NodeSort, cx: &mut Context<Self>) {
+        self.node_sort = sort;
+        self.sort_menu = false;
+        if let Some(s) = &self.store {
+            let _ = s.set_setting("node_sort", sort.key());
+        }
+        cx.notify();
+    }
+
     pub(super) fn hosts_view(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let query = self.node_search.as_ref().map(|s| s.read(cx).value().trim().to_lowercase()).unwrap_or_default();
         let searching = !query.is_empty();
@@ -190,6 +222,50 @@ impl Home {
                     },
                 )))
             });
+        let (s1, s2) = (cx.entity(), cx.entity());
+        let sort_btn = div()
+            .relative()
+            .flex_shrink_0()
+            .child(
+                div()
+                    .id("node-sort")
+                    .h(px(NODE_BAR_H))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(7.0))
+                    .px(px(12.0))
+                    .rounded(px(t::RADIUS_MD))
+                    .bg(c::field())
+                    .border_1()
+                    .border_color(c::field_border())
+                    .hover(|s| s.bg(c::field_hover()))
+                    .text_size(px(t::TYPE_CONTROL))
+                    .text_color(if self.node_sort == NodeSort::Manual { c::muted() } else { c::text() })
+                    .cursor_pointer()
+                    .child(icon(IconName::ArrowUpDown, 14.0, c::ghost()))
+                    .child(self.node_sort.label())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sort_menu = !this.sort_menu;
+                        cx.notify();
+                    })),
+            )
+            .when(self.sort_menu, |d| {
+                d.child(div().absolute().top(px(NODE_BAR_H + 4.0)).right_0().w(px(crate::ui::DROPDOWN_COMPACT_W)).h(px(0.0)).child(crate::ui::dropdown_menu_compact(
+                    "node-sort-menu",
+                    NodeSort::ALL.iter().map(|s| crate::ui::MenuItem::new(s.label()).icon(s.icon())).collect(),
+                    NodeSort::ALL.iter().position(|s| *s == self.node_sort),
+                    crate::ui::MenuSide::Below,
+                    0.0,
+                    move |i, _, cx| s1.update(cx, |h, cx| h.set_node_sort(NodeSort::ALL[i], cx)),
+                    move |_, cx| {
+                        s2.update(cx, |h, cx| {
+                            h.sort_menu = false;
+                            cx.notify();
+                        })
+                    },
+                )))
+            });
         let top = div()
             .flex()
             .flex_row()
@@ -200,6 +276,7 @@ impl Home {
             .pt(px(16.0))
             .pb(px(10.0))
             .children(search)
+            .child(sort_btn)
             .child(add);
 
         // 面包屑
@@ -281,7 +358,7 @@ impl Home {
             first = false;
         }
 
-        let nodes: Vec<&Node> = self
+        let mut nodes: Vec<&Node> = self
             .groups
             .iter()
             .enumerate()
@@ -289,6 +366,12 @@ impl Home {
             .flat_map(|(_, g)| g.nodes.iter())
             .filter(|n| query.is_empty() || n.name.to_lowercase().contains(&query) || n.user_host.to_lowercase().contains(&query))
             .collect();
+        // 稳定排序:相同的保持默认顺序;没连过的(0)排最后
+        match self.node_sort {
+            NodeSort::Manual => {}
+            NodeSort::Added => nodes.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.0.cmp(&a.id.0))),
+            NodeSort::Connected => nodes.sort_by(|a, b| b.last_connected.cmp(&a.last_connected)),
+        }
         if nodes.is_empty() {
             if self.all_nodes().next().is_none() {
                 list = list.child(empty_state(IconName::Server, "还没有节点", "点右上角「新建节点」添加第一台服务器"));
@@ -858,3 +941,56 @@ impl Home {
     }
 }
 
+
+/// 节点页的排序方式。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum NodeSort {
+    /// 默认顺序:分组内按添加顺序、手动移动后的位置
+    #[default]
+    Manual,
+    /// 最近添加的在前
+    Added,
+    /// 最近连接的在前,没连过的排最后
+    Connected,
+}
+
+impl NodeSort {
+    pub(crate) const ALL: [NodeSort; 3] = [NodeSort::Manual, NodeSort::Added, NodeSort::Connected];
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            NodeSort::Manual => "默认顺序",
+            NodeSort::Added => "最近添加",
+            NodeSort::Connected => "最近连接",
+        }
+    }
+    pub(crate) fn icon(self) -> IconName {
+        match self {
+            NodeSort::Manual => IconName::ListOrdered,
+            NodeSort::Added => IconName::CalendarPlus,
+            NodeSort::Connected => IconName::Clock,
+        }
+    }
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            NodeSort::Manual => "manual",
+            NodeSort::Added => "added",
+            NodeSort::Connected => "connected",
+        }
+    }
+    pub(crate) fn from_key(k: &str) -> Self {
+        Self::ALL.into_iter().find(|s| s.key() == k).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::NodeSort;
+
+    #[test]
+    fn sort_key_round_trips_and_unknown_falls_back() {
+        for s in NodeSort::ALL {
+            assert_eq!(NodeSort::from_key(s.key()), s);
+        }
+        assert_eq!(NodeSort::from_key("???"), NodeSort::Manual);
+    }
+}

@@ -218,7 +218,7 @@ impl Home {
                 let (user, host, port) = split_user_host(&n.user_host);
                 json!({
                     "id": n.id.0, "name": n.name, "host": host, "user": user, "port": port,
-                    "group_id": g.id, "group": g.name, "tags": n.tags, "os": n.os.key(), "connected": self.node_connected(n.id),
+                    "group_id": g.id, "group": g.name, "created_at": n.created_at, "last_connected_at": n.last_connected, "tags": n.tags, "os": n.os.key(), "connected": self.node_connected(n.id),
                 })
             }
             _ => Value::Null,
@@ -297,12 +297,12 @@ impl Home {
         }
     }
 
-    /// 每 400ms 看一次各标签是不是在忙,变了才重绘(后台标签的输出不会触发 `Home` 重绘)。
+    /// 每 150ms 看一次各标签是不是在忙,变了才重绘(后台标签的输出不会触发 `Home` 重绘)。
     pub(crate) fn start_activity_watch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
             let mut last: Vec<u64> = vec![];
             loop {
-                cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
                 let ok = this.update_in(cx, |this, _, cx| {
                     let now: Vec<u64> = this.workspace.tabs.iter().filter(|t| t.busy()).map(|t| t.id).collect();
                     if now != last {

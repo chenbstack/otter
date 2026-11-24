@@ -30,19 +30,57 @@ pub struct TermSession {
     pub activity: Arc<Activity>,
 }
 
-/// 终端输出的活跃度:一阵持续的输出(≥ `BUSY_BYTES`)才算「正在执行」,
-/// 敲键盘时的回显只有几个字节,不会触发。`sleep 100` 这类没有输出的命令检测不到。
+/// 终端的「正在执行」状态,标签栏据此转圈。
+/// - 用户(或 agent)按下回车提交命令 → 立刻开始;**起步转得快、之后逐渐放慢**(`lap_phase`),
+///   所以 `ls` 这种瞬间结束的命令一眨眼转完一圈,长任务则是从容的慢速;
+/// - 忙的期间每来一块输出就顺延 `BUSY_GAP_MS`,输出停了才结束;
+/// - 至少转满第一圈(快速的那一圈),再短的命令也看得见;
+/// - 没提交过命令但冒出一阵持续输出(累计 ≥ `BUSY_BYTES`,如后台任务、`tail -f`)也算。
+///
+/// 敲键盘的回显只有几个字节,且不在忙的时候不会触发。没有输出的长命令(`sleep 100`)
+/// 只会转一圈就停,检测不到它还在跑。
 #[derive(Default)]
 pub struct Activity {
+    run_until_ms: std::sync::atomic::AtomicU64,
+    busy_since_ms: std::sync::atomic::AtomicU64,
     last_ms: std::sync::atomic::AtomicU64,
     burst_start_ms: std::sync::atomic::AtomicU64,
     burst_bytes: std::sync::atomic::AtomicU64,
+    /// 提交命令后的一小段时间里,第一块输出(哪怕很少)就算命令开始出结果,重新开始忙;用掉一次就清零
+    armed_until_ms: std::sync::atomic::AtomicU64,
 }
 
-/// 输出停多久就算这一阵结束
-pub const BUSY_GAP_MS: u64 = 1200;
-/// 一阵输出累计多少字节才算在执行
+/// 提交命令后多久内,够大的一块输出可以重新触发忙碌(应对先静默一阵才出结果、或输出稀疏的命令);每次触发都续期
+pub const ARM_MS: u64 = 10_000;
+/// 重新触发要求的最小输出块:敲键盘的回显只有 1~3 字节,命令输出一般更大
+pub const REARM_MIN_BYTES: usize = 16;
+
+/// 忙的期间输出停多久就算结束
+pub const BUSY_GAP_MS: u64 = 600;
+/// 判断「一阵持续输出」时,两块输出间隔超过它就重新计字节
+const BURST_GAP_MS: u64 = 1200;
+/// 没提交命令时,一阵输出累计多少字节才算在执行
 pub const BUSY_BYTES: u64 = 512;
+
+// 转速(圈/秒):起步 `V_FAST`,按时间常数 `TAU` 指数衰减到 `V_SLOW`
+const V_SLOW: f64 = 1.0 / 1.8;
+const V_FAST: f64 = 2.2;
+const TAU: f64 = 0.55;
+
+/// 开始后 `secs` 秒时转过的圈数(速度从快到慢的积分)。
+pub fn lap_phase(secs: f64) -> f64 {
+    V_SLOW * secs + (V_FAST - V_SLOW) * TAU * (1.0 - (-secs / TAU).exp())
+}
+
+/// 转到 `phase` 圈需要的秒数(`lap_phase` 的反函数,二分求解)。
+fn lap_time(phase: f64) -> f64 {
+    let (mut lo, mut hi) = (0.0, phase / V_SLOW + 1.0);
+    for _ in 0..40 {
+        let mid = (lo + hi) / 2.0;
+        if lap_phase(mid) < phase { lo = mid } else { hi = mid }
+    }
+    hi
+}
 
 fn now_ms() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -53,20 +91,60 @@ impl Activity {
     pub fn note(&self, n: usize) {
         self.note_at(now_ms(), n);
     }
+    /// 写进终端的字节:含回车就算提交了一条命令
+    pub fn on_input(&self, bytes: &[u8]) {
+        if bytes.iter().any(|b| *b == b'\r' || *b == b'\n') {
+            let now = now_ms();
+            self.start_at(now);
+            self.armed_until_ms.store(now + ARM_MS, Ordering::Relaxed);
+        }
+    }
     pub fn busy(&self) -> bool {
         self.busy_at(now_ms())
     }
+    /// 本次忙碌已经持续了多久(毫秒);不忙时为 `None`。动画用它保证每次都从头转起。
+    pub fn elapsed_ms(&self) -> Option<u64> {
+        let now = now_ms();
+        self.busy_at(now).then(|| now.saturating_sub(self.busy_since_ms.load(Ordering::Relaxed)))
+    }
+    /// 忙到什么时候:最后一块输出之后再等 `BUSY_GAP_MS`,但至少转满第一圈(快速的那一圈)
+    fn end_ms(&self) -> u64 {
+        let since = self.busy_since_ms.load(Ordering::Relaxed);
+        let until = self.run_until_ms.load(Ordering::Relaxed);
+        until.max(since + (lap_time(1.0) * 1000.0).ceil() as u64)
+    }
+    fn busy_at(&self, now: u64) -> bool {
+        now < self.end_ms()
+    }
+    /// 开始忙:已经在忙就不动(不重新起转);否则重新计时
+    fn start_at(&self, now: u64) {
+        if !self.busy_at(now) {
+            self.busy_since_ms.store(now, Ordering::Relaxed);
+            self.run_until_ms.store(now, Ordering::Relaxed);
+        }
+    }
+    fn extend_at(&self, now: u64) {
+        self.run_until_ms.fetch_max(now + BUSY_GAP_MS, Ordering::Relaxed);
+    }
     fn note_at(&self, now: u64, n: usize) {
         let last = self.last_ms.load(Ordering::Relaxed);
-        if now.saturating_sub(last) > BUSY_GAP_MS {
+        if now.saturating_sub(last) > BURST_GAP_MS {
             self.burst_start_ms.store(now, Ordering::Relaxed);
             self.burst_bytes.store(0, Ordering::Relaxed);
         }
-        self.burst_bytes.fetch_add(n as u64, Ordering::Relaxed);
+        let bytes = self.burst_bytes.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
         self.last_ms.store(now, Ordering::Relaxed);
-    }
-    fn busy_at(&self, now: u64) -> bool {
-        now.saturating_sub(self.last_ms.load(Ordering::Relaxed)) <= BUSY_GAP_MS && self.burst_bytes.load(Ordering::Relaxed) >= BUSY_BYTES
+        let armed = self.armed_until_ms.load(Ordering::Relaxed) > now;
+        if self.busy_at(now) {
+            self.extend_at(now);
+            if armed {
+                self.armed_until_ms.store(now + ARM_MS, Ordering::Relaxed);
+            }
+        } else if (armed && n >= REARM_MIN_BYTES) || bytes >= BUSY_BYTES {
+            self.start_at(now);
+            self.extend_at(now);
+            self.armed_until_ms.store(now + ARM_MS, Ordering::Relaxed);
+        }
     }
 }
 
@@ -226,9 +304,9 @@ impl Home {
     }
 
     pub(crate) fn start_session(&mut self, conn: Conn, window: &mut Window, cx: &mut Context<Self>) -> TermSession {
-        let (inp, out, handle) = ssh::connect(conn.clone(), 80, 24);
-        let bracketed_paste = Arc::new(AtomicBool::new(false));
         let activity = Arc::new(Activity::default());
+        let (inp, out, handle) = ssh::connect(conn.clone(), 80, 24, activity.clone());
+        let bracketed_paste = Arc::new(AtomicBool::new(false));
         let out = PasteModeScan { inner: out, flag: bracketed_paste.clone(), activity: activity.clone(), tail: Vec::new() };
         let resizer = handle.resizer();
         let inputter = handle.inputter();
@@ -443,22 +521,87 @@ mod paste_tests {
 
 #[cfg(test)]
 mod activity_tests {
-    use super::{Activity, BUSY_GAP_MS};
+    use super::{Activity, lap_phase, lap_time};
+    use std::sync::atomic::Ordering;
+
+    /// 第一圈转完的时刻(毫秒)
+    fn first_lap_ms() -> u64 {
+        (lap_time(1.0) * 1000.0) as u64
+    }
 
     #[test]
-    fn typing_echo_is_not_busy_but_a_burst_is() {
+    fn speed_starts_fast_and_settles() {
+        assert!(lap_time(1.0) < 0.9, "第一圈很快: {}", lap_time(1.0));
+        let late = lap_time(11.0) - lap_time(10.0);
+        assert!((late - 1.8).abs() < 0.05, "稳态一圈约 1.8 秒: {late}");
+        assert!((lap_phase(lap_time(3.0)) - 3.0).abs() < 1e-6, "反函数");
+    }
+
+    #[test]
+    fn typing_echo_alone_is_not_busy() {
         let a = Activity::default();
-        let t0 = 10_000;
         for i in 0..20 {
-            a.note_at(t0 + i * 100, 3); // 敲键盘的回显
+            a.note_at(10_000 + i * 100, 3);
         }
-        assert!(!a.busy_at(t0 + 2000));
+        assert!(!a.busy_at(12_000));
+    }
+
+    #[test]
+    fn a_silent_command_spins_exactly_one_fast_lap() {
+        let a = Activity::default();
+        a.start_at(10_000);
+        assert!(a.busy_at(10_000 + first_lap_ms() - 30));
+        assert!(!a.busy_at(10_000 + first_lap_ms() + 30));
+    }
+
+    #[test]
+    fn a_short_command_with_output_stops_soon_after_its_output() {
+        let a = Activity::default();
+        a.start_at(10_000); // ls
+        a.armed_until_ms.store(10_000 + super::ARM_MS, Ordering::Relaxed);
+        a.note_at(10_030, 40);
+        assert!(a.busy_at(10_000 + first_lap_ms() - 30), "至少转满第一圈");
+        assert!(!a.busy_at(10_000 + first_lap_ms() + 30), "ls 这种瞬间出完结果的命令,恰好转一圈就停");
+    }
+
+    #[test]
+    fn sparse_output_pulses_once_per_chunk_and_fast_output_stays_on() {
+        let a = Activity::default();
+        a.start_at(10_000); // ping,每秒一行
+        a.armed_until_ms.store(10_000 + super::ARM_MS, Ordering::Relaxed);
+        for i in 1..=10 {
+            a.note_at(10_000 + i * 1000, 64);
+        }
+        assert!(a.busy_at(20_000 + 300), "每来一行就转一圈");
+        assert!(!a.busy_at(20_000 + 1000 + first_lap_ms()), "输出停了就结束");
         let b = Activity::default();
-        b.note_at(t0, 400);
-        b.note_at(t0 + 300, 400); // 命令输出
-        assert!(b.busy_at(t0 + 600));
-        assert!(!b.busy_at(t0 + 300 + BUSY_GAP_MS + 1), "停了就不忙");
-        b.note_at(t0 + 5000, 10); // 隔了很久的零星输出重新计数
-        assert!(!b.busy_at(t0 + 5100));
+        b.start_at(10_000);
+        b.armed_until_ms.store(10_000 + super::ARM_MS, Ordering::Relaxed);
+        for i in 0..30 {
+            b.note_at(10_000 + i * 300, 64); // 输出密集:一直在忙
+        }
+        assert!(b.busy_at(10_000 + 29 * 300 + 500));
+    }
+
+    #[test]
+    fn typing_echo_after_a_command_does_not_retrigger() {
+        let a = Activity::default();
+        a.start_at(10_000);
+        a.armed_until_ms.store(10_000 + super::ARM_MS, Ordering::Relaxed);
+        a.note_at(10_030, 40); // 命令输出
+        for i in 0..10 {
+            a.note_at(13_000 + i * 120, 2); // 下一条命令的键入回显
+        }
+        assert!(!a.busy_at(14_500));
+    }
+
+    #[test]
+    fn a_big_burst_without_enter_counts_and_restarts_the_lap() {
+        let a = Activity::default();
+        a.note_at(10_000, 400);
+        assert!(!a.busy_at(10_100));
+        a.note_at(10_300, 400);
+        assert!(a.busy_at(10_400));
+        assert_eq!(a.busy_since_ms.load(Ordering::Relaxed), 10_300);
     }
 }

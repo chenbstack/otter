@@ -400,7 +400,7 @@ impl Home {
                 crate::logs::push(crate::logs::Level::Error, "本地库", &format!("保存认证信息失败: {e}"));
                 // 新增时节点已经写进库了:先放进列表,避免重试产生重复
                 if editing.is_none() {
-                    self.groups[g].nodes.push(Node { id, name: name.clone(), user_host: user_host.clone(), note: note.clone(), tags: tags.clone(), stacks: vec![], os: crate::osinfo::OsKind::Unknown });
+                    self.groups[g].nodes.push(Node { id, name: name.clone(), user_host: user_host.clone(), note: note.clone(), tags: tags.clone(), stacks: vec![], os: crate::osinfo::OsKind::Unknown, created_at: crate::store::now_secs(), last_connected: 0 });
                     self.form.as_mut().map(|f| f.editing = Some(id));
                 }
                 self.form_error(format!("节点已保存,但认证信息没存上:{e}"), cx);
@@ -423,7 +423,7 @@ impl Home {
                 }
             }
         } else {
-            self.groups[g].nodes.push(Node { id, name, user_host, note, tags, stacks: vec![], os: crate::osinfo::OsKind::Unknown });
+            self.groups[g].nodes.push(Node { id, name, user_host, note, tags, stacks: vec![], os: crate::osinfo::OsKind::Unknown, created_at: crate::store::now_secs(), last_connected: 0 });
             self.sel = id;
             self.scroll = gpui_kit::component::VirtualListScrollHandle::new();
         }

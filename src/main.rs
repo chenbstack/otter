@@ -141,6 +141,12 @@ struct Home {
     takeover_revoked: std::collections::HashMap<(u64, u64), &'static str>,
     /// 接管遮罩的焦点句柄:接管期间焦点放在它上面,键盘到不了终端
     takeover_focus: Option<FocusHandle>,
+    /// 节点页的排序方式(存在设置里,重启后保留)
+    node_sort: nodes::NodeSort,
+    /// 排序下拉菜单是否展开
+    sort_menu: bool,
+    /// 已经记过「最近连接」的 (标签 id, 连接代数),避免每帧写库
+    connect_noted: std::collections::HashSet<(u64, u32)>,
 }
 
 impl Home {
@@ -172,6 +178,7 @@ impl Home {
             None if demo => mock::keys(),
             None => vec![],
         };
+        let node_sort = store.as_ref().and_then(|s| s.get_setting("node_sort")).map_or(nodes::NodeSort::Manual, |v| nodes::NodeSort::from_key(&v));
         Self {
             store,
             vault: None,
@@ -208,6 +215,9 @@ impl Home {
             takeover_prompts: Default::default(),
             takeover_revoked: Default::default(),
             takeover_focus: None,
+            node_sort,
+            sort_menu: false,
+            connect_noted: Default::default(),
         }
     }
 
@@ -266,6 +276,7 @@ impl Render for Home {
         }
         self.sync_docker(window, cx);
         self.sync_os(cx);
+        self.sync_last_connected();
         let titlebar = self.titlebar(cx);
         let active_kind = self.workspace.active.map(|a| &self.workspace.tabs[a].kind);
         let mode = self.workspace.active.map(|a| self.workspace.tabs[a].mode);
@@ -443,6 +454,7 @@ fn main() {
                     }
                 }
                 h.add_menu = std::env::var("OTTER_ADD_MENU").is_ok();
+                h.sort_menu = std::env::var("OTTER_SORT_MENU").is_ok();
                 // 调试:OTTER_GROUP_FORM=1 截图时直接打开新建分组弹窗
                 if std::env::var("OTTER_GROUP_FORM").is_ok() {
                     h.open_add_group(window, cx);

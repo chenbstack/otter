@@ -47,7 +47,7 @@ impl Home {
                 None => if on { c::accent() } else { c::ghost() },
             };
             let taken = tab.takeover.is_some();
-            let busy = tab.busy();
+            let busy = tab.busy_elapsed_ms();
             let group: SharedString = format!("tab-{ix}").into();
             div()
                 .id(("tab", ix))
@@ -76,27 +76,8 @@ impl Home {
                 .when(taken, |d| d.border_color(c::accent().opacity(0.55)).bg(c::accent().opacity(0.08)))
                 .child(icon(kind_icon, 14.0, icon_color))
                 .child(div().flex_1().min_w_0().truncate().child(title))
-                // 正在执行任务:标签底边一道轻微的流光来回扫过,后台标签也看得见
-                .when(busy, |d| {
-                    d.child(
-                        div().absolute().left(px(10.0)).right(px(10.0)).bottom(px(1.0)).h(px(2.0)).overflow_hidden().rounded(px(1.0)).child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .h_full()
-                                .w(relative(0.4))
-                                .flex()
-                                .flex_row()
-                                .child(div().flex_1().h_full().bg(gpui::linear_gradient(90.0, gpui::linear_color_stop(c::accent().opacity(0.0), 0.0), gpui::linear_color_stop(c::accent().opacity(0.85), 1.0))))
-                                .child(div().flex_1().h_full().bg(gpui::linear_gradient(90.0, gpui::linear_color_stop(c::accent().opacity(0.85), 0.0), gpui::linear_color_stop(c::accent().opacity(0.0), 1.0))))
-                                .with_animation(
-                                    ("tab-busy", ix),
-                                    Animation::new(Duration::from_millis(1400)).repeat().with_easing(ease_in_out),
-                                    |d, t| d.left(relative(-0.4 + 1.4 * t)),
-                                ),
-                        ),
-                    )
-                })
+                // 正在执行任务:一小段亮光沿标签边框绕圈,带渐隐的尾巴;后台标签也看得见
+                .when_some(busy, |d, ms| d.child(busy_border(t::RADIUS_MD, c::accent(), ms)))
                 .when(taken, |d| {
                     d.child(
                         div()
@@ -279,4 +260,69 @@ impl Home {
                 .into_any_element(),
         )
     }
+}
+
+/// 沿圆角矩形周长走 `d` 像素后的位置(从上边左端起,顺时针)。
+fn rrect_point(b: Bounds<Pixels>, r: f32, d: f32) -> Point<Pixels> {
+    let (x, y, w, h) = (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
+    let r = r.min(w / 2.0).min(h / 2.0);
+    let (sw, sh, arc) = (w - 2.0 * r, h - 2.0 * r, std::f32::consts::FRAC_PI_2 * r);
+    let total = 2.0 * (sw + sh) + 4.0 * arc;
+    let mut d = d.rem_euclid(total);
+    // 每段:长度 + 起点到点的映射
+    let pt = |px_: f32, py_: f32| point(px(px_), px(py_));
+    for (len, f) in [
+        (sw, 0u8), (arc, 1), (sh, 2), (arc, 3), (sw, 4), (arc, 5), (sh, 6), (arc, 7),
+    ] {
+        if d <= len {
+            let u = if len > 0.0 { d / len } else { 0.0 };
+            let ang = std::f32::consts::FRAC_PI_2 * u;
+            return match f {
+                0 => pt(x + r + sw * u, y),
+                1 => pt(x + w - r + r * ang.sin(), y + r - r * ang.cos()),
+                2 => pt(x + w, y + r + sh * u),
+                3 => pt(x + w - r + r * ang.cos(), y + h - r + r * ang.sin()),
+                4 => pt(x + w - r - sw * u, y + h),
+                5 => pt(x + r - r * ang.sin(), y + h - r + r * ang.cos()),
+                6 => pt(x, y + h - r - sh * u),
+                _ => pt(x + r - r * ang.cos(), y + r - r * ang.sin()),
+            };
+        }
+        d -= len;
+    }
+    pt(x + r, y)
+}
+
+/// 标签「正在执行」的边框跑马灯:一段亮光绕边框一圈,尾巴渐隐。
+fn busy_border(radius: f32, color: Rgba, elapsed_ms: u64) -> impl IntoElement {
+    // 相位随这一轮忙碌的开始计时,所以每次都从头转起;之后每帧按实际流逝时间推进
+    let began = std::time::Instant::now() - std::time::Duration::from_millis(elapsed_ms);
+    gpui::canvas(
+        |_, _, _| (),
+        move |b, _, window, _| {
+            const TAIL: usize = 14;
+            const SEG: f32 = 7.0;
+            let t = began.elapsed().as_secs_f32();
+            let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
+            let r = radius.min(w / 2.0).min(h / 2.0);
+            let total = 2.0 * (w - 2.0 * r + h - 2.0 * r) + 2.0 * std::f32::consts::PI * r;
+            let head = (crate::terminal::lap_phase(t as f64).fract() as f32) * total;
+            for k in 0..TAIL {
+                let (d1, d0) = (head - k as f32 * SEG, head - (k as f32 + 1.0) * SEG);
+                let mut pb = gpui::PathBuilder::stroke(px(1.6));
+                let steps = 3;
+                for i in 0..=steps {
+                    let p = rrect_point(b, r, d0 + (d1 - d0) * i as f32 / steps as f32);
+                    if i == 0 { pb.move_to(p) } else { pb.line_to(p) }
+                }
+                if let Ok(path) = pb.build() {
+                    let fade = 1.0 - k as f32 / TAIL as f32;
+                    window.paint_path(path, color.opacity(0.9 * fade * fade));
+                }
+            }
+            window.request_animation_frame();
+        },
+    )
+    .absolute()
+    .inset_0()
 }
