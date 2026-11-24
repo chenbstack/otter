@@ -72,6 +72,8 @@ pub struct Prompt {
 pub enum Decision {
     Deny,
     Once,
+    /// 24 小时内不再询问
+    Day,
     Always,
 }
 
@@ -367,15 +369,16 @@ impl Home {
                 let _ = p.reply.send(Err(RpcError::new("takeover_denied", "用户拒绝了接管")));
             }
             (_, Some(ix), Some(node)) if self.workspace.tabs[ix].takeover.is_none() => {
-                if d == Decision::Always {
-                    if let Some(Err(e)) = self.store.as_ref().map(|s| s.grant_add(&p.client.name, &p.client.parent_exe, node)) {
+                if d != Decision::Once {
+                    let (expires, what) = if d == Decision::Day { (crate::store::now_secs() + 24 * 3600, "24 小时内允许") } else { (0, "总是允许") };
+                    if let Some(Err(e)) = self.store.as_ref().map(|s| s.grant_add(&p.client.name, &p.client.parent_exe, node, expires)) {
                         logs::push(Level::Error, "本地库", format!("保存接管授权失败: {e}"));
                     } else {
-                        alog(format!("用户选择总是允许 {} 接管 {}", p.client.name, node_name));
+                        alog(format!("用户选择{what} {} 接管 {}", p.client.name, node_name));
                     }
                 }
                 let l = self.start_takeover(ix, &p.client, &p.reason, p.lease, window, cx);
-                let mut r = json!({ "session": p.tab_id, "granted": if d == Decision::Always { "always" } else { "once" } });
+                let mut r = json!({ "session": p.tab_id, "granted": match d { Decision::Always => "always", Decision::Day => "day", _ => "once" } });
                 if let Some(l) = l {
                     r["lease"] = json!(l);
                 }
@@ -784,10 +787,14 @@ impl Home {
                 .child(icon(ic, 14.0, color))
                 .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CONTROL)).text_color(c::secondary()).child(text))
         }));
-        // 三个按钮等宽;「允许一次」是默认项(主色,回车也触发),「总是允许」是更重的决定,不抢眼
+        // 两排:上面三个允许选项等宽(「允许一次」是默认项,主色,回车也触发;「24 小时」「总是允许」是更重的决定,不抢眼),下面整行宽的「拒绝」
         let btn_w = (crate::nodes::CONFIRM_W - 58.0 - 20.0) / 3.0;
-        let deny = crate::node_form::ctl_btn("tp-deny", None, "拒绝", 38.0).w(px(btn_w)).flex_none().justify_center().on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Deny, window, cx)));
-        let always = crate::node_form::ctl_btn("tp-always", None, "总是允许", 38.0).w(px(btn_w)).flex_none().justify_center().on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Always, window, cx)));
+        let choice = |id: &'static str, label: &'static str, d: Decision, cx: &mut Context<Self>| {
+            crate::node_form::ctl_btn(id, None, label, 38.0).w(px(btn_w)).flex_none().justify_center().on_click(cx.listener(move |this, _, window, cx| this.resolve_takeover_prompt(d, window, cx)))
+        };
+        let day = choice("tp-day", "24 小时", Decision::Day, cx);
+        let always = choice("tp-always", "总是允许", Decision::Always, cx);
+        let deny = crate::node_form::ctl_btn("tp-deny", None, "拒绝", 38.0).w_full().flex_none().justify_center().on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Deny, window, cx)));
         let once = div()
             .id("tp-once")
             .w(px(btn_w))
@@ -806,7 +813,15 @@ impl Home {
             .hover(|s| s.opacity(0.88))
             .child("允许一次")
             .on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Once, window, cx)));
-        let buttons = div().w_full().flex().flex_row().gap(px(10.0)).child(deny).child(once).child(always);
+        let hint = div().w_full().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).text_center().child(format!("「24 小时」「总是允许」只对 {} 生效,可在「信任」页撤销", node.name));
+        let buttons = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .child(div().w_full().flex().flex_row().gap(px(10.0)).child(always).child(day).child(once))
+            .child(deny)
+            .child(hint);
         let body = div().flex().flex_col().items_center().gap(px(18.0)).px(px(28.0)).pt(px(28.0)).pb(px(24.0)).child(hero).child(target).child(points).child(buttons);
         Some(crate::ui::modal_bg(
             "takeover-prompt",

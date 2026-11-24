@@ -138,6 +138,8 @@ const MIGRATIONS: &[&str] = &[
      );",
     // v7:节点最近一次连上的时间(Unix 秒,0 = 没连过),节点页按它排序
     "ALTER TABLE nodes ADD COLUMN last_connected_at INTEGER NOT NULL DEFAULT 0;",
+    // v8:接管授权可以有期限(Unix 秒,0 = 永久),「24 小时」授权到期后失效
+    "ALTER TABLE agent_grants ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// 当前 Unix 时间(秒)
@@ -153,6 +155,8 @@ pub struct AgentGrant {
     pub node_id: NodeId,
     /// 授权时间(Unix 秒)
     pub created_at: i64,
+    /// 到期时间(Unix 秒),0 = 永久
+    pub expires_at: i64,
 }
 
 /// 秘密槽位
@@ -443,17 +447,26 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// 「总是允许」:记下这个客户端可以接管这个节点(已有则忽略)。
-    pub fn grant_add(&self, client: &str, parent_exe: &str, node: NodeId) -> Result<(), String> {
+    /// 记下这个客户端可以接管这个节点;`expires_at` 为到期时间(Unix 秒),0 = 永久。已有则覆盖(重新授权会刷新期限)。
+    pub fn grant_add(&self, client: &str, parent_exe: &str, node: NodeId, expires_at: i64) -> Result<(), String> {
         self.conn
-            .execute("INSERT OR IGNORE INTO agent_grants (client_name, parent_exe, node_id) VALUES (?1, ?2, ?3)", params![client, parent_exe, node.0])
+            .execute(
+                "INSERT INTO agent_grants (client_name, parent_exe, node_id, expires_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(client_name, parent_exe, node_id) DO UPDATE SET expires_at=?4, created_at=strftime('%s','now')",
+                params![client, parent_exe, node.0, expires_at],
+            )
             .map_err(|e| e.to_string())?;
         Ok(())
     }
 
+    /// 有没有未过期的授权。
     pub fn grant_has(&self, client: &str, parent_exe: &str, node: NodeId) -> bool {
         self.conn
-            .query_row("SELECT 1 FROM agent_grants WHERE client_name=?1 AND parent_exe=?2 AND node_id=?3", params![client, parent_exe, node.0], |_| Ok(()))
+            .query_row(
+                "SELECT 1 FROM agent_grants WHERE client_name=?1 AND parent_exe=?2 AND node_id=?3 AND (expires_at=0 OR expires_at>?4)",
+                params![client, parent_exe, node.0, now_secs()],
+                |_| Ok(()),
+            )
             .is_ok()
     }
 
@@ -465,9 +478,11 @@ impl Store {
     }
 
     pub fn list_grants(&self) -> Result<Vec<AgentGrant>, String> {
-        let mut st = self.conn.prepare("SELECT client_name, parent_exe, node_id, created_at FROM agent_grants ORDER BY created_at, rowid").map_err(|e| e.to_string())?;
+        // 顺手清掉已过期的
+        self.conn.execute("DELETE FROM agent_grants WHERE expires_at>0 AND expires_at<=?1", params![now_secs()]).map_err(|e| e.to_string())?;
+        let mut st = self.conn.prepare("SELECT client_name, parent_exe, node_id, created_at, expires_at FROM agent_grants ORDER BY created_at, rowid").map_err(|e| e.to_string())?;
         let rows = st
-            .query_map([], |r| Ok(AgentGrant { client_name: r.get(0)?, parent_exe: r.get(1)?, node_id: NodeId(r.get::<_, u32>(2)?), created_at: r.get(3)? }))
+            .query_map([], |r| Ok(AgentGrant { client_name: r.get(0)?, parent_exe: r.get(1)?, node_id: NodeId(r.get::<_, u32>(2)?), created_at: r.get(3)?, expires_at: r.get(4)? }))
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
     }
@@ -661,14 +676,20 @@ mod tests {
         let gid = s.load_groups().unwrap()[0].id;
         let id = s.add_node(&NewNode { group_id: gid, name: "n", user: "u", host: "h", port: 22, note: "", tags: &[] }).unwrap();
         assert!(!s.grant_has("claude", "/bin/x", id));
-        s.grant_add("claude", "/bin/x", id).unwrap();
-        s.grant_add("claude", "/bin/x", id).unwrap();
+        s.grant_add("claude", "/bin/x", id, 0).unwrap();
+        s.grant_add("claude", "/bin/x", id, 0).unwrap();
         assert!(s.grant_has("claude", "/bin/x", id));
         assert!(!s.grant_has("claude", "/bin/y", id), "父进程路径不同要重新询问");
         assert_eq!(s.list_grants().unwrap().len(), 1);
         s.grant_remove("claude", "/bin/x", id).unwrap();
         assert!(!s.grant_has("claude", "/bin/x", id));
-        s.grant_add("claude", "/bin/x", id).unwrap();
+        // 有期限的授权:没到期有效,过期失效并被清掉
+        s.grant_add("claude", "/bin/x", id, now_secs() + 3600).unwrap();
+        assert!(s.grant_has("claude", "/bin/x", id));
+        s.grant_add("claude", "/bin/x", id, now_secs() - 1).unwrap();
+        assert!(!s.grant_has("claude", "/bin/x", id));
+        assert!(s.list_grants().unwrap().is_empty());
+        s.grant_add("claude", "/bin/x", id, 0).unwrap();
         s.delete_node(id).unwrap();
         assert!(s.list_grants().unwrap().is_empty(), "删节点要级联删授权");
     }

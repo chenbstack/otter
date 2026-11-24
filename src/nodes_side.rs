@@ -227,7 +227,12 @@ impl Home {
                             .child(div().truncate().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(self.node_name(Some(g.node_id)))),
                     )
                     .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(g.parent_exe.clone()))
-                    .child(div().flex_shrink_0().text_size(px(t::TYPE_MICRO)).text_color(c::muted()).child(when))
+                    .child(div().flex_shrink_0().text_size(px(t::TYPE_MICRO)).text_color(c::muted()).child(if g.expires_at > 0 {
+                        let left = (g.expires_at - crate::store::now_secs()).max(0);
+                        format!("剩余 {} 小时 {} 分", left / 3600, left % 3600 / 60)
+                    } else {
+                        when
+                    }))
                     .child(button("grant-revoke", IconName::Trash, "撤销").id(("grant-revoke", i)).on_click(cx.listener(move |this, _, window, cx| this.revoke_grant(i, window, cx)))),
             );
         }
@@ -241,7 +246,7 @@ impl Home {
             .gap(px(6.0))
             .pb(px(CONTENT_PAD))
             .child(Self::section_title("Agent 授权", self.grants.len()))
-            .child(if self.grants.is_empty() { Self::section_empty("没有「总是允许」的授权,Agent 每次接管都会先询问你").into_any_element() } else { grants.into_any_element() })
+            .child(if self.grants.is_empty() { Self::section_empty("没有长期授权,Agent 每次接管都会先询问你").into_any_element() } else { grants.into_any_element() })
             .child(Self::section_title("已知主机", self.known_hosts.len()))
             .child(if self.known_hosts.is_empty() { Self::section_empty("还没有已知主机,首次连接并确认指纹后会记录在这里").into_any_element() } else { hosts.into_any_element() });
         Self::side_view("信任", "已信任的服务器指纹,以及被你「总是允许」接管的 Agent。服务器重装后指纹会变,可删除旧记录再重新连接", None, body.into_any_element())
