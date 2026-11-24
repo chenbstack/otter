@@ -45,6 +45,7 @@ pub(crate) struct DockUi {
     pull_open: bool,
     pub conf: super::daemonpage::ConfUi,
     pub reg: super::registrypage::RegUi,
+    pub sys: super::syspages::SysUi,
     sort: (SortKey, bool),
     confirm: Option<DockAsk>,
     pub(super) notice: Option<(SharedString, Instant)>,
@@ -63,7 +64,7 @@ pub(crate) struct DockUi {
 
 impl DockUi {
     pub fn new() -> Self {
-        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, conf: Default::default(), reg: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
+        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
     }
 }
 
@@ -152,8 +153,8 @@ impl Home {
             self.dock.snap = Arc::new(docker::demo_snapshot(&self.node().stacks));
             self.dock.mon = Some(Arc::new(crate::monitor::demo_snapshot()));
             self.conf_sync(window, cx);
-        self.reg_sync(window, cx);
             self.reg_sync(window, cx);
+            self.sys_sync(window, cx);
             return;
         }
         // 这个标签的终端已连上就复用它的连接;没连上等它(连接页显示终端的进度);没有终端才自己连。
@@ -191,6 +192,8 @@ impl Home {
             self.dock.snap = s;
         }
         self.conf_sync(window, cx);
+        self.reg_sync(window, cx);
+        self.sys_sync(window, cx);
     }
 
     /// 定时器:后台有新数据、连接状态在变、提示过期时重绘
@@ -198,7 +201,7 @@ impl Home {
         if !self.dock_visible() {
             return;
         }
-        let mut redraw = false;
+        let mut redraw = self.sys_due();
         if let Some(a) = self.workspace.active {
             if let Some(d) = self.workspace.tabs[a].docker.as_ref() {
                 d.touch();
@@ -221,6 +224,7 @@ impl Home {
         if self.page == Page::Registry {
             self.reg_reload();
         }
+        self.sys_reset();
         if let Some(d) = self.workspace.active.and_then(|a| self.workspace.tabs.get(a)).and_then(|t| t.docker.as_ref()) {
             d.refresh();
         }
@@ -228,6 +232,9 @@ impl Home {
     }
 
     pub(crate) fn dock_act(&mut self, a: Action, cx: &mut Context<Self>) {
+        if let Action::Sys(j) = &a {
+            self.sys_note(j);
+        }
         if self.demo {
             self.dock.notice = Some(("演示数据,不会真的执行".into(), Instant::now()));
         } else if let Some(d) = self.workspace.active.and_then(|i| self.workspace.tabs.get(i)).and_then(|t| t.docker.as_ref()) {
@@ -253,6 +260,10 @@ impl Home {
             docker::Status::Connecting if d.epoch().is_none() => Some(self.connecting_page(ConnTarget::Docker, d.steps(), None, DOCKER_STEP_LABELS, cx).into_any_element()),
             docker::Status::Connecting => Some(loading("正在检测 Docker…").into_any_element()),
             docker::Status::Ready => {
+                // 运维页读的是 SSH 命令的输出,Docker 有没有装都能用
+                if self.page.is_sys() {
+                    return None;
+                }
                 // 概览页是整机监控,不依赖 Docker:读到系统数据(或确定读不了)就能显示
                 if self.page == Page::Overview {
                     return (d.monitor().is_none() && d.monitor_error().is_none()).then(|| loading("正在读取系统信息…").into_any_element());
@@ -296,7 +307,7 @@ impl Home {
 
     /// 页头右侧的按钮(各页不同)
     pub(crate) fn dock_header_actions(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut v: Vec<AnyElement> = Vec::new();
+        let mut v: Vec<AnyElement> = self.sys_header_actions(cx);
         if self.page == Page::Containers {
             if let Some(s) = self.dock.search.clone() {
                 v.push(
@@ -386,6 +397,7 @@ impl Home {
             Page::Volumes => format!("{n} 上的存储卷"),
             Page::Registry => format!("{n} 上登录的镜像仓库"),
             Page::Config => format!("{n} 上的 Docker 守护进程配置"),
+            Page::Processes | Page::Services | Page::Storage | Page::Cron => self.sys_subtitle().unwrap_or_default(),
         }
     }
 
@@ -398,12 +410,16 @@ impl Home {
             Page::Registry => self.registry_page(cx),
             Page::Config => self.config_page(cx),
             Page::Stacks => div().into_any_element(),
+            Page::Processes | Page::Services | Page::Storage | Page::Cron => self.sys_page(cx),
         }
     }
 
     /// 页面最上层的覆盖物:确认框、操作结果提示
     pub(crate) fn dock_overlays(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut v: Vec<AnyElement> = Vec::new();
+        if let Some(m) = self.cron_dialog(cx) {
+            v.push(m.into_any_element());
+        }
         if let Some(cf) = &self.dock.confirm {
             let action = cf.action.clone();
             let spec = crate::confirm::Confirm {

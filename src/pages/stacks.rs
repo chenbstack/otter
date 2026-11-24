@@ -4,7 +4,7 @@ use super::super::*;
 
 pub(crate) fn menu_count(node: &Node, snap: &crate::docker::Snapshot, page: Page) -> Option<usize> {
     match page {
-        Page::Overview | Page::Registry | Page::Config => None,
+        Page::Overview | Page::Registry | Page::Config | Page::Processes | Page::Services | Page::Storage | Page::Cron => None,
         Page::Containers => Some(snap.containers.len()),
         Page::Stacks => Some(node.stacks.len()),
         Page::Images => Some(snap.images.len()),
@@ -91,9 +91,9 @@ impl Home {
                     .text_color(c::ghost())
                     .child("节点详情"),
             );
-        // 侧边栏只有两项:概览,和把容器/堆栈/镜像/存储卷合在一起的「容器」(里面用页签切换)
-        for (i, p) in [Page::Overview, Page::Containers].into_iter().enumerate() {
-            let active = if p == Page::Overview { self.page == p } else { self.page != Page::Overview };
+        // 侧边栏:概览,把容器/堆栈/镜像/存储卷合在一起的「容器」(里面用页签切换),以及服务器的运维页
+        for (i, p) in [Page::Overview, Page::Containers, Page::Processes, Page::Services, Page::Storage, Page::Cron].into_iter().enumerate() {
+            let active = if p == Page::Containers { self.page.is_docker() } else { self.page == p };
             let count = menu_count(node, &self.dock.snap, p);
             col = col.child(
                 div()
@@ -229,7 +229,7 @@ impl Home {
 
         let scroll_header = self.page == Page::Overview && !gated;
 
-        let tabs = (self.page != Page::Overview && !gated).then(|| self.docker_tabs(cx).into_any_element());
+        let tabs = (self.page.is_docker() && !gated).then(|| self.docker_tabs(cx).into_any_element());
         let inner: Vec<AnyElement> = if scroll_header {
             vec![div().id("overview-scroll").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().child(header).child(body).into_any_element()]
         } else {

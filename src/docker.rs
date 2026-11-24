@@ -446,6 +446,8 @@ pub enum Action {
     Logout(String),
     /// 确认把 HTTP 仓库加进 insecure-registries、重启 Docker,然后用暂存的凭据登录
     ConfirmInsecure(String),
+    /// 运维页的操作(结束进程、重启服务、保存 crontab……),在服务器上执行一段脚本
+    Sys(crate::sysops::Job),
 }
 
 impl Action {
@@ -464,12 +466,13 @@ impl Action {
             // 走 `run_daemon`,不经过 docker 命令
             Action::SaveDaemon(_) | Action::SaveRestartDaemon(_) => Vec::new(),
             Action::Logout(h) => v(&["logout"], h),
-            Action::ConfirmInsecure(_) => Vec::new(),
+            Action::ConfirmInsecure(_) | Action::Sys(_) => Vec::new(),
         }
     }
     pub fn target(&self) -> &str {
         match self {
             Action::Start(n) | Action::Stop(n) | Action::Restart(n) | Action::Remove(n) | Action::Pull(n) | Action::RemoveImage(n) | Action::RemoveVolume(n) | Action::Logout(n) | Action::ConfirmInsecure(n) => n,
+            Action::Sys(j) => &j.target,
             Action::PruneImages => "未使用的镜像",
             Action::PruneVolumes => "未使用的存储卷",
             Action::SaveDaemon(_) | Action::SaveRestartDaemon(_) => "daemon.json",
@@ -490,6 +493,7 @@ impl Action {
             Action::SaveRestartDaemon(_) => "保存并重启 Docker",
             Action::Logout(_) => "退出登录",
             Action::ConfirmInsecure(_) => "启用 HTTP 仓库",
+            Action::Sys(_) => "执行",
         }
     }
 }
@@ -514,6 +518,8 @@ enum Cmd {
     Login { registry: String, user: String, pass: zeroize::Zeroizing<String> },
     /// 登录 HTTP 仓库:daemon.json 里没有它时先向用户确认
     LoginHttp { registry: String, user: String, pass: zeroize::Zeroizing<String> },
+    /// 运维页读一份数据(进程、服务……),结果用 `sys_take` 取
+    Sys { kind: crate::sysops::Kind, script: String, root: bool },
 }
 
 struct Shared {
@@ -532,6 +538,8 @@ struct Shared {
     daemon: Mutex<Option<Result<(bool, String), String>>>,
     /// 读到的已登录仓库;界面取走后清空
     registries: Mutex<Option<Result<Vec<RegAuth>, String>>>,
+    /// 运维页读到的原始输出,按种类存放;界面取走后清空
+    sys: Mutex<HashMap<crate::sysops::Kind, Result<String, String>>>,
     /// 等用户确认的 HTTP 仓库登录:(仓库, 用户名, 密码),确认或取消后清掉
     pending_login: Mutex<Option<(String, String, zeroize::Zeroizing<String>)>>,
     /// 需要向用户确认的 HTTP 仓库地址;界面取走后清空
@@ -592,6 +600,7 @@ impl Docker {
             notice: Mutex::new(None),
             daemon: Mutex::new(None),
             registries: Mutex::new(None),
+            sys: Mutex::new(HashMap::new()),
             pending_login: Mutex::new(None),
             insecure_ask: Mutex::new(None),
             version: AtomicU64::new(1),
@@ -684,6 +693,15 @@ impl Docker {
 
     pub fn take_daemon(&self) -> Option<Result<(bool, String), String>> {
         self.sh.daemon.lock().ok().and_then(|mut d| d.take())
+    }
+
+    /// 请求读一份运维数据;结果用 `sys_take` 取
+    pub fn sys_load(&self, kind: crate::sysops::Kind, script: &str, root: bool) {
+        let _ = self.cmd.send(Cmd::Sys { kind, script: script.to_string(), root });
+    }
+
+    pub fn sys_take(&self, kind: crate::sysops::Kind) -> Option<Result<String, String>> {
+        self.sh.sys.lock().ok().and_then(|mut m| m.remove(&kind))
     }
 
     /// 请求读取已登录的仓库;结果用 `take_registries` 取
@@ -858,6 +876,48 @@ pub fn parse_registries(text: &str) -> Result<Vec<RegAuth>, String> {
     }
     out.sort_by(|a, b| a.host.cmp(&b.host));
     Ok(out)
+}
+
+/// 跑一段 shell:`root` 时走 sudo,否则以登录用户的身份(包一层 `sh -c`,不依赖用户的登录 shell)
+async fn sys_exec(r: &Runner, script: &str, root: bool, input: Option<&str>, t: Duration) -> Result<Output, String> {
+    if root { r.root(script, input, t).await } else { exec(&r.session, &format!("sh -c {}", shell_quote(script)), input.map(str::as_bytes), t).await }
+}
+
+fn last_line(o: &Output) -> String {
+    let t = if o.stderr.trim().is_empty() { &o.stdout } else { &o.stderr };
+    t.trim().lines().last().unwrap_or("未知错误").trim().to_string()
+}
+
+/// 运维页读数据:输出原样存起来,解析在界面一侧
+async fn sys_load(r: &Runner, sh: &Shared, kind: crate::sysops::Kind, script: &str, root: bool) {
+    let res = match sys_exec(r, script, root, None, Duration::from_secs(30)).await {
+        Ok(o) if o.code == 0 || !o.stdout.trim().is_empty() => Ok(o.stdout),
+        Ok(o) => Err(last_line(&o)),
+        Err(e) => Err(e),
+    };
+    sh.sys.lock().unwrap().insert(kind, res);
+    sh.bump();
+}
+
+/// 运维页的操作;完成后提示结果,并重读相关数据
+async fn sys_job(r: &Runner, sh: &Shared, job: crate::sysops::Job) {
+    let key = format!("{}:{}", job.label, job.target);
+    sh.busy.lock().unwrap().insert(key.clone());
+    sh.bump();
+    let res = sys_exec(r, &job.script, job.root, job.input.as_deref(), Duration::from_secs(60)).await;
+    sh.busy.lock().unwrap().remove(&key);
+    let msg = match res {
+        Ok(o) if o.code == 0 => format!("已{}:{}", job.label, job.target),
+        Ok(o) => format!("{}失败:{}", job.label, last_line(&o)),
+        Err(e) => format!("{}失败:{e}", job.label),
+    };
+    logs::push(logs::Level::Info, "服务器", msg.clone());
+    *sh.notice.lock().unwrap() = Some(msg);
+    sh.bump();
+    if let Some((kind, script, root)) = job.reload {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        sys_load(r, sh, kind, &script, root).await;
+    }
 }
 
 /// 读已登录的仓库:和 docker 命令用同一个身份(走 sudo 时是 root 的配置)
@@ -1180,6 +1240,8 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
     };
     // 资源监控和 Docker 互不依赖:没装 Docker 的服务器也能看到 CPU、内存、磁盘
     tokio::spawn(monitor_task(session.clone(), sh.clone()));
+    // 运维页(进程、服务、存储、计划任务)和 Docker 也互不依赖;要 root 的操作走 sudo(免密,或用节点保存的密码)
+    let sys = Arc::new(Runner { session: session.clone(), sudo: if conn.auth.password.is_some() { Sudo::WithPassword } else { Sudo::Passwordless }, password: conn.auth.password.clone() });
     io.begin_step("检测 Docker");
     let runner = match probe(&session, conn).await {
         Ok(r) => r,
@@ -1191,8 +1253,17 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
             sh.bump();
             // 保持连接,等界面点「重试」
             while let Some(cmd) = rx.recv().await {
-                if matches!(cmd, Cmd::Refresh) {
-                    return Err("请重新进入页面重试".into());
+                match cmd {
+                    Cmd::Refresh => return Err("请重新进入页面重试".into()),
+                    Cmd::Sys { kind, script, root } => {
+                        let (r, sh2) = (sys.clone(), sh.clone());
+                        tokio::spawn(async move { sys_load(&r, &sh2, kind, &script, root).await });
+                    }
+                    Cmd::Act(Action::Sys(job)) => {
+                        let (r, sh2) = (sys.clone(), sh.clone());
+                        tokio::spawn(async move { sys_job(&r, &sh2, job).await });
+                    }
+                    _ => {}
                 }
             }
             return Ok(());
@@ -1233,6 +1304,16 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
                     Cmd::LoginHttp { registry, user, pass } => {
                         let (r, sh2) = (runner.clone(), sh.clone());
                         tokio::spawn(async move { run_login_http(&r, &sh2, &registry, &user, pass).await });
+                        continue;
+                    }
+                    Cmd::Sys { kind, script, root } => {
+                        let (r, sh2) = (sys.clone(), sh.clone());
+                        tokio::spawn(async move { sys_load(&r, &sh2, kind, &script, root).await });
+                        continue;
+                    }
+                    Cmd::Act(Action::Sys(job)) => {
+                        let (r, sh2) = (sys.clone(), sh.clone());
+                        tokio::spawn(async move { sys_job(&r, &sh2, job).await });
                         continue;
                     }
                     Cmd::Act(a) => {

@@ -7,3 +7,4 @@ pub mod terminal;
 pub mod monitorpage;
 pub mod daemonpage;
 pub mod registrypage;
+pub mod syspages;

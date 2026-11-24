@@ -12,6 +12,7 @@ mod ipc_server;
 mod platform;
 mod takeover;
 mod daemon_conf;
+mod sysops;
 mod docker;
 mod json_hl;
 mod group_form;
@@ -57,10 +58,14 @@ enum Page {
     Volumes,
     Registry,
     Config,
+    Processes,
+    Services,
+    Storage,
+    Cron,
 }
 
 impl Page {
-    const ALL: [Page; 7] = [
+    const ALL: [Page; 11] = [
         Page::Overview,
         Page::Containers,
         Page::Stacks,
@@ -68,7 +73,19 @@ impl Page {
         Page::Volumes,
         Page::Registry,
         Page::Config,
+        Page::Processes,
+        Page::Services,
+        Page::Storage,
+        Page::Cron,
     ];
+    /// 容器相关的页(侧栏的「容器」项下面用页签切换)
+    fn is_docker(self) -> bool {
+        matches!(self, Page::Containers | Page::Stacks | Page::Images | Page::Volumes | Page::Registry | Page::Config)
+    }
+    /// 服务器运维页:读 SSH 命令的输出,不依赖 Docker
+    fn is_sys(self) -> bool {
+        matches!(self, Page::Processes | Page::Services | Page::Storage | Page::Cron)
+    }
     fn label(self) -> &'static str {
         match self {
             Page::Overview => "概览",
@@ -78,6 +95,10 @@ impl Page {
             Page::Volumes => "存储卷",
             Page::Registry => "仓库",
             Page::Config => "配置",
+            Page::Processes => "进程",
+            Page::Services => "服务",
+            Page::Storage => "存储",
+            Page::Cron => "计划任务",
         }
     }
     fn icon(self) -> IconName {
@@ -89,6 +110,10 @@ impl Page {
             Page::Volumes => IconName::HardDrive,
             Page::Registry => IconName::KeyRound,
             Page::Config => IconName::FileCog,
+            Page::Processes => IconName::Cpu,
+            Page::Services => IconName::Settings2,
+            Page::Storage => IconName::HardDrive,
+            Page::Cron => IconName::CalendarClock,
         }
     }
 }
@@ -358,7 +383,7 @@ impl Render for Home {
 
 fn main() {
     update::wait_for_old_process();
-    // 调试参数:--shot <png> --node <g>,<n> --tabs n:<节点名>(容器模式),t:<节点名>(终端模式),f:<节点名>[@堆栈/服务](SFTP 模式),... --active <k> --expand <k> --plain --page <0..6> --add(打开添加节点弹窗) --files <host|堆栈/服务> --fcd <目录> --fsel <名字>
+    // 调试参数:--shot <png> --node <g>,<n> --tabs n:<节点名>(容器模式),t:<节点名>(终端模式),f:<节点名>[@堆栈/服务](SFTP 模式),... --active <k> --expand <k> --plain --page <0..10> --add(打开添加节点弹窗) --files <host|堆栈/服务> --fcd <目录> --fsel <名字>
     let args: Vec<String> = std::env::args().collect();
     let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let shot = arg("--shot");
