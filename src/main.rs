@@ -1,9 +1,10 @@
 //! dockyard 首页外观原型(mock 数据)。
 //!
 //! 标题栏(含标签)+ 内容区:节点页 / 节点标签(二级导航 + 页面)等。只为看外观和交互手感,没有任何真实连接。
-//! 色板沿用旧版 DeskPanel 的 theme.ts。
+#![recursion_limit = "512"]
 
 mod docker;
+mod import;
 mod files;
 mod keychain;
 mod known_hosts;
@@ -80,6 +81,10 @@ struct Home {
     node_search: Option<Entity<gpui_kit::component::input::InputState>>,
     /// 节点页当前进入的分组(None = 全部节点)
     node_group: Option<usize>,
+    /// 节点页卡片右键菜单:(目标, 鼠标位置)
+    node_menu: Option<(nodes::NodeMenuTarget, Point<Pixels>)>,
+    /// 待确认删除的分组 id(非空分组)
+    group_delete: Option<i64>,
     /// 标签右键菜单:(标签下标, 鼠标位置)
     tab_menu: Option<(usize, Point<Pixels>)>,
     /// 节点页侧栏当前视图
@@ -90,6 +95,10 @@ struct Home {
     keys: Vec<store::KeyRow>,
     /// 钥匙串页的弹窗:添加 / 重命名 / 删除
     key_modal: Option<keychain::KeyModal>,
+    /// 节点导入预览弹窗
+    import: Option<import::ImportDialog>,
+    /// 节点页「新建节点」旁的下拉菜单是否展开
+    add_menu: bool,
     /// 刚复制过公钥的密钥 id(图标短暂变成对勾)
     key_copied: Option<i64>,
     page: Page,
@@ -154,11 +163,15 @@ impl Home {
             next_id,
             node_search: None,
             node_group: None,
+            node_menu: None,
+            group_delete: None,
             tab_menu: None,
             nodes_view: nodes::NodesView::Hosts,
             known_hosts: Vec::new(),
             keys,
             key_modal: None,
+            import: None,
+            add_menu: false,
             key_copied: None,
             page: Page::Stacks,
             hide_charts: false,
@@ -259,7 +272,7 @@ impl Render for Home {
         let overlay = self.reconnect_overlay(cx);
         let body = div().relative().flex_1().min_h_0().flex().flex_col().child(body).children(overlay);
         let drawer = if is_files_tab { None } else { self.files_drawer(window, cx) };
-        let dialog = self.node_dialog(window, cx).or_else(|| self.key_modal_view(window, cx));
+        let dialog = self.node_dialog(window, cx).or_else(|| self.key_modal_view(window, cx)).or_else(|| self.import_dialog(cx)).or_else(|| self.group_delete_dialog(cx));
         div()
             .size_full()
             .relative()
@@ -273,6 +286,7 @@ impl Render for Home {
             .children(drawer)
             .children(dialog)
             .children(self.tab_menu_overlay(cx))
+            .children(self.node_menu_overlay(cx))
     }
 }
 
@@ -395,6 +409,16 @@ fn main() {
                     if let Ok(kind) = std::env::var("DOCKYARD_KEY_MODAL") {
                         h.debug_key_modal(&kind, window, cx);
                     }
+                }
+                h.add_menu = std::env::var("DOCKYARD_ADD_MENU").is_ok();
+                if std::env::var("DOCKYARD_IMPORT_OPEN").is_ok() {
+                    h.open_import(window, cx);
+                }
+                if std::env::var("DOCKYARD_IMPORT_SSH").is_ok() {
+                    h.load_ssh_config(cx);
+                }
+                if let Ok(f) = std::env::var("DOCKYARD_IMPORT") {
+                    h.load_import_file(std::path::Path::new(&f), cx);
                 }
                 if h.all_nodes().next().is_some() {
                     for st in h.node_mut().stacks.iter_mut().take(expand) {

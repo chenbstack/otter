@@ -101,7 +101,7 @@ impl NodeForm {
 use crate::store::{AuthRow, SLOT_KEY, SLOT_PASSPHRASE, SLOT_PASSWORD};
 use zeroize::Zeroizing;
 
-fn aad(id: NodeId, slot: &str) -> Vec<u8> {
+pub(crate) fn aad(id: NodeId, slot: &str) -> Vec<u8> {
     format!("{}:{slot}", id.0).into_bytes()
 }
 

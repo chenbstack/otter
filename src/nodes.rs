@@ -4,6 +4,39 @@ use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputState};
 
 use super::*;
+use crate::node_form::NodeForm;
+use crate::workspace::NodeMode;
+
+/// 右键菜单的目标:节点卡片或分组卡片(分组下标)
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum NodeMenuTarget {
+    Node(NodeId),
+    Group(usize),
+    /// 节点菜单里展开的「移动到分组」子列表
+    MoveNode(NodeId),
+}
+
+/// 拖拽中的节点卡片
+#[derive(Clone)]
+pub(crate) struct DragNode {
+    id: NodeId,
+    name: String,
+    w: f32,
+}
+
+struct NodeGhost(DragNode);
+
+impl Render for NodeGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Home::card_shell("node-ghost".into(), self.0.w)
+            .bg(c::dialog())
+            .border_1()
+            .border_color(c::accent().opacity(0.6))
+            .shadow_lg()
+            .child(Home::icon_tile(IconName::Server, c::accent(), c::accent_soft()))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(self.0.name.clone()))
+    }
+}
 
 /// 节点页侧栏的四个视图
 #[derive(Clone, Copy, PartialEq)]
@@ -70,16 +103,16 @@ impl Home {
                 .child(icon(IconName::Search, 14.0, c::ghost()))
                 .child(div().flex_1().min_w_0().ml(px(-4.0)).child(Input::new(&s).appearance(false).with_size(px(12.0 / 0.875))))
         });
-        let add = div()
+        let split_h = NODE_BAR_H;
+        let add_main = div()
             .id("add-node")
-            .flex_shrink_0()
-            .h(px(NODE_BAR_H))
+            .h(px(split_h))
             .flex()
             .flex_row()
             .items_center()
             .gap(px(6.0))
             .px(px(14.0))
-            .rounded(px(t::RADIUS_MD))
+            .rounded_l(px(t::RADIUS_MD))
             .bg(c::accent())
             .text_color(c::on_accent())
             .text_size(px(t::TYPE_CONTROL))
@@ -89,6 +122,53 @@ impl Home {
             .child(icon(IconName::Plus, 13.0, c::on_accent()))
             .child("新建节点")
             .on_click(cx.listener(|this, _, window, cx| this.open_add_node(window, cx)));
+        let add_more = div()
+            .id("add-node-more")
+            .h(px(split_h))
+            .w(px(split_h))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_r(px(t::RADIUS_MD))
+            .bg(c::accent())
+            .border_l(px(2.0))
+            .border_color(c::on_accent().opacity(0.25))
+            .cursor_pointer()
+            .hover(|s| s.bg(c::accent().opacity(0.88)))
+            .child(icon(if self.add_menu { IconName::ChevronUp } else { IconName::ChevronDown }, 14.0, c::on_accent()))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.add_menu = !this.add_menu;
+                cx.notify();
+            }));
+        let (t1, t2) = (cx.entity(), cx.entity());
+        let add = div()
+            .relative()
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .child(add_main)
+            .child(add_more)
+            .when(self.add_menu, |d| {
+                d.child(div().absolute().top(px(split_h + 4.0)).right_0().w(px(crate::ui::DROPDOWN_COMPACT_W)).h(px(0.0)).child(crate::ui::dropdown_menu_compact(
+                    "add-node-menu",
+                    vec![crate::ui::MenuItem::new("导入").icon(IconName::FileUp)],
+                    None,
+                    crate::ui::MenuSide::Below,
+                    0.0,
+                    move |_, window, cx| {
+                        t1.update(cx, |h, cx| {
+                            h.add_menu = false;
+                            h.open_import(window, cx);
+                        })
+                    },
+                    move |_, cx| {
+                        t2.update(cx, |h, cx| {
+                            h.add_menu = false;
+                            cx.notify();
+                        })
+                    },
+                )))
+            });
         let top = div()
             .flex()
             .flex_row()
@@ -249,10 +329,290 @@ impl Home {
                     ),
             )
             .child(icon(IconName::ChevronRight, 14.0, c::ghost()))
+            .drag_over::<DragNode>(|s, _, _, _| s.bg(c::accent_soft()).border_color(c::accent()))
+            .on_drop(cx.listener(move |this, d: &DragNode, _, cx| this.move_node_to(d.id, gi, cx)))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                this.node_menu = Some((NodeMenuTarget::Group(gi), e.position));
+                cx.notify();
+            }))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.node_group = Some(gi);
                 cx.notify();
             }))
+    }
+
+    /// 节点卡片/分组卡片的右键菜单浮层
+    pub(crate) fn node_menu_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (target, pos) = self.node_menu?;
+        let item = |id: ElementId, ic: IconName, label: SharedString| {
+            div()
+                .id(id)
+                .h(px(28.0))
+                .px(px(10.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .rounded(px(t::RADIUS_SM))
+                .text_size(px(t::TYPE_CONTROL))
+                .cursor_pointer()
+                .text_color(c::secondary())
+                .hover(|s| s.bg(c::hover()).text_color(c::text()))
+                .child(icon(ic, 14.0, c::ghost()))
+                .child(label)
+        };
+        let danger = |d: Stateful<Div>| d.text_color(c::danger()).hover(|s| s.bg(c::hover()));
+        let mut panel = div()
+            .id("node-menu")
+            .absolute()
+            .left(pos.x)
+            .top(pos.y)
+            .w(px(168.0))
+            .p(px(4.0))
+            .flex()
+            .flex_col()
+            .rounded(px(t::RADIUS_MD))
+            .bg(c::dialog())
+            .border_1()
+            .border_color(c::border())
+            .occlude();
+        match target {
+            NodeMenuTarget::Node(nid) | NodeMenuTarget::MoveNode(nid) => {
+                // 悬停到别的菜单项时收起二级菜单
+                let collapse = move |this: &mut Home, hovered: &bool, cx: &mut Context<Home>, nid: NodeId| {
+                    if *hovered && matches!(this.node_menu, Some((NodeMenuTarget::MoveNode(_), _))) {
+                        this.node_menu = Some((NodeMenuTarget::Node(nid), pos));
+                        cx.notify();
+                    }
+                };
+                for (id, ic, label, mode) in [
+                    ("nm-term", NodeMode::Terminal.icon(), "打开终端", NodeMode::Terminal),
+                    ("nm-sftp", NodeMode::Files.icon(), "打开 SFTP", NodeMode::Files),
+                    ("nm-docker", NodeMode::Containers.icon(), "打开容器", NodeMode::Containers),
+                ] {
+                    panel = panel.child(item(id.into(), ic, label.into()).on_hover(cx.listener(move |this, h: &bool, _, cx| collapse(this, h, cx, nid))).on_click(cx.listener(move |this, _, window, cx| {
+                        this.node_menu = None;
+                        this.open_node(nid, Some(mode), window, cx);
+                    })));
+                }
+                panel = panel
+                    .child(div().h(px(1.0)).mx(px(6.0)).my(px(4.0)).bg(c::border()))
+                    .child(item("nm-edit".into(), IconName::Pencil, "编辑".into()).on_hover(cx.listener(move |this, h: &bool, _, cx| collapse(this, h, cx, nid))).on_click(cx.listener(move |this, _, window, cx| {
+                        this.node_menu = None;
+                        this.open_edit_node(nid, window, cx);
+                    })));
+                if self.groups.len() > 1 {
+                    panel = panel.child(item("nm-move".into(), IconName::Folder, "移动到分组".into()).child(div().flex_1()).child(icon(IconName::ChevronRight, 12.0, c::ghost())).when(target == NodeMenuTarget::MoveNode(nid), |d| d.bg(c::hover()).text_color(c::text())).on_hover(cx.listener(move |this, h: &bool, _, cx| {
+                        if *h {
+                            this.node_menu = Some((NodeMenuTarget::MoveNode(nid), pos));
+                            cx.notify();
+                        }
+                    })).on_click(cx.listener(move |this, _, _, cx| {
+                        this.node_menu = Some((NodeMenuTarget::MoveNode(nid), pos));
+                        cx.notify();
+                    })));
+                }
+                panel = panel
+                    .child(div().h(px(1.0)).mx(px(6.0)).my(px(4.0)).bg(c::border()))
+                    .child(danger(item("nm-del".into(), IconName::Trash, "删除".into())).on_click(cx.listener(move |this, _, _, cx| {
+                        this.node_menu = None;
+                        this.delete_node_now(nid, cx);
+                    })));
+            }
+            NodeMenuTarget::Group(gi) => {
+                panel = panel
+                    .child(item("nm-open".into(), IconName::FolderOpen, "打开".into()).on_click(cx.listener(move |this, _, _, cx| {
+                        this.node_menu = None;
+                        this.node_group = Some(gi);
+                        cx.notify();
+                    })))
+                    .child(item("nm-new".into(), IconName::Plus, "在此分组新建节点".into()).on_click(cx.listener(move |this, _, window, cx| {
+                        this.node_menu = None;
+                        this.form = Some(NodeForm::new(gi, window, cx));
+                        cx.notify();
+                    })));
+                // 至少保留一个分组:新建节点等入口都假定分组非空
+                if self.groups.len() > 1 {
+                    panel = panel
+                        .child(div().h(px(1.0)).mx(px(6.0)).my(px(4.0)).bg(c::border()))
+                        .child(danger(item("nm-del-group".into(), IconName::Trash, "删除分组".into())).on_click(cx.listener(move |this, _, _, cx| {
+                            this.node_menu = None;
+                            this.request_delete_group(gi, cx);
+                        })));
+                }
+            }
+        }
+        // 二级菜单:紧贴主菜单右侧,对齐「移动到分组」那一行
+        let mut sub = None;
+        if let NodeMenuTarget::MoveNode(nid) = target {
+            let cur = self.locate(nid).0;
+            let mut sp = div()
+                .id("node-menu-sub")
+                .absolute()
+                .left(pos.x + px(168.0))
+                .top(pos.y + px(125.0))
+                .w(px(168.0))
+                .max_h(px(320.0))
+                .overflow_y_scroll()
+                .p(px(4.0))
+                .flex()
+                .flex_col()
+                .rounded(px(t::RADIUS_MD))
+                .bg(c::dialog())
+                .border_1()
+                .border_color(c::border())
+                .occlude();
+            for (gi, g) in self.groups.iter().enumerate().filter(|(gi, _)| *gi != cur) {
+                sp = sp.child(item(("nm-mv", gi).into(), IconName::Folder, g.name.clone().into()).on_click(cx.listener(move |this, _, _, cx| {
+                    this.node_menu = None;
+                    this.move_node_to(nid, gi, cx);
+                })));
+            }
+            sub = Some(sp);
+        }
+        let close = cx.listener(|this: &mut Home, _: &MouseDownEvent, _, cx| {
+            this.node_menu = None;
+            cx.notify();
+        });
+        let close2 = cx.listener(|this: &mut Home, _: &MouseDownEvent, _, cx| {
+            this.node_menu = None;
+            cx.notify();
+        });
+        Some(
+            div()
+                .id("node-menu-mask")
+                .absolute()
+                .size_full()
+                .top_0()
+                .left_0()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, close)
+                .on_mouse_down(MouseButton::Right, close2)
+                .child(panel)
+                .children(sub)
+                .into_any_element(),
+        )
+    }
+
+    /// 删除节点:先写库,再关掉它的标签、从列表移除。
+    fn delete_node_now(&mut self, id: NodeId, cx: &mut Context<Self>) {
+        if let Some(store) = &self.store {
+            if let Err(e) = store.delete_node(id) {
+                crate::logs::push(crate::logs::Level::Error, "本地库", &format!("删除节点失败: {e}"));
+                return;
+            }
+        }
+        for g in &mut self.groups {
+            g.nodes.retain(|n| n.id != id);
+        }
+        self.after_nodes_removed(&[id], cx);
+    }
+
+    /// 删除分组:空分组直接删,有节点先弹确认。
+    fn request_delete_group(&mut self, gi: usize, cx: &mut Context<Self>) {
+        let Some(g) = self.groups.get(gi) else { return };
+        if g.nodes.is_empty() {
+            self.delete_group_now(g.id, cx);
+        } else {
+            self.group_delete = Some(g.id);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn delete_group_now(&mut self, gid: i64, cx: &mut Context<Self>) {
+        self.group_delete = None;
+        let Some(gi) = self.groups.iter().position(|g| g.id == gid) else { return };
+        if self.groups.len() <= 1 {
+            return;
+        }
+        if let Some(store) = &self.store {
+            if let Err(e) = store.delete_group(gid) {
+                crate::logs::push(crate::logs::Level::Error, "本地库", &format!("删除分组失败: {e}"));
+                return;
+            }
+        }
+        let removed: Vec<NodeId> = self.groups.remove(gi).nodes.iter().map(|n| n.id).collect();
+        self.node_group = None;
+        self.after_nodes_removed(&removed, cx);
+    }
+
+    /// 节点已从列表移除后的收尾:关掉它们的标签,修正选中节点。
+    fn after_nodes_removed(&mut self, ids: &[NodeId], cx: &mut Context<Self>) {
+        let ixs: Vec<usize> = self.workspace.tabs.iter().enumerate().filter(|(_, t)| t.node().is_some_and(|n| ids.contains(&n))).map(|(i, _)| i).collect();
+        for ix in ixs.into_iter().rev() {
+            self.close_tab(ix, cx);
+        }
+        if ids.contains(&self.sel) || !self.groups.iter().any(|g| g.nodes.iter().any(|n| n.id == self.sel)) {
+            self.sel = self.groups.iter().flat_map(|g| g.nodes.iter()).map(|n| n.id).next().unwrap_or(NodeId(0));
+        }
+        cx.notify();
+    }
+
+    /// 删除非空分组的确认框
+    pub(crate) fn group_delete_dialog(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let gid = self.group_delete?;
+        let g = self.groups.iter().find(|g| g.id == gid)?;
+        let sub: SharedString = format!("确定删除分组「{}」?", g.name).into();
+        let msg = format!("分组里的 {} 个节点会一起删除,包括它们保存的密码和私钥,无法恢复。服务器上的内容不受影响。", g.nodes.len());
+        let cancel = crate::node_form::ctl_btn("gd-cancel", None, "取消", 34.0).on_click(cx.listener(|this, _, _, cx| {
+            this.group_delete = None;
+            cx.notify();
+        }));
+        let del = div()
+            .id("gd-ok")
+            .flex()
+            .items_center()
+            .h(px(34.0))
+            .px(px(16.0))
+            .rounded(px(t::RADIUS_MD))
+            .bg(c::danger())
+            .text_color(c::on_accent())
+            .text_size(px(t::TYPE_CONTROL))
+            .font_weight(FontWeight::SEMIBOLD)
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.88))
+            .child("删除")
+            .on_click(cx.listener(move |this, _, _, cx| this.delete_group_now(gid, cx)));
+        let title = div()
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .px(px(24.0))
+            .pt(px(24.0))
+            .pb(px(14.0))
+            .child(div().text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).child("删除分组"))
+            .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(sub));
+        let body = div().px(px(24.0)).pb(px(20.0)).text_size(px(t::TYPE_BODY)).text_color(c::secondary()).child(msg);
+        let footer = div().flex().flex_row().items_center().gap(px(10.0)).px(px(24.0)).py(px(14.0)).border_t_1().border_color(c::line()).child(div().flex_1()).child(cancel).child(del);
+        Some(modal(
+            "group-del-dialog",
+            440.0,
+            cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                if e.keystroke.key == "escape" {
+                    this.group_delete = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }),
+            [title.into_any_element(), body.into_any_element(), footer.into_any_element()],
+        ))
+    }
+
+    /// 拖拽把节点移到分组 `gi`:先写库,成功后再改内存列表。
+    fn move_node_to(&mut self, id: NodeId, gi: usize, cx: &mut Context<Self>) {
+        let (old, ni) = self.locate(id);
+        if old == gi || self.groups.get(old).and_then(|g| g.nodes.get(ni)).is_none_or(|n| n.id != id) {
+            return;
+        }
+        if let Some(store) = &self.store {
+            if let Err(e) = store.move_node(id, self.groups[gi].id) {
+                crate::logs::push(crate::logs::Level::Error, "本地库", &format!("移动节点失败: {e}"));
+                return;
+            }
+        }
+        let node = self.groups[old].nodes.remove(ni);
+        self.groups[gi].nodes.push(node);
+        cx.notify();
     }
 
     fn node_card(&self, n: &Node, w: f32, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -296,6 +656,11 @@ impl Home {
                         this.open_edit_node(id, window, cx);
                     })),
             )
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                this.node_menu = Some((NodeMenuTarget::Node(id), e.position));
+                cx.notify();
+            }))
+            .on_drag(DragNode { id, name: n.name.clone(), w }, |d, _, _, cx| cx.new(|_| NodeGhost(d.clone())))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.open_node(id, None, window, cx);
             }))

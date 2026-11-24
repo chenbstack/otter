@@ -36,6 +36,33 @@ pub struct Store {
     conn: Connection,
 }
 
+/// 导入一个节点所需的全部内容(分组按名字找,没有就建);秘密是明文,由 `import_nodes` 加密后入库。
+pub struct ImportItem {
+    pub group: String,
+    pub name: String,
+    pub user: String,
+    pub host: String,
+    pub port: u16,
+    pub note: String,
+    pub tags: Vec<String>,
+    pub use_agent: bool,
+    pub key_id: Option<i64>,
+    pub key_label: String,
+    /// (槽位, 明文)
+    pub secrets: Vec<(String, zeroize::Zeroizing<String>)>,
+}
+
+/// 导入后每个节点落在哪个分组、拿到什么 id(顺序与传入的 `ImportItem` 一致)。
+pub struct Imported {
+    pub group_id: i64,
+    pub group_name: String,
+    pub color: u32,
+    pub id: NodeId,
+}
+
+/// 导入时新建分组用的颜色(与默认分组相同)
+const IMPORT_GROUP_COLOR: u32 = 8228518;
+
 /// 迁移脚本,下标 + 1 = 目标版本。只追加,不改已发布的版本。
 const MIGRATIONS: &[&str] = &[
     // v1:分组、节点、标签,并放一个默认分组(空库时表单的分组下拉也有得选)
@@ -351,6 +378,33 @@ impl Store {
         self.conn.execute("DELETE FROM keys WHERE id=?1", params![id]).map(|_| ()).map_err(|e| e.to_string())
     }
 
+    /// 把节点移到另一个分组(拖拽用),不动其他字段。
+    pub fn move_node(&self, id: NodeId, group_id: i64) -> Result<(), String> {
+        let n = self.conn.execute("UPDATE nodes SET group_id=?1 WHERE id=?2", params![group_id, id.0]).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("节点不存在".into());
+        }
+        Ok(())
+    }
+
+    /// 删除节点(标签、认证、秘密随外键级联删除)。
+    pub fn delete_node(&self, id: NodeId) -> Result<(), String> {
+        let n = self.conn.execute("DELETE FROM nodes WHERE id=?1", params![id.0]).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("节点不存在".into());
+        }
+        Ok(())
+    }
+
+    /// 删除分组及其下所有节点(外键级联)。
+    pub fn delete_group(&self, id: i64) -> Result<(), String> {
+        let n = self.conn.execute("DELETE FROM groups WHERE id=?1", params![id]).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("分组不存在".into());
+        }
+        Ok(())
+    }
+
     /// 更新节点(含换分组、重写标签)。
     pub fn update_node(&mut self, id: NodeId, n: &NewNode) -> Result<(), String> {
         let e = |e: rusqlite::Error| e.to_string();
@@ -369,6 +423,54 @@ impl Store {
             tx.execute("INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?1, ?2)", params![id.0, t]).map_err(e)?;
         }
         tx.commit().map_err(e)
+    }
+
+    /// 批量导入节点:一个事务里建分组、写节点、标签、认证和加密后的秘密,任何一步失败都整体回滚。
+    /// `seal(节点 id, 槽位, 明文)` 返回 (nonce, 密文);密文绑定节点 id,所以要等拿到 id 才能加密。
+    pub fn import_nodes(
+        &mut self,
+        items: &[ImportItem],
+        seal: impl Fn(NodeId, &str, &[u8]) -> Result<(Vec<u8>, Vec<u8>), String>,
+    ) -> Result<Vec<Imported>, String> {
+        let e = |e: rusqlite::Error| e.to_string();
+        let tx = self.conn.transaction().map_err(e)?;
+        let mut out = Vec::with_capacity(items.len());
+        for it in items {
+            let found: Option<i64> = tx.query_row("SELECT id FROM groups WHERE name=?1 ORDER BY position, id LIMIT 1", params![it.group], |r| r.get(0)).optional().map_err(e)?;
+            let gid = match found {
+                Some(id) => id,
+                None => {
+                    tx.execute(
+                        "INSERT INTO groups (name, color, position) VALUES (?1, ?2, (SELECT COALESCE(MAX(position), 0) + 1 FROM groups))",
+                        params![it.group, IMPORT_GROUP_COLOR],
+                    )
+                    .map_err(e)?;
+                    tx.last_insert_rowid()
+                }
+            };
+            let color: u32 = tx.query_row("SELECT color FROM groups WHERE id=?1", params![gid], |r| r.get(0)).map_err(e)?;
+            tx.execute(
+                "INSERT INTO nodes (group_id, name, user, host, port, note, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT COALESCE(MAX(position), 0) + 1 FROM nodes))",
+                params![gid, it.name, it.user, it.host, it.port, it.note],
+            )
+            .map_err(e)?;
+            let id = tx.last_insert_rowid();
+            for t in &it.tags {
+                tx.execute("INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?1, ?2)", params![id, t]).map_err(e)?;
+            }
+            if it.use_agent || it.key_id.is_some() || !it.key_label.is_empty() || !it.secrets.is_empty() {
+                tx.execute("INSERT INTO node_auth (node_id, use_agent, key_label, key_id) VALUES (?1, ?2, ?3, ?4)", params![id, it.use_agent, it.key_label, it.key_id]).map_err(e)?;
+            }
+            let node_id = NodeId(id as u32);
+            for (slot, plain) in &it.secrets {
+                let (nonce, ct) = seal(node_id, slot, plain.as_bytes())?;
+                tx.execute("INSERT INTO secrets (node_id, slot, nonce, ciphertext) VALUES (?1, ?2, ?3, ?4)", params![id, slot, nonce, ct]).map_err(e)?;
+            }
+            out.push(Imported { group_id: gid, group_name: it.group.clone(), color, id: node_id });
+        }
+        tx.commit().map_err(e)?;
+        Ok(out)
     }
 
     pub fn add_node(&mut self, n: &NewNode) -> Result<NodeId, String> {
@@ -410,6 +512,40 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].name, "未分组");
         assert!(groups[0].nodes.is_empty());
+    }
+
+    #[test]
+    fn move_node_changes_group_only() {
+        let mut s = Store::open_memory().unwrap();
+        let g1 = s.load_groups().unwrap()[0].id;
+        s.conn.execute("INSERT INTO groups (name, color, position) VALUES ('b', 0, 1)", []).unwrap();
+        let g2 = s.conn.last_insert_rowid();
+        let id = s.add_node(&NewNode { group_id: g1, name: "x", user: "u", host: "h", port: 22, note: "", tags: &[] }).unwrap();
+        s.move_node(id, g2).unwrap();
+        let gs = s.load_groups().unwrap();
+        assert!(gs.iter().find(|g| g.id == g1).unwrap().nodes.is_empty());
+        assert_eq!(gs.iter().find(|g| g.id == g2).unwrap().nodes[0].name, "x");
+        assert!(s.move_node(NodeId(999), g2).is_err());
+    }
+
+    #[test]
+    fn delete_node_and_group_cascade() {
+        let mut s = Store::open_memory().unwrap();
+        let g1 = s.load_groups().unwrap()[0].id;
+        s.conn.execute("INSERT INTO groups (name, color, position) VALUES ('b', 0, 1)", []).unwrap();
+        let g2 = s.conn.last_insert_rowid();
+        let tags = vec!["t".to_string()];
+        let a = s.add_node(&NewNode { group_id: g1, name: "a", user: "u", host: "h", port: 22, note: "", tags: &tags }).unwrap();
+        s.add_node(&NewNode { group_id: g2, name: "b", user: "u", host: "h2", port: 22, note: "", tags: &tags }).unwrap();
+        s.delete_node(a).unwrap();
+        assert!(s.delete_node(a).is_err());
+        s.delete_group(g2).unwrap();
+        let gs = s.load_groups().unwrap();
+        assert!(gs.iter().all(|g| g.id != g2));
+        assert!(gs.iter().all(|g| g.nodes.is_empty()));
+        let left: i64 = s.conn.query_row("SELECT COUNT(*) FROM node_tags", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0);
+        assert!(s.delete_group(g2).is_err());
     }
 
     #[test]
@@ -514,5 +650,44 @@ mod tests {
         let s = Store::open(&path).unwrap();
         assert_eq!(s.load_groups().unwrap()[0].nodes[0].name, "keep");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn item(group: &str, name: &str, secrets: Vec<(String, zeroize::Zeroizing<String>)>) -> ImportItem {
+        ImportItem { group: group.into(), name: name.into(), user: "root".into(), host: format!("{name}.example.com"), port: 2222, note: "n".into(), tags: vec!["a".into(), "b".into()], use_agent: true, key_id: None, key_label: String::new(), secrets }
+    }
+
+    #[test]
+    fn import_creates_groups_nodes_and_auth() {
+        let mut s = Store::open_memory().unwrap();
+        let v = crate::secrets::Vault::for_test();
+        let seal = |id: NodeId, slot: &str, p: &[u8]| v.seal(p, &crate::node_form::aad(id, slot));
+        let items = vec![
+            item("未分组", "a", vec![(SLOT_PASSWORD.into(), zeroize::Zeroizing::new("pw".into()))]),
+            item("Project/Dev", "b", vec![]),
+            item("Project/Dev", "c", vec![]),
+        ];
+        let got = s.import_nodes(&items, seal).unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[1].group_id, got[2].group_id, "同名新分组只建一次");
+        let groups = s.load_groups().unwrap();
+        assert_eq!(groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["未分组", "Project/Dev"]);
+        assert_eq!(groups[1].nodes.len(), 2);
+        assert_eq!(groups[0].nodes[0].user_host, "root@a.example.com:2222");
+        assert_eq!(groups[0].nodes[0].tags, ["a", "b"]);
+        let auth = s.load_auth(got[0].id).unwrap();
+        assert!(auth.use_agent);
+        let (n, c) = auth.secret(SLOT_PASSWORD).unwrap();
+        assert_eq!(&*v.open_secret(n, c, &crate::node_form::aad(got[0].id, SLOT_PASSWORD)).unwrap(), b"pw");
+    }
+
+    #[test]
+    fn import_rolls_back_on_failure() {
+        let mut s = Store::open_memory().unwrap();
+        let items = vec![item("新分组", "a", vec![]), item("新分组", "b", vec![(SLOT_PASSWORD.into(), zeroize::Zeroizing::new("pw".into()))])];
+        let res = s.import_nodes(&items, |_, _, _| Err("加密失败".into()));
+        assert!(res.is_err());
+        let groups = s.load_groups().unwrap();
+        assert_eq!(groups.len(), 1, "新建的分组也要回滚");
+        assert!(groups[0].nodes.is_empty());
     }
 }

@@ -1,5 +1,7 @@
 //! 通用界面基础:色板、尺寸常量、小部件。标准值见 docs/design/tokens.md。
 
+use std::time::Duration;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -157,15 +159,41 @@ impl<T: Styled + StatefulInteractiveElement + Sized> GlassHover for T {}
 /// - `key` 在捕获阶段拦截按键(Esc 关闭、Enter 提交等),输入框里按也生效;处理了就自己 `cx.stop_propagation()`;
 /// - 面板:宽 `width`、不透明 `surface.dialog`、`radius.2xl`、描边 + 大阴影,内容用 flex 纵向排,超高部分自己滚动(见调用方)。
 /// 面板里的关闭按钮等绝对定位元素也放进 `content`(面板是 `.relative()`)。
+/// 弹窗尺寸过渡时长(毫秒),缓动 `ease_out_quint`
+pub const DIALOG_ANIM_MS: u64 = 200;
+
 pub fn modal(
     id: &'static str,
     width: f32,
     key: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
     content: impl IntoIterator<Item = AnyElement>,
 ) -> Stateful<Div> {
+    modal_panel(id, width, None, None, key, content)
+}
+
+/// 分步窗口:尺寸 `(宽, 高)` 从 `from` 过渡到 `to`(切换步骤时用);相同则不播动画。高度固定,内容多的步骤自己滚动。
+pub fn modal_anim(
+    id: &'static str,
+    from: (f32, f32),
+    to: (f32, f32),
+    key: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
+    content: impl IntoIterator<Item = AnyElement>,
+) -> Stateful<Div> {
+    modal_panel(id, to.0, Some(to.1), (from != to).then_some(from), key, content)
+}
+
+fn modal_panel(
+    id: &'static str,
+    width: f32,
+    height: Option<f32>,
+    from: Option<(f32, f32)>,
+    key: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
+    content: impl IntoIterator<Item = AnyElement>,
+) -> Stateful<Div> {
     let panel = div()
         .id((id, 1usize))
         .w(px(width))
+        .when_some(height, |d, h| d.h(px(h)))
         .max_h_full()
         .flex()
         .flex_col()
@@ -178,6 +206,19 @@ pub fn modal(
         .relative()
         .occlude()
         .children(content);
+    let panel = match from {
+        None => panel.into_any_element(),
+        Some((fw, fh)) => {
+            let (tw, th) = (width, height.unwrap_or(fh));
+            panel
+                .with_animation(
+                    SharedString::from(format!("{id}-{fw}x{fh}-{tw}x{th}")),
+                    Animation::new(Duration::from_millis(DIALOG_ANIM_MS)).with_easing(ease_out_quint()),
+                    move |d, t| d.w(px(fw + (tw - fw) * t)).h(px(fh + (th - fh) * t)),
+                )
+                .into_any_element()
+        }
+    };
     div()
         .id(id)
         .absolute()

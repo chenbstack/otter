@@ -8,6 +8,7 @@ default-run = "dockyard"
 # 上游 0.3.0 的副本,为了给渲染层加关键字高亮钩子,改动见 docs/modules/terminal.md
 gpui_xterm = { path = "vendor/gpui_xterm" }
 regex = "1"
+csv = "1.4"
 russh = "0.65"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs"] }
