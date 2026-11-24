@@ -27,7 +27,7 @@ All your servers live in one window, organized in groups. Each one opens as a ta
 ## Highlights
 
 - **Native and small**: a Rust app drawing straight on the GPU, with no Electron or browser engine bundled. The macOS download is about 16 MB.
-- **Fast**: opens in well under a second, and long scrolling lists stay smooth.
+- **Fast**: launches in about 0.25 s (MacBook Pro, Apple M5 Pro), and long scrolling lists stay smooth.
 - **Nothing on the server**: no panel, no agent, no open port. Everything goes over SSH.
 - **Safe by default**: passwords and key passphrases are encrypted on disk, with the master key in the system keychain. An agent can never take over a terminal without your approval.
 
