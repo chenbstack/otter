@@ -22,6 +22,7 @@ mod secrets;
 mod sftp;
 mod store;
 mod mock;
+mod monitor;
 mod node_form;
 mod nodes;
 mod nodes_side;

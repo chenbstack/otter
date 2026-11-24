@@ -4,3 +4,4 @@ pub mod dockerpages;
 pub mod logs;
 pub mod stacks;
 pub mod terminal;
+pub mod monitorpage;

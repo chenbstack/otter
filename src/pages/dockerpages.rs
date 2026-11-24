@@ -49,46 +49,24 @@ pub(crate) struct DockUi {
     seen: u64,
     /// 当前同步的标签,变了就清空快照
     key: Option<(usize, NodeId)>,
+    /// 概览页的整机监控读数、不能监控的原因、进程是否按内存排
+    pub mon: Option<Arc<crate::monitor::MonSnapshot>>,
+    pub mon_err: Option<SharedString>,
+    pub proc_by_mem: bool,
+    /// 内容区宽度(进程表窄了就收掉次要的列)
+    pub view_w: f32,
+    /// Docker 是否可用,不可用时的原因(概览页的容器卡片用)
+    pub docker_ok: bool,
+    pub docker_problem: Option<Problem>,
 }
 
 impl DockUi {
     pub fn new() -> Self {
-        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, sort: (SortKey::Name, true), confirm: None, notice: None, polling: false, seen: 0, key: None }
+        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, sort: (SortKey::Name, true), confirm: None, notice: None, polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0, docker_ok: false, docker_problem: None }
     }
 }
 
-fn stat_tile(ic: IconName, label: &'static str, value: String, sub: Div, chart: Option<Div>) -> Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .items_end()
-        .gap(px(12.0))
-        .p(px(14.0))
-        .glass(t::RADIUS_XL, GlassStyle::CARD)
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(div().flex().flex_row().items_center().gap(px(6.0)).text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(icon(ic, 12.0, c::ghost())).child(label))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_baseline()
-                        .gap(px(6.0))
-                        .child(div().text_size(px(t::TYPE_DISPLAY)).font_family(MONO).font_weight(FontWeight::SEMIBOLD).child(value))
-                        .child(sub),
-                ),
-        )
-        .children(chart.map(|c| div().w(px(84.0)).flex_shrink_0().child(c)))
-}
-
-fn small(s: impl Into<SharedString>, color: Rgba) -> Div {
+pub(super) fn small(s: impl Into<SharedString>, color: Rgba) -> Div {
     div().text_size(px(t::TYPE_CAPTION)).text_color(color).child(s.into())
 }
 
@@ -117,7 +95,7 @@ fn icon_btn(id: (&'static str, usize), ic: IconName, color: Rgba) -> Stateful<Di
     div().id(id).size(px(26.0)).flex().items_center().justify_center().rounded(px(t::RADIUS_XS)).cursor_pointer().hover(|s| s.bg(c::raised())).child(icon(ic, 14.0, color))
 }
 
-fn state_color(c0: &Container) -> (Rgba, Rgba) {
+pub(super) fn state_color(c0: &Container) -> (Rgba, Rgba) {
     match c0.state.as_str() {
         "running" if c0.status.contains("(unhealthy)") => (c::warn(), c::warn_soft()),
         "running" => (c::online(), c::online_soft()),
@@ -163,10 +141,16 @@ impl Home {
         if self.dock.key != Some((a, id)) {
             self.dock.key = Some((a, id));
             self.dock.snap = Arc::new(Snapshot::default());
+            self.dock.mon = None;
+            self.dock.mon_err = None;
+            self.dock.docker_ok = false;
+            self.dock.docker_problem = None;
             self.dock.seen = 0;
         }
         if self.demo {
             self.dock.snap = Arc::new(docker::demo_snapshot(&self.node().stacks));
+            self.dock.docker_ok = true;
+            self.dock.mon = Some(Arc::new(crate::monitor::demo_snapshot()));
             return;
         }
         // 这个标签的终端已连上就复用它的连接;没连上等它(连接页显示终端的进度);没有终端才自己连。
@@ -188,6 +172,10 @@ impl Home {
         let Some(d) = self.workspace.tabs[a].docker.as_ref() else { return };
         d.touch();
         d.want_volume_sizes(want_sizes);
+        self.dock.mon = d.monitor();
+        self.dock.mon_err = d.monitor_error().map(Into::into);
+        self.dock.docker_problem = d.problem();
+        self.dock.docker_ok = d.snapshot().is_some();
         let notice = d.take_notice();
         let ver = d.version();
         let snap = (ver != self.dock.seen).then(|| d.snapshot()).flatten();
@@ -257,6 +245,10 @@ impl Home {
             docker::Status::Connecting if d.epoch().is_none() => Some(self.connecting_page(ConnTarget::Docker, d.steps(), None, DOCKER_STEP_LABELS, cx).into_any_element()),
             docker::Status::Connecting => Some(loading("正在检测 Docker…").into_any_element()),
             docker::Status::Ready => {
+                // 概览页是整机监控,不依赖 Docker:读到系统数据(或确定读不了)就能显示
+                if self.page == Page::Overview {
+                    return (d.monitor().is_none() && d.monitor_error().is_none()).then(|| loading("正在读取系统信息…").into_any_element());
+                }
                 if d.snapshot().is_some() {
                     return None;
                 }
@@ -335,7 +327,7 @@ impl Home {
     pub(crate) fn dock_subtitle(&self) -> String {
         let n = &self.node().name;
         match self.page {
-            Page::Overview => format!("{n} 上的 Docker 概况"),
+            Page::Overview => format!("{n} 的系统资源"),
             Page::Containers => format!("{n} 上的全部容器"),
             Page::Stacks => format!("{n} 上的 Compose 项目"),
             Page::Images => format!("{n} 上的本地镜像"),
@@ -345,7 +337,7 @@ impl Home {
 
     pub(crate) fn docker_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         match self.page {
-            Page::Overview => self.overview_page(),
+            Page::Overview => self.overview_page(cx),
             Page::Containers => self.containers_page(cx),
             Page::Images => self.images_page(cx),
             Page::Volumes => self.volumes_page(cx),
@@ -632,72 +624,6 @@ impl Home {
     }
 
     // ---- 概览 ----
-
-    fn overview_page(&self) -> AnyElement {
-        let snap = &self.dock.snap;
-        let total = snap.containers.len();
-        let up = snap.running();
-        let stacks = &self.node().stacks;
-        let agg = super::stacks::aggregate(stacks.iter().flat_map(|s| s.services.iter()));
-        let attention = snap.attention();
-        let panel_n = snap.containers.iter().filter(|c| c.panel.is_some()).count();
-        let mem = mock::fmt_mem(agg.mem_mb());
-        let (mem_v, mem_u) = mem.split_once(' ').unwrap_or((&mem, ""));
-        let hide = self.hide_charts;
-
-        let tiles1 = div()
-            .flex()
-            .flex_row()
-            .gap(px(10.0))
-            .pb(px(10.0))
-            .flex_shrink_0()
-            .child(stat_tile(IconName::Container, "容器", format!("{up}/{total}"), if up == total { small("全部运行", c::online()) } else { small(format!("{} 个未运行", total - up), c::warn()) }, None))
-            .child(stat_tile(IconName::Layers, "堆栈", stacks.iter().filter(|s| s.name != "独立容器").count().to_string(), small("个 Compose 项目", c::muted()), None))
-            .child(stat_tile(IconName::Package, "镜像", snap.images.len().to_string(), small(format!("{} 个未使用", snap.images.iter().filter(|i| snap.image_users(i) == 0).count()), c::muted()), None))
-            .child(stat_tile(IconName::HardDrive, "存储卷", snap.volumes.len().to_string(), small(format!("{} 个未使用", snap.volumes.iter().filter(|v| snap.volume_users(v).is_empty()).count()), c::muted()), None));
-        let tiles2 = div()
-            .flex()
-            .flex_row()
-            .gap(px(10.0))
-            .pb(px(14.0))
-            .flex_shrink_0()
-            .child(stat_tile(IconName::Cpu, "CPU 合计", format!("{:.1}", agg.cpu()), small("%", c::muted()), (!hide).then(|| spark(&agg.cpu_s(), c::cpu(), 26.0, 2.0))))
-            .child(stat_tile(IconName::MemoryStick, "内存合计", mem_v.to_string(), small(mem_u.to_string(), c::muted()), (!hide).then(|| spark(&agg.mem_s(), c::mem(), 26.0, 2.0))));
-
-        let mut list = div().flex().flex_col();
-        if attention.is_empty() {
-            list = list.child(div().h(px(48.0)).px(px(16.0)).flex().items_center().gap(px(8.0)).text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(icon(IconName::Check, 14.0, c::online())).child("一切正常,没有需要关注的容器"));
-        }
-        for (i, ct) in attention.iter().enumerate() {
-            let (fg, bg) = state_color(ct);
-            list = list.child(
-                row(("att", i))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::MEDIUM).child(ct.name.clone()))
-                    .child(div().w(px(110.0)).truncate().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(ct.project.clone().unwrap_or_else(|| "—".into())))
-                    .child(div().w(px(200.0)).truncate().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(ct.status.clone()))
-                    .child(pill(docker::uptime_text(ct), fg, bg)),
-            );
-        }
-        let attention_card = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .glass(t::RADIUS_XL, GlassStyle::CARD)
-            .overflow_hidden()
-            .child(div().h(px(38.0)).px(px(16.0)).flex().flex_row().items_center().gap(px(8.0)).border_b_1().border_color(c::border()).text_size(px(t::TYPE_CONTROL)).font_weight(FontWeight::SEMIBOLD).text_color(c::secondary()).child(icon(IconName::TriangleAlert, 14.0, if attention.is_empty() { c::ghost() } else { c::warn() })).child(format!("需要关注({})", attention.len())))
-            .child(list);
-
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(tiles1)
-            .child(tiles2)
-            .child(attention_card)
-            .children((panel_n > 0).then(|| div().mt(px(12.0)).text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(format!("{panel_n} 个容器由 1Panel / 宝塔 管理,本应用只读,不会修改。"))))
-            .into_any_element()
-    }
 }
 
 fn loading(msg: &'static str) -> Div {

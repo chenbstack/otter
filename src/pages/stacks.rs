@@ -147,6 +147,7 @@ impl Home {
         self.cols = (((inner + SVC_GAP) / (SVC_MIN_W + SVC_GAP)).floor() as usize).max(1);
         self.svc_w = (inner - SVC_GAP * (self.cols - 1) as f32) / self.cols as f32;
 
+        self.dock.view_w = width;
         let gate = self.docker_gate(cx);
         let gated = gate.is_some();
         let body: AnyElement = if let Some(g) = gate {
@@ -213,7 +214,7 @@ impl Home {
             .child(div().flex_1())
             .when(!gated, |d| {
                 d.gap(px(8.0))
-                    .when(matches!(self.page, Page::Stacks | Page::Overview), |d| {
+                    .when(self.page == Page::Stacks, |d| {
                         d.child(
                             button("toggle-charts", if hide { IconName::Eye } else { IconName::EyeOff }, if hide { "显示图表" } else { "隐藏图表" })
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -226,7 +227,13 @@ impl Home {
             });
 
         let stats = (self.page == Page::Stacks && !gated).then(|| self.summary());
+        let scroll_header = self.page == Page::Overview && !gated;
 
+        let inner: Vec<AnyElement> = if scroll_header {
+            vec![div().id("overview-scroll").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().child(header).child(body).into_any_element()]
+        } else {
+            vec![header.into_any_element(), stats.map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()), body]
+        };
         div()
             .flex_1()
             .min_w_0()
@@ -235,9 +242,8 @@ impl Home {
             .flex_col()
             .px(px(CONTENT_PAD))
             .relative()
-            .child(header)
-            .children(stats)
-            .child(body)
+            // 概览页的页头跟着内容一起滚动,其他页的页头固定在上面
+            .children(inner)
             .children(self.dock_overlays(cx))
     }
 

@@ -487,6 +487,9 @@ struct Shared {
     steps: Arc<Mutex<Vec<Step>>>,
     snapshot: Mutex<Option<Arc<Snapshot>>>,
     problem: Mutex<Option<Problem>>,
+    /// 服务器资源监控的最新读数(`monitor.rs`)和不能监控的原因
+    monitor: Mutex<Option<Arc<crate::monitor::MonSnapshot>>>,
+    monitor_err: Mutex<Option<String>>,
     /// 正在进行的操作,键是 `动作:目标`
     busy: Mutex<HashSet<String>>,
     notice: Mutex<Option<String>>,
@@ -540,6 +543,8 @@ impl Docker {
             steps: Arc::new(Mutex::new(Vec::new())),
             snapshot: Mutex::new(None),
             problem: Mutex::new(None),
+            monitor: Mutex::new(None),
+            monitor_err: Mutex::new(None),
             busy: Mutex::new(HashSet::new()),
             notice: Mutex::new(None),
             version: AtomicU64::new(1),
@@ -590,6 +595,16 @@ impl Docker {
     /// 最近一次刷新的数据;还没取到过是 None
     pub fn snapshot(&self) -> Option<Arc<Snapshot>> {
         self.sh.snapshot.lock().ok().and_then(|s| s.clone())
+    }
+
+    /// 服务器资源监控的最新读数;还没有(采样需要两次才能算出速率)是 None
+    pub fn monitor(&self) -> Option<Arc<crate::monitor::MonSnapshot>> {
+        self.sh.monitor.lock().ok().and_then(|s| s.clone())
+    }
+
+    /// 不能监控的原因(不是 Linux 等)
+    pub fn monitor_error(&self) -> Option<String> {
+        self.sh.monitor_err.lock().ok().and_then(|s| s.clone())
     }
 
     pub fn problem(&self) -> Option<Problem> {
@@ -817,6 +832,8 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
             s
         }
     };
+    // 资源监控和 Docker 互不依赖:没装 Docker 的服务器也能看到 CPU、内存、磁盘
+    tokio::spawn(monitor_task(session.clone(), sh.clone()));
     io.begin_step("检测 Docker");
     let runner = match probe(&session, conn).await {
         Ok(r) => r,
@@ -894,6 +911,41 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
     }
     drop(session);
     Ok(())
+}
+
+/// 资源监控:界面在看时每 2 秒采一次样
+async fn monitor_task(session: Arc<SshHandle<Client>>, sh: Arc<Shared>) {
+    use crate::monitor::{INTERVAL, SAMPLE_CMD, State, parse_sample};
+    let mut st = State::default();
+    let mut tick = tokio::time::interval(INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if sh.closed.load(Ordering::Relaxed) {
+            break;
+        }
+        if now_ms().saturating_sub(sh.touched.load(Ordering::Relaxed)) >= WATCH_TTL_MS {
+            continue;
+        }
+        let out = match exec(&session, SAMPLE_CMD, None, Duration::from_secs(15)).await {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        match parse_sample(&out.stdout) {
+            Ok(raw) => {
+                if let Some(snap) = st.feed(raw, Instant::now()) {
+                    *sh.monitor.lock().unwrap() = Some(Arc::new(snap));
+                    sh.bump();
+                }
+            }
+            Err(e) => {
+                let msg = if e == "unsupported" { "这台服务器不是 Linux,暂时不能监控系统资源".to_string() } else { e };
+                *sh.monitor_err.lock().unwrap() = Some(msg);
+                sh.bump();
+                break;
+            }
+        }
+    }
 }
 
 async fn run_action(r: &Runner, sh: &Shared, a: Action) {
