@@ -6,16 +6,68 @@ use super::*;
 use workspace::{NodeMode, TabKind};
 
 impl Home {
-    pub(crate) fn titlebar(&self, cx: &mut Context<Self>) -> Div {
-        self.titlebar_inner(cx, false)
+    pub(crate) fn titlebar(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        self.titlebar_inner(window, cx, false)
     }
 
     /// 接管确认框弹出时盖在遮罩上面的标题栏:透明底(下面就是遮罩),别的标签压暗且点不了,只有被申请的那个标签保持原样。
-    pub(crate) fn titlebar_spotlight(&self, cx: &mut Context<Self>) -> Div {
-        self.titlebar_inner(cx, true).absolute().top_0().left_0().right_0()
+    pub(crate) fn titlebar_spotlight(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        self.titlebar_inner(window, cx, true).absolute().top_0().left_0().right_0()
     }
 
-    fn titlebar_inner(&self, cx: &mut Context<Self>, spotlight: bool) -> Div {
+    /// Windows(自绘标题栏,系统不画按钮)和 Linux 客户端装饰的窗口:右上角自己画 最小化 / 最大化 / 关闭。
+    /// macOS 的红绿灯由系统画在左侧;Linux 服务端装饰时窗口管理器自己有标题栏,这里不画。
+    fn window_buttons(&self, window: &Window) -> Option<Div> {
+        let win = cfg!(target_os = "windows");
+        let csd = cfg!(target_os = "linux") && matches!(window.window_decorations(), Decorations::Client { .. });
+        if !win && !csd {
+            return None;
+        }
+        let sup = window.window_controls();
+        let max = window.is_maximized();
+        let btn = |id: &'static str, ic: IconName, area: WindowControlArea, close: bool| {
+            div()
+                .id(id)
+                .w(px(46.0))
+                .h_full()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(c::muted())
+                .hover(move |s| if close { s.bg(c::danger()).text_color(c::on_accent()) } else { s.bg(c::hover()).text_color(c::text()) })
+                // Windows 靠区域命中测试(系统处理点击、悬停的 Snap 布局);Linux 自己调窗口方法
+                .when(win, |d| d.window_control_area(area))
+                .when(!win, |d| {
+                    d.on_mouse_down(MouseButton::Left, |_, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        match area {
+                            WindowControlArea::Min => window.minimize_window(),
+                            WindowControlArea::Max => window.zoom_window(),
+                            _ => window.remove_window(),
+                        }
+                    })
+                })
+                .child(icon(ic, 14.0, c::muted()))
+        };
+        Some(
+            div()
+                .flex_shrink_0()
+                .h_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .when(win || sup.minimize, |d| d.child(btn("win-min", IconName::WindowMinimize, WindowControlArea::Min, false)))
+                .when(win || sup.maximize, |d| d.child(btn("win-max", if max { IconName::WindowRestore } else { IconName::WindowMaximize }, WindowControlArea::Max, false)))
+                .child(btn("win-close", IconName::WindowClose, WindowControlArea::Close, true)),
+        )
+    }
+
+    fn titlebar_inner(&self, window: &mut Window, cx: &mut Context<Self>, spotlight: bool) -> Div {
         let active = self.workspace.active;
 
         let tab = |ix: usize, cx: &mut Context<Self>| {
@@ -170,6 +222,39 @@ impl Home {
         let pinned = tab(0, cx);
         let rest: Vec<_> = (1..self.workspace.tabs.len()).map(|ix| tab(ix, cx)).collect();
 
+        // 最左侧:logo + 名称(不可点;Windows 上也算拖动区域)
+        let brand = div()
+            .id("titlebar-brand")
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .pr(px(14.0))
+            .window_control_area(WindowControlArea::Drag)
+            .child(gpui::img("logo/otter.png").size(px(24.0)).flex_shrink_0())
+            .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::BOLD).text_color(c::text()).child("Otter"));
+        let buttons = self.window_buttons(window);
+        let has_buttons = buttons.is_some();
+        // 左边:macOS 给红绿灯留位置;其他系统和内容区对齐
+        let pad_l = if cfg!(target_os = "macos") { TITLEBAR_PAD_L } else { CONTENT_PAD };
+        // 标题栏的空白处可以拖动窗口:Windows 用命中区域(不能罩住标签,否则标签点不了),Linux 调 start_window_move
+        let drag = div()
+            .id("titlebar-drag")
+            .flex_1()
+            .min_w(px(12.0))
+            .h_full()
+            .window_control_area(WindowControlArea::Drag)
+            .when(cfg!(target_os = "linux"), |d| {
+                d.on_mouse_down(MouseButton::Left, |e, window, _| {
+                    if e.click_count >= 2 {
+                        window.zoom_window();
+                    } else {
+                        window.start_window_move();
+                    }
+                })
+            });
         div()
             .flex()
             .flex_row()
@@ -177,13 +262,15 @@ impl Home {
             .gap(px(4.0))
             .h(px(TITLEBAR_H))
             .flex_shrink_0()
-            .pl(px(TITLEBAR_PAD_L))
-            .pr(px(CONTENT_PAD))
+            .pl(px(pad_l))
+            .pr(px(if has_buttons { 0.0 } else { CONTENT_PAD }))
+            .child(brand)
             .child(pinned)
             .child(div().w(px(8.0)).flex_shrink_0())
             .child(div().id("tabs").flex().flex_row().items_center().gap(px(4.0)).min_w_0().overflow_x_scroll().children(rest))
-            .child(div().flex_1().min_w(px(12.0)))
-            .child(div().flex().flex_row().items_center().when(spotlight, |d| d.opacity(0.4)).children(self.mode_switch(cx)).children(self.update_button(cx)))
+            .child(drag)
+            .child(div().flex().flex_row().items_center().when(has_buttons, |d| d.pr(px(8.0))).when(spotlight, |d| d.opacity(0.4)).children(self.mode_switch(cx)).children(self.update_button(cx)))
+            .children(buttons)
     }
 
     /// 标题栏最右侧的更新按钮:发现新版本时出现一个小的下载图标,点一下直接更新。

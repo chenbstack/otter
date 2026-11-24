@@ -330,7 +330,7 @@ impl Render for Home {
         self.sync_docker(window, cx);
         self.sync_os(cx);
         self.sync_last_connected();
-        let titlebar = self.titlebar(cx);
+        let titlebar = self.titlebar(window, cx);
         let active_kind = self.workspace.active.map(|a| &self.workspace.tabs[a].kind);
         let mode = self.workspace.active.map(|a| self.workspace.tabs[a].mode);
         let on_node_tab = matches!(active_kind, Some(workspace::TabKind::Node(_)));
@@ -379,7 +379,7 @@ impl Render for Home {
             .children(dock_layer)
             .children(dialog)
             // 接管确认框弹出时,标题栏盖在遮罩上面,让被申请的标签保持醒目
-            .children(if self.takeover_prompts.is_empty() { None } else { Some(self.titlebar_spotlight(cx)) })
+            .children(if self.takeover_prompts.is_empty() { None } else { Some(self.titlebar_spotlight(window, cx)) })
             .children(self.tab_menu_overlay(cx))
             .children(self.node_menu_overlay(cx))
     }

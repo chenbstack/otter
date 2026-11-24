@@ -9,6 +9,7 @@ use gpui_kit::assets::AllAssets;
 pub struct AppAssets;
 
 const OS_ICONS: &[(&str, &[u8])] = &[
+    ("logo/otter.png", include_bytes!("../assets/logo/otter-96.png")),
     ("os/ubuntu.svg", include_bytes!("../assets/os/ubuntu.svg")),
     ("os/debian.svg", include_bytes!("../assets/os/debian.svg")),
     ("os/centos.svg", include_bytes!("../assets/os/centos.svg")),
