@@ -438,6 +438,14 @@ pub enum Action {
     PruneImages,
     /// 清理所有没被容器用到的存储卷(`docker volume prune`)
     PruneVolumes,
+    /// 把内容写进 `/etc/docker/daemon.json`(先备份,校验通过才替换)
+    SaveDaemon(String),
+    /// 同上,写完重启 Docker 让配置生效
+    SaveRestartDaemon(String),
+    /// 退出某个镜像仓库的登录(`docker logout`),参数是仓库地址
+    Logout(String),
+    /// 确认把 HTTP 仓库加进 insecure-registries、重启 Docker,然后用暂存的凭据登录
+    ConfirmInsecure(String),
 }
 
 impl Action {
@@ -453,13 +461,18 @@ impl Action {
             Action::RemoveVolume(n) => v(&["volume", "rm"], n),
             Action::PruneImages => ["image", "prune", "-a", "-f"].iter().map(|s| s.to_string()).collect(),
             Action::PruneVolumes => ["volume", "prune", "-f"].iter().map(|s| s.to_string()).collect(),
+            // 走 `run_daemon`,不经过 docker 命令
+            Action::SaveDaemon(_) | Action::SaveRestartDaemon(_) => Vec::new(),
+            Action::Logout(h) => v(&["logout"], h),
+            Action::ConfirmInsecure(_) => Vec::new(),
         }
     }
     pub fn target(&self) -> &str {
         match self {
-            Action::Start(n) | Action::Stop(n) | Action::Restart(n) | Action::Remove(n) | Action::Pull(n) | Action::RemoveImage(n) | Action::RemoveVolume(n) => n,
+            Action::Start(n) | Action::Stop(n) | Action::Restart(n) | Action::Remove(n) | Action::Pull(n) | Action::RemoveImage(n) | Action::RemoveVolume(n) | Action::Logout(n) | Action::ConfirmInsecure(n) => n,
             Action::PruneImages => "未使用的镜像",
             Action::PruneVolumes => "未使用的存储卷",
+            Action::SaveDaemon(_) | Action::SaveRestartDaemon(_) => "daemon.json",
         }
     }
     fn verb(&self) -> &'static str {
@@ -473,6 +486,10 @@ impl Action {
             Action::RemoveVolume(_) => "删除存储卷",
             Action::PruneImages => "清理镜像",
             Action::PruneVolumes => "清理存储卷",
+            Action::SaveDaemon(_) => "保存配置",
+            Action::SaveRestartDaemon(_) => "保存并重启 Docker",
+            Action::Logout(_) => "退出登录",
+            Action::ConfirmInsecure(_) => "启用 HTTP 仓库",
         }
     }
 }
@@ -489,6 +506,14 @@ enum Sudo {
 enum Cmd {
     Refresh,
     Act(Action),
+    /// 读服务器上的 daemon.json
+    LoadDaemon,
+    /// 读已登录的镜像仓库
+    LoadRegistries,
+    /// 登录镜像仓库;密码只走 stdin,不进命令行和日志
+    Login { registry: String, user: String, pass: zeroize::Zeroizing<String> },
+    /// 登录 HTTP 仓库:daemon.json 里没有它时先向用户确认
+    LoginHttp { registry: String, user: String, pass: zeroize::Zeroizing<String> },
 }
 
 struct Shared {
@@ -503,6 +528,14 @@ struct Shared {
     /// 正在进行的操作,键是 `动作:目标`
     busy: Mutex<HashSet<String>>,
     notice: Mutex<Option<String>>,
+    /// 读到的 daemon.json:(文件是否存在, 内容) 或失败原因;界面取走后清空
+    daemon: Mutex<Option<Result<(bool, String), String>>>,
+    /// 读到的已登录仓库;界面取走后清空
+    registries: Mutex<Option<Result<Vec<RegAuth>, String>>>,
+    /// 等用户确认的 HTTP 仓库登录:(仓库, 用户名, 密码),确认或取消后清掉
+    pending_login: Mutex<Option<(String, String, zeroize::Zeroizing<String>)>>,
+    /// 需要向用户确认的 HTTP 仓库地址;界面取走后清空
+    insecure_ask: Mutex<Option<String>>,
     /// 界面每次需要重绘时递增
     version: AtomicU64,
     /// 界面最后一次表示「我还在看」的时间(毫秒时间戳);太久没人看就暂停轮询
@@ -557,6 +590,10 @@ impl Docker {
             monitor_err: Mutex::new(None),
             busy: Mutex::new(HashSet::new()),
             notice: Mutex::new(None),
+            daemon: Mutex::new(None),
+            registries: Mutex::new(None),
+            pending_login: Mutex::new(None),
+            insecure_ask: Mutex::new(None),
             version: AtomicU64::new(1),
             touched: AtomicU64::new(now_ms()),
             want_volume_sizes: AtomicBool::new(false),
@@ -640,6 +677,45 @@ impl Docker {
         let _ = self.cmd.send(Cmd::Refresh);
     }
 
+    /// 请求读取 daemon.json;结果用 `take_daemon` 取
+    pub fn load_daemon(&self) {
+        let _ = self.cmd.send(Cmd::LoadDaemon);
+    }
+
+    pub fn take_daemon(&self) -> Option<Result<(bool, String), String>> {
+        self.sh.daemon.lock().ok().and_then(|mut d| d.take())
+    }
+
+    /// 请求读取已登录的仓库;结果用 `take_registries` 取
+    pub fn load_registries(&self) {
+        let _ = self.cmd.send(Cmd::LoadRegistries);
+    }
+
+    pub fn take_registries(&self) -> Option<Result<Vec<RegAuth>, String>> {
+        self.sh.registries.lock().ok().and_then(|mut d| d.take())
+    }
+
+    /// 登录镜像仓库(`registry` 留空是 Docker Hub)
+    pub fn login(&self, registry: String, user: String, pass: String) {
+        let _ = self.cmd.send(Cmd::Login { registry, user, pass: zeroize::Zeroizing::new(pass) });
+    }
+
+    /// 登录 HTTP 仓库。daemon.json 里还没有它时不会直接登录,而是让 `take_insecure_ask` 返回它,等用户确认
+    pub fn login_http(&self, registry: String, user: String, pass: String) {
+        let _ = self.cmd.send(Cmd::LoginHttp { registry, user, pass: zeroize::Zeroizing::new(pass) });
+    }
+
+    pub fn take_insecure_ask(&self) -> Option<String> {
+        self.sh.insecure_ask.lock().ok().and_then(|mut d| d.take())
+    }
+
+    /// 用户取消了 HTTP 仓库的确认:丢掉暂存的凭据
+    pub fn drop_pending_login(&self) {
+        if let Ok(mut p) = self.sh.pending_login.lock() {
+            *p = None;
+        }
+    }
+
     pub fn act(&self, a: Action) {
         let _ = self.cmd.send(Cmd::Act(a));
     }
@@ -693,17 +769,277 @@ struct Runner {
 
 impl Runner {
     async fn docker(&self, args: &[String], timeout: Duration) -> Result<Output, String> {
+        self.docker_in(args, None, timeout).await
+    }
+
+    /// 跑 docker 命令,`input` 通过 stdin 交给它(`docker login --password-stdin` 用)。走 sudo 且要密码时,sudo 先读走第一行密码,剩下的才是命令的输入。
+    async fn docker_in(&self, args: &[String], input: Option<&str>, timeout: Duration) -> Result<Output, String> {
         let quoted = args.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
         match self.sudo {
-            Sudo::No => exec(&self.session, &format!("docker {quoted}"), None, timeout).await,
-            Sudo::Passwordless => exec(&self.session, &format!("sudo -n docker {quoted}"), None, timeout).await,
+            Sudo::No => exec(&self.session, &format!("docker {quoted}"), input.map(str::as_bytes), timeout).await,
+            Sudo::Passwordless => exec(&self.session, &format!("sudo -n docker {quoted}"), input.map(str::as_bytes), timeout).await,
             Sudo::WithPassword => {
-                let pw = format!("{}\n", self.password.as_deref().map(String::as_str).unwrap_or(""));
-                let out = exec(&self.session, &format!("sudo -S -p '' docker {quoted}"), Some(pw.as_bytes()), timeout).await;
-                out
+                let pw = self.password.as_deref().map(String::as_str).unwrap_or("");
+                let data = zeroize::Zeroizing::new(format!("{pw}\n{}", input.unwrap_or("")));
+                exec(&self.session, &format!("sudo -S -p '' docker {quoted}"), Some(data.as_bytes()), timeout).await
             }
         }
     }
+}
+
+impl Runner {
+    /// 以 root 身份跑一段 shell:已经是 root 就直接跑,否则走 sudo(免密,或用节点保存的密码)。`input` 通过 stdin 传给脚本。
+    async fn root(&self, script: &str, input: Option<&str>, timeout: Duration) -> Result<Output, String> {
+        let q = shell_quote(script);
+        match self.sudo {
+            Sudo::WithPassword => {
+                let pw = self.password.as_deref().map(String::as_str).unwrap_or("");
+                let data = format!("{pw}\n{}", input.unwrap_or(""));
+                exec(&self.session, &format!("sudo -S -p '' sh -c {q}"), Some(data.as_bytes()), timeout).await
+            }
+            _ => exec(&self.session, &format!("if [ \"$(id -u)\" = 0 ]; then sh -c {q}; else sudo -n sh -c {q}; fi"), input.map(str::as_bytes), timeout).await,
+        }
+    }
+}
+
+/// 一个已登录的镜像仓库。只保留地址和用户名,凭据本身不会读进界面。
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegAuth {
+    pub host: String,
+    /// 用户名;凭据由系统钥匙串之类的 helper 保存时拿不到
+    pub user: Option<String>,
+}
+
+/// 把 `auth` 字段(base64 的 `用户名:密码`)里的用户名取出来,密码部分直接丢弃
+fn auth_user(auth: &str) -> Option<String> {
+    let mut buf: Vec<u8> = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for ch in auth.bytes() {
+        let v = match ch {
+            b'A'..=b'Z' => ch - b'A',
+            b'a'..=b'z' => ch - b'a' + 26,
+            b'0'..=b'9' => ch - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' | b'\n' | b'\r' | b' ' => continue,
+            _ => return None,
+        };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            buf.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    let colon = buf.iter().position(|b| *b == b':')?;
+    String::from_utf8(buf[..colon].to_vec()).ok().filter(|u| !u.is_empty())
+}
+
+/// 解析 `~/.docker/config.json` 里登录过的仓库(`auths` 里的每一项,外加 credHelpers 里单独指定的)。内容为空表示没登录过。
+pub fn parse_registries(text: &str) -> Result<Vec<RegAuth>, String> {
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("config.json 不是合法的 JSON:{e}"))?;
+    let mut out: Vec<RegAuth> = Vec::new();
+    if let Some(auths) = v.get("auths").and_then(|a| a.as_object()) {
+        for (host, e) in auths {
+            let user = e.get("auth").and_then(|a| a.as_str()).and_then(auth_user).or_else(|| e.get("username").and_then(|u| u.as_str()).filter(|u| !u.is_empty()).map(str::to_string));
+            out.push(RegAuth { host: host.clone(), user });
+        }
+    }
+    if let Some(h) = v.get("credHelpers").and_then(|a| a.as_object()) {
+        for host in h.keys() {
+            if !out.iter().any(|r| &r.host == host) {
+                out.push(RegAuth { host: host.clone(), user: None });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.host.cmp(&b.host));
+    Ok(out)
+}
+
+/// 读已登录的仓库:和 docker 命令用同一个身份(走 sudo 时是 root 的配置)
+async fn load_registries(r: &Runner, sh: &Shared) {
+    let script = r#"f="${DOCKER_CONFIG:-$HOME/.docker}/config.json"; [ -f "$f" ] && cat "$f"; true"#;
+    let out = match r.sudo {
+        Sudo::No => exec(&r.session, script, None, Duration::from_secs(15)).await,
+        _ => r.root(r#"f=/root/.docker/config.json; [ -f "$f" ] && cat "$f"; true"#, None, Duration::from_secs(15)).await,
+    };
+    let res = match out {
+        Ok(o) if o.code == 0 => parse_registries(&o.stdout),
+        Ok(o) => Err(format!("读取失败:{}", o.stderr.trim().lines().last().unwrap_or("未知错误"))),
+        Err(e) => Err(e),
+    };
+    *sh.registries.lock().unwrap() = Some(res);
+    sh.bump();
+}
+
+/// 登录仓库:密码走 stdin(`--password-stdin`),不出现在命令行、进程列表和日志里
+async fn run_login(r: &Runner, sh: &Shared, registry: &str, user: &str, pass: &str) {
+    let label = if registry.is_empty() { "Docker Hub" } else { registry };
+    let key = format!("登录:{label}");
+    if (!registry.is_empty() && !safe_name(registry)) || user.is_empty() || user.chars().any(|c| c.is_control()) || pass.is_empty() || pass.contains(['\n', '\r']) {
+        *sh.notice.lock().unwrap() = Some("登录失败:仓库地址、用户名或密码里有不支持的字符".into());
+        sh.bump();
+        return;
+    }
+    sh.busy.lock().unwrap().insert(key.clone());
+    sh.bump();
+    let mut args: Vec<String> = ["login", "-u", user, "--password-stdin"].iter().map(|s| s.to_string()).collect();
+    if !registry.is_empty() {
+        args.push(registry.to_string());
+    }
+    let input = zeroize::Zeroizing::new(format!("{pass}\n"));
+    let res = r.docker_in(&args, Some(&input), Duration::from_secs(60)).await;
+    sh.busy.lock().unwrap().remove(&key);
+    let msg = match res {
+        Ok(o) if o.code == 0 => format!("已登录 {label}"),
+        Ok(o) => {
+            let err = o.stderr.lines().find(|l| l.to_lowercase().contains("error")).or_else(|| o.stderr.trim().lines().last()).unwrap_or("未知错误");
+            format!("登录 {label} 失败:{}", err.trim())
+        }
+        Err(e) => format!("登录 {label} 失败:{e}"),
+    };
+    logs::push(logs::Level::Info, "Docker", msg.clone());
+    *sh.notice.lock().unwrap() = Some(msg);
+    load_registries(r, sh).await;
+}
+
+/// 读 daemon.json(文件不存在算「还没有配置」,不是错误)
+async fn load_daemon(r: &Runner, sh: &Shared) {
+    let script = format!("if [ -f {p} ]; then cat {p}; else echo __OTTER_NOFILE__; fi", p = crate::daemon_conf::PATH);
+    let res = match r.root(&script, None, Duration::from_secs(15)).await {
+        Ok(o) if o.code == 0 => {
+            if o.stdout.trim() == "__OTTER_NOFILE__" { Ok((false, String::new())) } else { Ok((true, o.stdout)) }
+        }
+        Ok(o) => Err(format!("读取失败:{}", o.stderr.trim().lines().last().unwrap_or("需要 root 权限(免密 sudo,或在节点里保存密码)"))),
+        Err(e) => Err(e),
+    };
+    *sh.daemon.lock().unwrap() = Some(res);
+    sh.bump();
+}
+
+/// 写 daemon.json:先备份成 `.bak`,新内容写到临时文件,dockerd 支持 `--validate` 时先校验,通过才替换;`restart` 时再重启 Docker
+async fn run_daemon(r: &Runner, sh: &Shared, text: &str, restart: bool, verb: &'static str) {
+    let key = format!("{verb}:daemon.json");
+    sh.busy.lock().unwrap().insert(key.clone());
+    sh.bump();
+    let mut res = write_daemon(r, text).await;
+    if res.is_ok() && restart {
+        res = restart_docker(r).await.map_err(|e| format!("配置已保存,但重启 Docker 失败:{e}"));
+    }
+    sh.busy.lock().unwrap().remove(&key);
+    let msg = match res {
+        Ok(()) => format!("已{verb}"),
+        Err(e) => format!("{verb}失败:{e}"),
+    };
+    logs::push(logs::Level::Info, "Docker", msg.clone());
+    *sh.notice.lock().unwrap() = Some(msg);
+    load_daemon(r, sh).await;
+}
+
+/// 写 daemon.json:先备份成 `.bak`,新内容写到临时文件,dockerd 支持 `--validate` 时先校验,通过才替换
+async fn write_daemon(r: &Runner, text: &str) -> Result<(), String> {
+    let p = crate::daemon_conf::PATH;
+    let script = format!(
+        "set -e; mkdir -p /etc/docker; [ -f {p} ] && cp -p {p} {p}.bak || true; cat > {p}.otter-new; \
+         if command -v dockerd >/dev/null 2>&1 && dockerd --help 2>&1 | grep -q -- --validate; then \
+           dockerd --validate --config-file={p}.otter-new >/dev/null 2>&1 || {{ rm -f {p}.otter-new; echo '配置没通过 dockerd 的校验,没有改动' >&2; exit 1; }}; fi; \
+         mv {p}.otter-new {p}"
+    );
+    match r.root(&script, Some(text), Duration::from_secs(30)).await {
+        Ok(o) if o.code == 0 => Ok(()),
+        Ok(o) => Err(o.stderr.trim().lines().last().unwrap_or("需要 root 权限(免密 sudo,或在节点里保存密码)").to_string()),
+        Err(e) => Err(e),
+    }
+}
+
+async fn restart_docker(r: &Runner) -> Result<(), String> {
+    match r.root("systemctl restart docker || service docker restart", None, Duration::from_secs(120)).await {
+        Ok(o) if o.code == 0 => Ok(()),
+        Ok(o) => Err(o.stderr.trim().lines().last().unwrap_or("未知错误").to_string()),
+        Err(e) => Err(e),
+    }
+}
+
+/// 读 daemon.json 的原文;文件不存在是空串
+async fn read_daemon_text(r: &Runner) -> Result<String, String> {
+    let script = format!("if [ -f {p} ]; then cat {p}; fi", p = crate::daemon_conf::PATH);
+    match r.root(&script, None, Duration::from_secs(15)).await {
+        Ok(o) if o.code == 0 => Ok(o.stdout),
+        Ok(o) => Err(format!("读取 daemon.json 失败:{}", o.stderr.trim().lines().last().unwrap_or("需要 root 权限(免密 sudo,或在节点里保存密码)"))),
+        Err(e) => Err(e),
+    }
+}
+
+/// 登录 HTTP 仓库:先看 daemon.json 的 insecure-registries 里有没有它。有就直接登录;没有就把凭据暂存,让界面去向用户确认「加入并重启 Docker」。
+async fn run_login_http(r: &Runner, sh: &Shared, registry: &str, user: &str, pass: zeroize::Zeroizing<String>) {
+    if registry.is_empty() || !safe_name(registry) || registry.contains("://") {
+        *sh.notice.lock().unwrap() = Some("登录失败:HTTP 仓库要填 主机:端口,不带 http://".into());
+        sh.bump();
+        return;
+    }
+    match read_daemon_text(r).await.and_then(|t| crate::daemon_conf::has_insecure(&t, registry)) {
+        Ok(true) => run_login(r, sh, registry, user, &pass).await,
+        Ok(false) => {
+            *sh.pending_login.lock().unwrap() = Some((registry.to_string(), user.to_string(), pass));
+            *sh.insecure_ask.lock().unwrap() = Some(registry.to_string());
+            sh.bump();
+        }
+        Err(e) => {
+            *sh.notice.lock().unwrap() = Some(format!("登录 {registry} 失败:{e}"));
+            sh.bump();
+        }
+    }
+}
+
+/// 用户确认后:把仓库加进 insecure-registries → 重启 Docker → 等它起来 → 登录
+async fn run_insecure(r: &Runner, sh: &Shared, host: &str) {
+    let pending = sh.pending_login.lock().unwrap().take();
+    let Some((registry, user, pass)) = pending.filter(|p| p.0 == host) else {
+        *sh.notice.lock().unwrap() = Some("登录请求已过期,请重新添加仓库".into());
+        sh.bump();
+        return;
+    };
+    let key = format!("启用 HTTP 仓库:{host}");
+    sh.busy.lock().unwrap().insert(key.clone());
+    sh.bump();
+    let say = |m: String| {
+        *sh.notice.lock().unwrap() = Some(m);
+        sh.bump();
+    };
+    let step = async {
+        let text = read_daemon_text(r).await?;
+        let new = crate::daemon_conf::add_insecure(&text, host)?;
+        write_daemon(r, &new).await?;
+        say("已写入 daemon.json,正在重启 Docker…".into());
+        restart_docker(r).await.map_err(|e| format!("配置已保存,但重启 Docker 失败:{e}"))?;
+        // 等 Docker 重新可用
+        let ver: Vec<String> = ["version", "--format", "{{.Server.Version}}"].iter().map(|s| s.to_string()).collect();
+        for _ in 0..30 {
+            if matches!(r.docker(&ver, Duration::from_secs(10)).await, Ok(o) if o.code == 0) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        Err("Docker 重启后一直没有恢复".to_string())
+    };
+    let res: Result<(), String> = step.await;
+    sh.busy.lock().unwrap().remove(&key);
+    match res {
+        Ok(()) => {
+            logs::push(logs::Level::Info, "Docker", format!("已把 {host} 加入 insecure-registries 并重启 Docker"));
+            run_login(r, sh, &registry, &user, &pass).await;
+        }
+        Err(e) => {
+            let msg = format!("启用 HTTP 仓库失败:{e}");
+            logs::push(logs::Level::Info, "Docker", msg.clone());
+            say(msg);
+        }
+    }
+    load_daemon(r, sh).await;
 }
 
 /// 把 docker 的错误输出归类成界面能解释的问题
@@ -879,6 +1215,26 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
                         pol.last_ps = None;
                         pol.last_stats = None;
                     }
+                    Cmd::LoadDaemon => {
+                        let (r, sh2) = (runner.clone(), sh.clone());
+                        tokio::spawn(async move { load_daemon(&r, &sh2).await });
+                        continue;
+                    }
+                    Cmd::LoadRegistries => {
+                        let (r, sh2) = (runner.clone(), sh.clone());
+                        tokio::spawn(async move { load_registries(&r, &sh2).await });
+                        continue;
+                    }
+                    Cmd::Login { registry, user, pass } => {
+                        let (r, sh2) = (runner.clone(), sh.clone());
+                        tokio::spawn(async move { run_login(&r, &sh2, &registry, &user, &pass).await });
+                        continue;
+                    }
+                    Cmd::LoginHttp { registry, user, pass } => {
+                        let (r, sh2) = (runner.clone(), sh.clone());
+                        tokio::spawn(async move { run_login_http(&r, &sh2, &registry, &user, pass).await });
+                        continue;
+                    }
                     Cmd::Act(a) => {
                         let (r, sh2) = (runner.clone(), sh.clone());
                         tokio::spawn(async move { run_action(&r, &sh2, a).await });
@@ -959,6 +1315,14 @@ async fn monitor_task(session: Arc<SshHandle<Client>>, sh: Arc<Shared>) {
 }
 
 async fn run_action(r: &Runner, sh: &Shared, a: Action) {
+    if let Action::ConfirmInsecure(host) = &a {
+        run_insecure(r, sh, host).await;
+        return;
+    }
+    if let Action::SaveDaemon(text) | Action::SaveRestartDaemon(text) = &a {
+        run_daemon(r, sh, text, matches!(a, Action::SaveRestartDaemon(_)), a.verb()).await;
+        return;
+    }
     let prune = matches!(a, Action::PruneImages | Action::PruneVolumes);
     if !prune && !safe_name(a.target()) {
         *sh.notice.lock().unwrap() = Some(format!("{}失败:名称「{}」含有不支持的字符", a.verb(), a.target()));
@@ -987,6 +1351,9 @@ async fn run_action(r: &Runner, sh: &Shared, a: Action) {
     logs::push(logs::Level::Info, "Docker", msg.clone());
     *sh.notice.lock().unwrap() = Some(msg);
     sh.bump();
+    if matches!(a, Action::Logout(_)) {
+        load_registries(r, sh).await;
+    }
 }
 
 // ---- 演示数据(--demo / --shot):和真实快照同一个结构,界面只读 Snapshot ----------------
@@ -1073,6 +1440,22 @@ mod tests {
         assert_eq!(st.net, 4600);
         assert_eq!(st.disk, 8190);
         assert!(parse_stats("a\tb").is_empty());
+    }
+
+    #[::core::prelude::v1::test]
+    fn parses_registry_logins() {
+        // "alice:secret" → YWxpY2U6c2VjcmV0
+        let cfg = r#"{"auths":{"https://index.docker.io/v1/":{"auth":"YWxpY2U6c2VjcmV0"},"ghcr.io":{},"reg.example.com:5000":{"username":"bob"}},"credHelpers":{"gcr.io":"gcloud"}}"#;
+        let r = parse_registries(cfg).unwrap();
+        let get = |h: &str| r.iter().find(|x| x.host == h).unwrap().user.clone();
+        assert_eq!(get("https://index.docker.io/v1/").as_deref(), Some("alice"));
+        assert_eq!(get("ghcr.io"), None);
+        assert_eq!(get("reg.example.com:5000").as_deref(), Some("bob"));
+        assert_eq!(get("gcr.io"), None);
+        assert_eq!(r.len(), 4);
+        assert!(parse_registries("").unwrap().is_empty());
+        assert!(parse_registries("{").is_err());
+        assert_eq!(auth_user("!!!"), None);
     }
 
     #[::core::prelude::v1::test]

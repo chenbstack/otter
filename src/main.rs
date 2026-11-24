@@ -11,7 +11,9 @@ mod ipc;
 mod ipc_server;
 mod platform;
 mod takeover;
+mod daemon_conf;
 mod docker;
+mod json_hl;
 mod group_form;
 mod import;
 mod files;
@@ -53,15 +55,19 @@ enum Page {
     Stacks,
     Images,
     Volumes,
+    Registry,
+    Config,
 }
 
 impl Page {
-    const ALL: [Page; 5] = [
+    const ALL: [Page; 7] = [
         Page::Overview,
         Page::Containers,
         Page::Stacks,
         Page::Images,
         Page::Volumes,
+        Page::Registry,
+        Page::Config,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -70,6 +76,8 @@ impl Page {
             Page::Stacks => "堆栈",
             Page::Images => "镜像",
             Page::Volumes => "存储卷",
+            Page::Registry => "仓库",
+            Page::Config => "配置",
         }
     }
     fn icon(self) -> IconName {
@@ -79,6 +87,8 @@ impl Page {
             Page::Stacks => IconName::Layers,
             Page::Images => IconName::Image,
             Page::Volumes => IconName::HardDrive,
+            Page::Registry => IconName::KeyRound,
+            Page::Config => IconName::FileCog,
         }
     }
 }
@@ -348,7 +358,7 @@ impl Render for Home {
 
 fn main() {
     update::wait_for_old_process();
-    // 调试参数:--shot <png> --node <g>,<n> --tabs n:<节点名>(容器模式),t:<节点名>(终端模式),f:<节点名>[@堆栈/服务](SFTP 模式),... --active <k> --expand <k> --plain --page <0..4> --add(打开添加节点弹窗) --files <host|堆栈/服务> --fcd <目录> --fsel <名字>
+    // 调试参数:--shot <png> --node <g>,<n> --tabs n:<节点名>(容器模式),t:<节点名>(终端模式),f:<节点名>[@堆栈/服务](SFTP 模式),... --active <k> --expand <k> --plain --page <0..6> --add(打开添加节点弹窗) --files <host|堆栈/服务> --fcd <目录> --fsel <名字>
     let args: Vec<String> = std::env::args().collect();
     let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let shot = arg("--shot");

@@ -26,15 +26,15 @@ pub(crate) enum SortKey {
 
 /// 等用户确认的危险操作(弹窗用删除确认框 `Home::delete_confirm` 渲染)
 pub(crate) struct DockAsk {
-    title: &'static str,
-    tile: IconName,
-    name: String,
-    detail: &'static str,
-    body: &'static str,
-    label: &'static str,
-    action: Action,
+    pub(super) title: &'static str,
+    pub(super) tile: IconName,
+    pub(super) name: String,
+    pub(super) detail: &'static str,
+    pub(super) body: &'static str,
+    pub(super) label: &'static str,
+    pub(super) action: Action,
     /// 会被影响的对象清单(清理镜像时列出未使用的镜像),为空就不列
-    list: Vec<String>,
+    pub(super) list: Vec<String>,
 }
 
 pub(crate) struct DockUi {
@@ -43,9 +43,11 @@ pub(crate) struct DockUi {
     search: Option<Entity<InputState>>,
     pull: Option<Entity<InputState>>,
     pull_open: bool,
+    pub conf: super::daemonpage::ConfUi,
+    pub reg: super::registrypage::RegUi,
     sort: (SortKey, bool),
     confirm: Option<DockAsk>,
-    notice: Option<(SharedString, Instant)>,
+    pub(super) notice: Option<(SharedString, Instant)>,
     polling: bool,
     /// 上次读到的 `Docker::version`
     seen: u64,
@@ -61,7 +63,7 @@ pub(crate) struct DockUi {
 
 impl DockUi {
     pub fn new() -> Self {
-        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, sort: (SortKey::Name, true), confirm: None, notice: None, polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
+        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, conf: Default::default(), reg: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
     }
 }
 
@@ -69,12 +71,12 @@ pub(super) fn small(s: impl Into<SharedString>, color: Rgba) -> Div {
     div().text_size(px(t::TYPE_CAPTION)).text_color(color).child(s.into())
 }
 
-fn head(label: &'static str) -> Div {
+pub(super) fn head(label: &'static str) -> Div {
     div().text_size(px(t::TYPE_CAPTION)).font_weight(FontWeight::SEMIBOLD).text_color(c::ghost()).child(label)
 }
 
 /// 表格容器:表头 + 可滚动的行
-fn table(id: &'static str, header: Div, rows: Vec<Stateful<Div>>) -> Div {
+pub(super) fn table(id: &'static str, header: Div, rows: Vec<Stateful<Div>>) -> Div {
     div()
         .flex_1()
         .min_h_0()
@@ -88,11 +90,11 @@ fn table(id: &'static str, header: Div, rows: Vec<Stateful<Div>>) -> Div {
         .child(div().id(id).flex_1().min_h_0().overflow_y_scroll().children(rows))
 }
 
-fn row(id: (&'static str, usize)) -> Stateful<Div> {
+pub(super) fn row(id: (&'static str, usize)) -> Stateful<Div> {
     div().id(id).h(px(44.0)).flex_shrink_0().flex().flex_row().items_center().gap(px(12.0)).px(px(16.0)).border_b_1().border_color(c::border()).hover(|s| s.bg(c::field_hover()))
 }
 
-fn icon_btn(id: (&'static str, usize), ic: IconName, color: Rgba) -> Stateful<Div> {
+pub(super) fn icon_btn(id: (&'static str, usize), ic: IconName, color: Rgba) -> Stateful<Div> {
     div().id(id).size(px(26.0)).flex().items_center().justify_center().rounded(px(t::RADIUS_XS)).cursor_pointer().hover(|s| s.bg(c::raised())).child(icon(ic, 14.0, color))
 }
 
@@ -149,6 +151,9 @@ impl Home {
         if self.demo {
             self.dock.snap = Arc::new(docker::demo_snapshot(&self.node().stacks));
             self.dock.mon = Some(Arc::new(crate::monitor::demo_snapshot()));
+            self.conf_sync(window, cx);
+        self.reg_sync(window, cx);
+            self.reg_sync(window, cx);
             return;
         }
         // 这个标签的终端已连上就复用它的连接;没连上等它(连接页显示终端的进度);没有终端才自己连。
@@ -185,6 +190,7 @@ impl Home {
             self.node_mut().stacks = stacks;
             self.dock.snap = s;
         }
+        self.conf_sync(window, cx);
     }
 
     /// 定时器:后台有新数据、连接状态在变、提示过期时重绘
@@ -209,6 +215,12 @@ impl Home {
     }
 
     pub(crate) fn dock_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.page == Page::Config {
+            self.conf_reload();
+        }
+        if self.page == Page::Registry {
+            self.reg_reload();
+        }
         if let Some(d) = self.workspace.active.and_then(|a| self.workspace.tabs.get(a)).and_then(|t| t.docker.as_ref()) {
             d.refresh();
         }
@@ -332,6 +344,16 @@ impl Home {
                     .into_any_element(),
             );
         }
+        if self.page == Page::Registry {
+            v.push(
+                button("reg-add", IconName::Plus, "添加仓库")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.dock.reg.open = !this.dock.reg.open;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
         if self.page == Page::Volumes {
             v.push(
                 button("dock-prune-volumes", IconName::Trash, "清理存储卷")
@@ -362,6 +384,8 @@ impl Home {
             Page::Stacks => format!("{n} 上的 Compose 项目"),
             Page::Images => format!("{n} 上的本地镜像"),
             Page::Volumes => format!("{n} 上的存储卷"),
+            Page::Registry => format!("{n} 上登录的镜像仓库"),
+            Page::Config => format!("{n} 上的 Docker 守护进程配置"),
         }
     }
 
@@ -371,6 +395,8 @@ impl Home {
             Page::Containers => self.containers_page(cx),
             Page::Images => self.images_page(cx),
             Page::Volumes => self.volumes_page(cx),
+            Page::Registry => self.registry_page(cx),
+            Page::Config => self.config_page(cx),
             Page::Stacks => div().into_any_element(),
         }
     }
@@ -393,7 +419,13 @@ impl Home {
                 ok_label: cf.label,
                 compact: true,
             };
-            v.push(self.delete_confirm("dock-confirm", spec, |this| this.dock.confirm = None, move |this, cx| {
+            v.push(self.delete_confirm("dock-confirm", spec, |this| {
+                // 取消 HTTP 仓库的确认时,后台暂存的登录凭据一并丢掉
+                if matches!(this.dock.confirm.as_ref().map(|c| &c.action), Some(Action::ConfirmInsecure(_))) {
+                    this.reg_drop_pending();
+                }
+                this.dock.confirm = None;
+            }, move |this, cx| {
                 this.dock.confirm = None;
                 this.dock_act(action.clone(), cx);
             }, cx).into_any_element());
@@ -414,12 +446,12 @@ impl Home {
         v
     }
 
-    fn ask(&mut self, ask: DockAsk, cx: &mut Context<Self>) {
+    pub(super) fn ask(&mut self, ask: DockAsk, cx: &mut Context<Self>) {
         self.dock.confirm = Some(ask);
         cx.notify();
     }
 
-    fn is_busy(&self, target: &str) -> bool {
+    pub(super) fn is_busy(&self, target: &str) -> bool {
         self.workspace.active.and_then(|a| self.workspace.tabs.get(a)).and_then(|t| t.docker.as_ref()).is_some_and(|d| d.is_busy(target))
     }
 

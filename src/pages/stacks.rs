@@ -4,7 +4,7 @@ use super::super::*;
 
 pub(crate) fn menu_count(node: &Node, snap: &crate::docker::Snapshot, page: Page) -> Option<usize> {
     match page {
-        Page::Overview => None,
+        Page::Overview | Page::Registry | Page::Config => None,
         Page::Containers => Some(snap.containers.len()),
         Page::Stacks => Some(node.stacks.len()),
         Page::Images => Some(snap.images.len()),
@@ -252,7 +252,7 @@ impl Home {
     fn docker_tabs(&self, cx: &mut Context<Self>) -> Div {
         let node = self.node();
         let mut row = div().flex().flex_row().items_center().gap(px(4.0)).pb(px(10.0)).flex_shrink_0();
-        for (i, p) in [Page::Containers, Page::Stacks, Page::Images, Page::Volumes].into_iter().enumerate() {
+        for (i, p) in [Page::Containers, Page::Stacks, Page::Images, Page::Volumes, Page::Registry, Page::Config].into_iter().enumerate() {
             let active = self.page == p;
             let count = menu_count(node, &self.dock.snap, p).filter(|n| *n > 0);
             row = row.child(
