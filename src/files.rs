@@ -127,6 +127,57 @@ fn join(dir: &str, name: &str) -> String {
     if dir == "/" { format!("/{name}") } else { format!("{dir}/{name}") }
 }
 
+/// 本机路径用系统自己的规则(Windows 是反斜杠和盘符);远程路径永远是 `/`,用上面的 `join` / `parent`。
+fn ljoin(dir: &str, name: &str) -> String {
+    Path::new(dir).join(name).to_string_lossy().into_owned()
+}
+
+fn lparent(path: &str) -> String {
+    Path::new(path).parent().map(|p| p.to_string_lossy().into_owned()).filter(|p| !p.is_empty()).unwrap_or_else(|| path.to_string())
+}
+
+/// 本机路径的面包屑:(显示名, 点进去的完整路径)。
+fn local_crumbs(path: &str) -> Vec<(String, String)> {
+    use std::path::Component;
+    let mut acc = PathBuf::new();
+    let mut out = Vec::new();
+    for comp in Path::new(path).components() {
+        acc.push(comp.as_os_str());
+        match comp {
+            Component::RootDir => {}
+            Component::Prefix(_) => out.push((comp.as_os_str().to_string_lossy().into_owned(), format!("{}{}", acc.display(), std::path::MAIN_SEPARATOR))),
+            _ => out.push((comp.as_os_str().to_string_lossy().into_owned(), acc.to_string_lossy().into_owned())),
+        }
+    }
+    out
+}
+
+/// 本机地址栏输入的解析:先展开 `~`,相对路径接在当前目录后面,再抹掉 `.` 和 `..`。
+fn local_resolve(input: &str, base: &str, home: &str) -> String {
+    use std::path::Component;
+    let input = input.trim();
+    let full = if input == "~" {
+        PathBuf::from(home)
+    } else if let Some(r) = input.strip_prefix("~/").or_else(|| input.strip_prefix("~\\")) {
+        Path::new(home).join(r)
+    } else {
+        Path::new(base).join(input)
+    };
+    let mut out = PathBuf::new();
+    for comp in full.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if out.parent().is_some() {
+                    out.pop();
+                }
+            }
+            c => out.push(c.as_os_str()),
+        }
+    }
+    out.to_string_lossy().into_owned()
+}
+
 fn parent(path: &str) -> String {
     match path.rfind('/') {
         Some(0) | None => "/".into(),
@@ -544,7 +595,7 @@ impl Files {
             selected: None,
             local: false,
             left: LeftSrv::default(),
-            lpath: PREFS.lock().ok().and_then(|p| p.0.clone()).unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".into())),
+            lpath: PREFS.lock().ok().and_then(|p| p.0.clone()).unwrap_or_else(crate::platform::home_string),
             lsel: None,
             lback: vec![],
             lfwd: vec![],
@@ -867,7 +918,7 @@ impl Home {
         }
         directories::UserDirs::new()
             .and_then(|d| d.download_dir().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Downloads"))
+            .unwrap_or_else(|| crate::platform::home_dir().join("Downloads"))
     }
 
     fn download_selected(&mut self, cx: &mut Context<Self>) {
@@ -1095,7 +1146,7 @@ impl Home {
         let m = self.files.ctx.clone().filter(|m| m.which == which)?;
         let is_dir = m.name.as_ref().is_some_and(|n| {
             if which == 1 {
-                Path::new(&join(&self.files.lpath, n)).is_dir()
+                Path::new(&ljoin(&self.files.lpath, n)).is_dir()
             } else {
                 self.listing().iter().any(|e| &e.name == n && e.kind == Kind::Dir)
             }
@@ -1165,7 +1216,7 @@ impl Home {
         match (act, name) {
             (10, Some(n)) => {
                 if which == 1 {
-                    let to = join(&self.files.lpath, &n);
+                    let to = ljoin(&self.files.lpath, &n);
                     self.local_go(to, cx);
                 } else {
                     let to = join(&self.files.path, &n);
@@ -1173,7 +1224,7 @@ impl Home {
                 }
             }
             (11, Some(n)) => {
-                let full = if which == 1 { join(&self.files.lpath, &n) } else { join(&self.files.path, &n) };
+                let full = if which == 1 { ljoin(&self.files.lpath, &n) } else { join(&self.files.path, &n) };
                 cx.write_to_clipboard(ClipboardItem::new_string(full));
                 self.files.notice = Some("已复制路径".into());
                 cx.notify();
@@ -1268,8 +1319,8 @@ impl Home {
             return;
         }
         if which == 1 {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-            let to = resolve_path(&text, &self.files.lpath, &home);
+            let home = crate::platform::home_string();
+            let to = local_resolve(&text, &self.files.lpath, &home);
             if Path::new(&to).is_dir() {
                 self.files.addr_edit = 0;
                 self.local_go(to, cx);
@@ -1321,9 +1372,9 @@ impl Home {
         let dir = self.files.lpath.clone();
         let name = (1..)
             .map(|i| if i == 1 { "新建文件夹".to_string() } else { format!("新建文件夹 {i}") })
-            .find(|n| !Path::new(&join(&dir, n)).exists())
+            .find(|n| !Path::new(&ljoin(&dir, n)).exists())
             .unwrap();
-        match std::fs::create_dir(join(&dir, &name)) {
+        match std::fs::create_dir(ljoin(&dir, &name)) {
             Ok(()) => self.files.lsel = Some(name),
             Err(e) => self.files.notice = Some(format!("创建失败:{e}").into()),
         }
@@ -1337,7 +1388,7 @@ impl Home {
             (1, 0) => self.local_mkdir(cx),
             (1, 1) => {
                 if let Some(name) = self.files.lsel.clone() {
-                    let p = PathBuf::from(join(&self.files.lpath, &name));
+                    let p = PathBuf::from(ljoin(&self.files.lpath, &name));
                     if p.is_file() || (p.is_dir() && self.sftp_real()) {
                         self.upload(vec![p], cx);
                     } else {
@@ -1478,7 +1529,7 @@ impl Home {
     fn local_pane(&self, pane_w: f32, cx: &mut Context<Self>) -> Stateful<Div> {
         let fs = &self.files;
         let path = fs.lpath.clone();
-        let up = parent(&path);
+        let up = lparent(&path);
         let query = fs.lsearch.as_ref().map(|s| s.read(cx).value().trim().to_lowercase()).unwrap_or_default();
         let mut entries: Vec<_> = read_local(&path).into_iter().filter(|e| query.is_empty() || e.0.to_lowercase().contains(&query)).collect();
         sort_local(&mut entries, fs.lsort);
@@ -1513,11 +1564,10 @@ impl Home {
                     .cursor_pointer()
                     .hover(|s| s.bg(c::hover()))
                     .child(icon(IconName::House, 13.0, c::muted()))
-                    .on_click(cx.listener(|this, _, _, cx| this.local_go(std::env::var("HOME").unwrap_or_else(|_| "/".into()), cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.local_go(crate::platform::home_string(), cx))),
             );
-        let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        for (i, sg) in segs.iter().enumerate() {
-            let to = format!("/{}", segs[..=i].join("/"));
+        let segs = local_crumbs(&path);
+        for (i, (sg, to)) in segs.iter().cloned().enumerate() {
             let last = i + 1 == segs.len();
             crumbs = crumbs.child(icon(IconName::ChevronRight, 11.0, c::ghost())).child(
                 div()
@@ -1531,7 +1581,7 @@ impl Home {
                     .cursor_pointer()
                     .text_color(if last { c::text() } else { c::muted() })
                     .hover(|s| s.bg(c::hover()).text_color(c::text()))
-                    .child(sg.to_string())
+                    .child(sg)
                     .on_click(cx.listener(move |this, _, _, cx| this.local_go(to.clone(), cx))),
             );
         }
@@ -1586,11 +1636,11 @@ impl Home {
         for (i, (name, is_dir, size, time)) in entries.into_iter().enumerate() {
             let on = fs.lsel.as_deref() == Some(name.as_str());
             let (ic, color) = if is_dir { (IconName::Folder, c::accent()) } else { (IconName::File, c::muted()) };
-            let enter = is_dir.then(|| join(&path, &name));
+            let enter = is_dir.then(|| ljoin(&path, &name));
             let n = name.clone();
             let name_r = name.clone();
             let row_w = pane_w - 16.0;
-            let drag_item = DragLocal { path: PathBuf::from(join(&path, &name)), name: name.clone(), is_dir };
+            let drag_item = DragLocal { path: PathBuf::from(ljoin(&path, &name)), name: name.clone(), is_dir };
             let drop_name = name.clone();
             rows = rows.child(
                 div()
@@ -1638,7 +1688,7 @@ impl Home {
                         let lp = path.clone();
                         d.drag_over::<DragRemote>(|s, _, _, _| s.bg(c::accent_soft())).on_drop(cx.listener(move |this, it: &DragRemote, _, cx| {
                             cx.stop_propagation();
-                            this.download_to(it, PathBuf::from(join(&lp, &drop_name)), cx);
+                            this.download_to(it, PathBuf::from(ljoin(&lp, &drop_name)), cx);
                         }))
                     })
                     .on_mouse_down(MouseButton::Right, {
@@ -2598,6 +2648,20 @@ impl Render for Tip {
 #[cfg(test)]
 mod addr_tests {
     use super::resolve_path as r;
+    #[cfg(unix)]
+    #[test]
+    fn local_path_helpers() {
+        assert_eq!(super::lparent("/a/b"), "/a");
+        assert_eq!(super::lparent("/a"), "/");
+        assert_eq!(super::lparent("/"), "/");
+        assert_eq!(super::ljoin("/", "x"), "/x");
+        assert_eq!(super::ljoin("/a", "x"), "/a/x");
+        assert_eq!(super::local_crumbs("/a/b"), vec![("a".to_string(), "/a".to_string()), ("b".to_string(), "/a/b".to_string())]);
+        assert_eq!(super::local_resolve("../c", "/a/b", "/h"), "/a/c");
+        assert_eq!(super::local_resolve("~/x", "/a", "/h"), "/h/x");
+        assert_eq!(super::local_resolve("/../..", "/a", "/h"), "/");
+    }
+
     #[test]
     fn resolve_path_cases() {
         assert_eq!(r("/etc/nginx", "/root", "/root"), "/etc/nginx");

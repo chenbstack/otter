@@ -2,13 +2,11 @@
 //! 协议是按行分隔的 JSON-RPC;连接后第一条必须是 `hello`。方法分发和只读方法在这里,
 //! 接管(授权、遮罩、输入)在 `takeover.rs`。设计见 docs/modules/ctl.md。
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::mock::NodeId;
@@ -19,10 +17,6 @@ use gpui_kit::{Context, Window};
 use crate::{Home, logs};
 
 pub const PROTOCOL: u32 = 1;
-
-pub fn sock_path() -> Option<PathBuf> {
-    crate::store::data_dir().map(|d| d.join("ctl.sock"))
-}
 
 /// 一个已握手的客户端连接。
 pub struct Client {
@@ -74,33 +68,24 @@ pub enum UiMsg {
     Closed { client_id: u64 },
 }
 
-/// 启动 socket 服务。已有另一个 Otter 在监听、或绑定失败时返回 `None`(日志里写明原因)。
+/// 启动本地接口服务。已有另一个 Otter 在监听、或绑定失败时返回 `None`(日志里写明原因)。
 pub fn start() -> Option<mpsc::UnboundedReceiver<UiMsg>> {
-    use std::os::unix::fs::PermissionsExt;
-    let path = sock_path()?;
-    let _ = std::fs::create_dir_all(path.parent()?);
-    if path.exists() {
-        // 还能连上说明另一个 Otter 正在运行,不去抢它的 socket
-        if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+    let _guard = crate::terminal::ssh::runtime().enter();
+    let mut conns = match crate::ipc::bind() {
+        Ok(c) => c,
+        Err(crate::ipc::BindError::InUse) => {
             logs::push(logs::Level::Warn, "Agent", "已有另一个 Otter 在监听本地接口,本进程不启用");
             return None;
         }
-        let _ = std::fs::remove_file(&path);
-    }
-    let _guard = crate::terminal::ssh::runtime().enter();
-    let listener = match UnixListener::bind(&path) {
-        Ok(l) => l,
-        Err(e) => {
+        Err(crate::ipc::BindError::Other(e)) => {
             logs::push(logs::Level::Error, "Agent", format!("本地接口启动失败: {e}"));
             return None;
         }
     };
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     let (tx, rx) = mpsc::unbounded_channel();
     crate::terminal::ssh::runtime().spawn(async move {
         static NEXT: AtomicU64 = AtomicU64::new(1);
-        loop {
-            let Ok((stream, _)) = listener.accept().await else { continue };
+        while let Some(stream) = conns.recv().await {
             let id = NEXT.fetch_add(1, Ordering::Relaxed);
             tokio::spawn(serve(stream, id, tx.clone()));
         }
@@ -108,8 +93,8 @@ pub fn start() -> Option<mpsc::UnboundedReceiver<UiMsg>> {
     Some(rx)
 }
 
-async fn serve(stream: UnixStream, id: u64, tx: mpsc::UnboundedSender<UiMsg>) {
-    let (rd, mut wr) = stream.into_split();
+async fn serve(stream: crate::ipc::Conn, id: u64, tx: mpsc::UnboundedSender<UiMsg>) {
+    let (rd, mut wr) = tokio::io::split(stream);
     let mut lines = BufReader::new(rd).lines();
     let mut client: Option<Arc<Client>> = None;
     while let Ok(Some(line)) = lines.next_line().await {
@@ -161,7 +146,7 @@ fn error_response(id: Value, e: &RpcError) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": e.to_json() })
 }
 
-async fn write(wr: &mut tokio::net::unix::OwnedWriteHalf, v: &Value) -> std::io::Result<()> {
+async fn write(wr: &mut (impl tokio::io::AsyncWrite + Unpin), v: &Value) -> std::io::Result<()> {
     let mut s = v.to_string();
     s.push('\n');
     wr.write_all(s.as_bytes()).await

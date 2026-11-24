@@ -4,6 +4,8 @@
 #![recursion_limit = "512"]
 
 mod ctl;
+mod ipc;
+mod platform;
 mod ctl_cli;
 mod takeover;
 mod docker;

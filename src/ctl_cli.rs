@@ -2,14 +2,14 @@
 //! MCP 是主入口(stdio,按行分隔的 JSON-RPC),CLI 只给人和脚本查询用。
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use crate::ipc::SyncStream;
 
 use serde_json::{Value, json};
 
 /// 一条到运行中 Otter 的连接。
 pub struct Conn {
-    rd: BufReader<UnixStream>,
-    wr: UnixStream,
+    rd: BufReader<SyncStream>,
+    wr: SyncStream,
     next: u64,
 }
 
@@ -20,11 +20,10 @@ pub struct CallError {
 
 impl Conn {
     pub fn open(client_name: &str) -> Result<Self, CallError> {
-        let path = crate::ctl::sock_path().ok_or_else(|| CallError { kind: "not_running".into(), message: "找不到数据目录".into() })?;
-        let wr = UnixStream::connect(&path).map_err(|_| CallError { kind: "not_running".into(), message: "Otter 没有在运行,请先打开 Otter".into() })?;
+        let wr = crate::ipc::connect().map_err(|_| CallError { kind: "not_running".into(), message: "Otter 没有在运行,请先打开 Otter".into() })?;
         let rd = BufReader::new(wr.try_clone().map_err(|e| CallError { kind: "internal".into(), message: e.to_string() })?);
         let mut c = Self { rd, wr, next: 1 };
-        c.call("hello", json!({ "client_name": client_name, "parent_exe": parent_exe() }))?;
+        c.call("hello", json!({ "client_name": client_name, "parent_exe": crate::ipc::parent_exe() }))?;
         Ok(c)
     }
 
@@ -50,12 +49,6 @@ impl Conn {
         }
         Ok(v.get("result").cloned().unwrap_or(Value::Null))
     }
-}
-
-/// 父进程的可执行路径,只用来在确认框里给用户看。
-fn parent_exe() -> String {
-    let ppid = std::os::unix::process::parent_id();
-    std::process::Command::new("ps").args(["-o", "comm=", "-p", &ppid.to_string()]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
 }
 
 /// `otter ctl nodes [--group <名字或id>]`

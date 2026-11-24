@@ -500,7 +500,7 @@ impl Home {
         let Some(a) = self.workspace.active else { return false };
         let Some(id) = self.workspace.tabs[a].takeover.as_ref().map(|_| self.workspace.tabs[a].id) else { return false };
         let m = &ev.keystroke.modifiers;
-        if m.platform && !m.control && !m.alt && ev.keystroke.key == "." {
+        if crate::platform::accel(m) && ev.keystroke.key == "." {
             self.end_takeover(id, Some("user_stopped"), window, cx);
             return true;
         }
@@ -607,7 +607,7 @@ impl Home {
                         .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(k.client_name.clone()))
                         .child(div().max_w(px(360.0)).truncate().text_size(px(t::TYPE_MICRO)).font_family(crate::MONO).text_color(c::ghost()).child(k.last_action.clone()))
                         .child(div().mt(px(14.0)).child(stop))
-                        .child(div().mt(px(8.0)).text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child("⌘. 也可以停止 · 停止不会中断正在运行的命令")),
+                        .child(div().mt(px(8.0)).text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(format!("{}. 也可以停止 · 停止不会中断正在运行的命令", crate::platform::accel_name()))),
                 )
                 .into_any_element(),
         )
@@ -678,7 +678,7 @@ impl Home {
         }
         rows.push((IconName::Keyboard, c::warn(), "能在终端里输入命令、读取屏幕".into()));
         rows.push((IconName::ScanEye, c::warn(), "能看到终端里已有的历史内容".into()));
-        rows.push((IconName::OctagonX, c::online(), "随时点「停止接管」或按 ⌘. 中止".into()));
+        rows.push((IconName::OctagonX, c::online(), format!("随时点「停止接管」或按 {}. 中止", crate::platform::accel_name())));
         let n = rows.len();
         let points = div().w_full().flex().flex_col().rounded(px(t::RADIUS_MD)).border_1().border_color(c::field_border()).bg(c::field()).children(rows.into_iter().enumerate().map(|(i, (ic, color, text))| {
             div()

@@ -476,7 +476,7 @@ impl Home {
     }
 
     fn save_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dir = std::env::var_os("HOME").map(std::path::PathBuf::from).map(|h| h.join("Downloads")).unwrap_or_default();
+        let dir = crate::platform::home_dir().join("Downloads");
         let rx = cx.prompt_for_new_path(&dir, Some("otter_import.csv"));
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(path))) = rx.await else { return };

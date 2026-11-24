@@ -399,13 +399,13 @@ impl Home {
             .min_h_0()
             .relative()
             .child({
-                // gpui_xterm 只认 Ctrl+C/V,macOS 上的 Cmd+C/V 在这里接管;粘贴自己写,才能支持括号粘贴
+                // gpui_xterm 只认 Ctrl+C/V,macOS 上的 Cmd+C/V、其它平台的 Ctrl+Shift+C/V 在这里接管;粘贴自己写,才能支持括号粘贴
                 let view = t.view.clone();
                 let inputter = t.handle.inputter();
                 let bracketed = t.bracketed_paste.clone();
                 div().size_full().child(t.view.clone()).capture_key_down(move |ev, _, cx| {
                     let m = &ev.keystroke.modifiers;
-                    if !m.platform || m.control || m.alt {
+                    if !crate::platform::accel(m) {
                         return;
                     }
                     match ev.keystroke.key.as_str() {
@@ -426,7 +426,7 @@ impl Home {
                 // Cmd+Shift+H:开关关键字高亮并记住。目前还没有设置页,先用快捷键
                 .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                     let m = &ev.keystroke.modifiers;
-                    if !(m.platform && m.shift) || m.control || m.alt || ev.keystroke.key != "h" {
+                    if !crate::platform::accel_shift(m) || ev.keystroke.key != "h" {
                         return;
                     }
                     let on = !highlight::enabled();

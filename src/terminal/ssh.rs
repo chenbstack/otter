@@ -431,8 +431,8 @@ impl Io {
 }
 
 pub(crate) fn known_hosts_file() -> PathBuf {
-    let base = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    base.join("Library/Application Support/otter/known_hosts")
+    // 和 macOS 上原来的 ~/Library/Application Support/otter/known_hosts 是同一个位置
+    crate::store::data_dir().unwrap_or_else(|| crate::platform::home_dir().join(".otter")).join("known_hosts")
 }
 
 pub(crate) struct Client {
@@ -494,7 +494,7 @@ async fn verify_host(io: &Io, host: &str, port: u16, key: &PublicKey) -> Result<
 
 pub(crate) fn expand(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
-        Some(rest) => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rest),
+        Some(rest) => crate::platform::home_dir().join(rest),
         None => PathBuf::from(path),
     }
 }
