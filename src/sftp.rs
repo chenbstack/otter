@@ -71,7 +71,7 @@ pub struct Transfer {
     pub state: TransferState,
 }
 
-enum Cmd {
+pub(crate) enum Cmd {
     List(String),
     Mkdir(String),
     Remove { path: String, is_dir: bool },
@@ -79,11 +79,11 @@ enum Cmd {
     Download { remote: String, is_dir: bool, local_dir: PathBuf },
 }
 
-struct Shared {
+pub(crate) struct Shared {
     status: Mutex<Status>,
     home: Mutex<String>,
     dirs: Mutex<HashMap<String, DirState>>,
-    transfers: Mutex<Vec<Transfer>>,
+    pub(crate) transfers: Mutex<Vec<Transfer>>,
     notice: Mutex<Option<String>>,
     host_prompt: PendingHost,
     steps: Arc<Mutex<Vec<Step>>>,
@@ -198,6 +198,30 @@ impl Sftp {
                 }
                 io.fail_step(&e);
                 *sh2.status.lock().unwrap() = Status::Failed(e);
+            }
+        });
+        Sftp { cmd: tx, sh, abort: join.abort_handle(), epoch }
+    }
+
+    /// 不走 SFTP 的文件后端(容器里的文件):同样的界面状态,命令交给 `sink` 去执行(见 `docker.rs` 的 `ctfs_run`)。
+    /// `sink` 在后台线程里被逐条调用,拿到命令和要写入结果的共享状态。
+    pub(crate) fn via(epoch: Option<u32>, sink: impl Fn(Cmd, Arc<Shared>) + Send + 'static) -> Sftp {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
+        let sh = Arc::new(Shared {
+            status: Mutex::new(Status::Ready),
+            home: Mutex::new("/".into()),
+            dirs: Mutex::new(HashMap::new()),
+            transfers: Mutex::new(Vec::new()),
+            notice: Mutex::new(None),
+            host_prompt: Arc::new(Mutex::new(None)),
+            steps: Arc::new(Mutex::new(Vec::new())),
+            next_id: AtomicU64::new(1),
+            session: Mutex::new(None),
+        });
+        let sh2 = sh.clone();
+        let join = runtime().spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                sink(cmd, sh2.clone());
             }
         });
         Sftp { cmd: tx, sh, abort: join.abort_handle(), epoch }
@@ -339,13 +363,13 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
     Ok(())
 }
 
-fn notice(sh: &Shared, msg: String) {
+pub(crate) fn notice(sh: &Shared, msg: String) {
     if let Ok(mut n) = sh.notice.lock() {
         *n = Some(msg);
     }
 }
 
-fn set_dir(sh: &Shared, path: &str, state: DirState) {
+pub(crate) fn set_dir(sh: &Shared, path: &str, state: DirState) {
     if let Ok(mut d) = sh.dirs.lock() {
         d.insert(path.to_string(), state);
     }
@@ -358,7 +382,7 @@ async fn relist(sftp: &SftpSession, sh: &Shared, path: &str) {
     }
 }
 
-fn parent_of(path: &str) -> String {
+pub(crate) fn parent_of(path: &str) -> String {
     match path.trim_end_matches('/').rsplit_once('/') {
         Some(("", _)) | None => "/".into(),
         Some((p, _)) => p.to_string(),
@@ -388,7 +412,7 @@ async fn handle(cmd: Cmd, sftp: &SftpSession, sh: &Shared) {
     }
 }
 
-fn new_transfer(sh: &Shared, name: String, dir: Direction, total: u64) -> u64 {
+pub(crate) fn new_transfer(sh: &Shared, name: String, dir: Direction, total: u64) -> u64 {
     let id = sh.next_id.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut t) = sh.transfers.lock() {
         // 只保留最近的 20 条,旧的已结束项先丢
@@ -405,7 +429,7 @@ fn new_transfer(sh: &Shared, name: String, dir: Direction, total: u64) -> u64 {
     id
 }
 
-fn progress(sh: &Shared, id: u64, add: u64) {
+pub(crate) fn progress(sh: &Shared, id: u64, add: u64) {
     if let Ok(mut t) = sh.transfers.lock() {
         if let Some(x) = t.iter_mut().find(|x| x.id == id) {
             x.done += add;
@@ -413,7 +437,7 @@ fn progress(sh: &Shared, id: u64, add: u64) {
     }
 }
 
-fn finish(sh: &Shared, id: u64, r: Result<(), String>) {
+pub(crate) fn finish(sh: &Shared, id: u64, r: Result<(), String>) {
     let mut msg = None;
     if let Ok(mut t) = sh.transfers.lock() {
         if let Some(x) = t.iter_mut().find(|x| x.id == id) {
@@ -435,7 +459,7 @@ fn finish(sh: &Shared, id: u64, r: Result<(), String>) {
     }
 }
 
-fn transfer_name(names: &[String]) -> String {
+pub(crate) fn transfer_name(names: &[String]) -> String {
     match names {
         [] => "文件".into(),
         [one] => one.clone(),
@@ -563,7 +587,7 @@ fn collect_download<'a>(sftp: &'a SftpSession, remote: String, local: PathBuf, i
 }
 
 /// 本地已存在同名项时加 " (n)" 后缀,不覆盖
-fn unique_local(dir: &Path, name: &str) -> PathBuf {
+pub(crate) fn unique_local(dir: &Path, name: &str) -> PathBuf {
     let first = dir.join(name);
     if !first.exists() {
         return first;

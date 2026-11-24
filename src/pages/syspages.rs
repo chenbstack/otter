@@ -72,7 +72,7 @@ fn spec(p: Page) -> Option<(Kind, &'static str)> {
     }
 }
 
-fn chip(id: (&'static str, usize), label: &'static str, active: bool) -> Stateful<Div> {
+pub(super) fn chip(id: (&'static str, usize), label: &'static str, active: bool) -> Stateful<Div> {
     div()
         .id(id)
         .h(px(30.0))
@@ -86,7 +86,7 @@ fn chip(id: (&'static str, usize), label: &'static str, active: bool) -> Statefu
         .child(label)
 }
 
-fn tip(b: Stateful<Div>, text: &'static str) -> Stateful<Div> {
+pub(super) fn tip(b: Stateful<Div>, text: &'static str) -> Stateful<Div> {
     b.tooltip(move |_, cx| cx.new(|_| crate::files::Tip(text.into())).into())
 }
 

@@ -245,7 +245,6 @@ impl Home {
             .relative()
             // 概览页的页头跟着内容一起滚动,其他页的页头固定在上面
             .children(inner)
-            .children(self.dock_overlays(cx))
     }
 
     /// 容器相关四个页面的页签:容器 / 堆栈 / 镜像 / 存储卷
@@ -400,7 +399,8 @@ impl Home {
                 let mut r = div().flex().flex_row().gap(px(SVC_GAP));
                 for (ci, svc) in row.iter().enumerate() {
                     let target = files::Target::Container { stack: s.name.clone(), svc: svc.name.clone() };
-                    let on_files = cx.listener(move |this, _, window, cx| this.open_files(target.clone(), window, cx));
+                    let (fst, fsv) = (s.name.clone(), svc.name.clone());
+                    let on_files = cx.listener(move |this, _, window, cx| this.ct_open_stack(&fst, &fsv, &target, window, cx));
                     let (st, sv) = (s.name.clone(), svc.name.clone());
                     let on_term = cx.listener(move |this, _, _, cx| this.open_terminal((st.clone(), sv.clone()), cx));
                     let (st, sv) = (s.name.clone(), svc.name.clone());

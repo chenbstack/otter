@@ -8,3 +8,4 @@ pub mod monitorpage;
 pub mod daemonpage;
 pub mod registrypage;
 pub mod syspages;
+pub mod ctpanel;

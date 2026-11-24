@@ -817,9 +817,19 @@ impl Home {
         v
     }
 
-    /// 是否走真实 SFTP:非 demo(有本地库)且目标是服务器;demo 和容器仍是 mock。
+    /// 是否走真实后端:非 demo(有本地库)。服务器走 SFTP,容器走 docker exec / cp(同一套界面状态);demo 是 mock。
     fn sftp_real(&self) -> bool {
-        self.store.is_some() && self.files.target == Target::Host
+        self.store.is_some()
+    }
+
+    /// 容器目标对应的真实容器名:堆栈里按「项目 + 服务」找,没有项目就按名字找
+    fn files_ct_name(&self) -> Option<String> {
+        let Target::Container { stack, svc } = &self.files.target else { return None };
+        let list = &self.dock.snap.containers;
+        list.iter()
+            .find(|c| !stack.is_empty() && c.project.as_deref() == Some(stack.as_str()) && c.service.as_deref() == Some(svc.as_str()))
+            .or_else(|| list.iter().find(|c| c.name == *svc))
+            .map(|c| c.name.clone())
     }
 
     /// 服务器目标的「主目录」:真实连接用远程 home,否则 mock 的 /root
@@ -837,6 +847,60 @@ impl Home {
     /// 有进行中的事(连接/加载/传输)就起一个定时刷新。
     fn sync_sftp(&mut self, cx: &mut Context<Self>) {
         if !self.sftp_real() {
+            return;
+        }
+        if self.files.target != Target::Host {
+            // 容器:借用这个标签的 Docker 连接,不另外建 SFTP
+            let name = self.files_ct_name();
+            let d = self.workspace.active.and_then(|a| self.workspace.tabs.get(a)).and_then(|t| t.docker.as_ref());
+            let (Some(name), Some(d)) = (name, d) else { return };
+            let fs = &mut self.files;
+            if fs.sftp.as_ref().is_some_and(|s| s.epoch() != d.epoch()) {
+                fs.sftp = None;
+                fs.path_ready = false;
+            }
+            if fs.sftp.is_none() {
+                fs.sftp = Some(d.container_fs(&name));
+            }
+            let s = fs.sftp.as_ref().unwrap();
+            let mut home = None;
+            if !fs.path_ready {
+                fs.path_ready = true;
+                home = Some("/".to_string());
+            }
+            let want = home.clone().unwrap_or_else(|| fs.path.clone());
+            if s.dir(&want).is_none() {
+                s.list(&want);
+            }
+            if let Some(n) = s.take_notice() {
+                fs.notice = Some(n.into());
+            }
+            let busy = s.busy();
+            if let Some(h) = home {
+                fs.path = h;
+            }
+            if busy && !self.fstore.polling {
+                self.fstore.polling = true;
+                cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor().timer(Duration::from_millis(120)).await;
+                        let Ok(more) = this.update(cx, |this, cx| {
+                            cx.notify();
+                            let more = this.files.sftp.as_ref().is_some_and(|s| s.busy());
+                            if !more {
+                                this.fstore.polling = false;
+                            }
+                            more
+                        }) else {
+                            break;
+                        };
+                        if !more {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+            }
             return;
         }
         // 这个标签的终端已经连上就复用它的连接(开个 SFTP 通道即可);终端还没连上,等它(连接页显示终端的进度);
@@ -1784,7 +1848,8 @@ fn progress_bar(p: f32, w: f32) -> Div {
 impl Home {
     /// 右侧文件抽屉(盖在节点标签的内容区上)
     pub fn files_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.files.open {
+        // 容器的文件在容器抽屉里(和日志同一个抽屉)
+        if !self.files.open || matches!(self.files.target, Target::Container { .. }) {
             return None;
         }
         // 抽屉开着时切了节点:回到新节点本机的主目录
@@ -1799,17 +1864,24 @@ impl Home {
         let max = Self::max_w(window);
         let want = if self.files.target == Target::Host { HOST_W } else { CT_W };
         let w = want.clamp(MIN_W.min(max), max);
-        Some(self.files_panel(window, cx, w, false))
+        Some(self.files_panel(window, cx, w, false, false))
     }
 
     /// 文件标签页:占满整个标签内容区
     pub fn files_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let w = f32::from(window.viewport_size().width);
-        self.files_panel(window, cx, w, true)
+        self.files_panel(window, cx, w, true, false)
+    }
+
+    /// 嵌在容器抽屉里的文件管理:没有自己的外框和标题,和抽屉的日志页共用一个抽屉
+    pub fn files_embedded(&mut self, window: &mut Window, cx: &mut Context<Self>, w: f32) -> AnyElement {
+        // 抽屉里只有单栏
+        self.files.local = false;
+        self.files_panel(window, cx, w, false, true)
     }
 
     /// 文件管理的完整界面;`tab_mode` 为真时作为标签内容铺满,否则作为抽屉。
-    fn files_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>, w: f32, tab_mode: bool) -> AnyElement {
+    fn files_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>, w: f32, tab_mode: bool, embed: bool) -> AnyElement {
         self.sync_sftp(cx);
         if self.files.local {
             self.restore_left(cx);
@@ -1817,7 +1889,7 @@ impl Home {
         }
         // 真实连接没连上之前,整页显示「连接中」(步骤、指纹确认、失败原因、重试),连上后才是文件列表。
         // 这个标签的终端还没连上时,显示的是终端的连接进度(SFTP 要等它)。
-        let early = if !self.sftp_real() {
+        let early = if !self.sftp_real() || self.files.target != Target::Host {
             None
         } else if let Some((a, t)) = self.workspace.active.and_then(|a| self.workspace.tabs.get(a).and_then(|t| t.term.as_ref()).map(|t| (a, t))).filter(|(_, t)| !t.handle.ever_connected()) {
             Some(self.connecting_page(crate::terminal::connecting::ConnTarget::Terminal(a), t.handle.steps(), t.handle.host_prompt(), crate::terminal::ssh::STEP_LABELS, cx))
@@ -1835,7 +1907,7 @@ impl Home {
         };
         {
             if let Some(page) = early {
-                return if tab_mode {
+                return if tab_mode || embed {
                     page.into_any_element()
                 } else {
                     div()
@@ -1878,18 +1950,20 @@ impl Home {
             .pr(px(10.0))
             .border_b_1()
             .border_color(c::border())
-            .child(
-                div()
-                    .size(px(30.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(t::RADIUS_MD))
-                    .bg(c::accent_soft())
-                    .child(icon(IconName::FolderOpen, 15.0, c::accent())),
-            )
-            .child(div().text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::SEMIBOLD).child("文件"))
+            .when(!embed, |d| {
+                d.child(
+                    div()
+                        .size(px(30.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(t::RADIUS_MD))
+                        .bg(c::accent_soft())
+                        .child(icon(IconName::FolderOpen, 15.0, c::accent())),
+                )
+                .child(div().text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::SEMIBOLD).child("文件"))
+            })
             .when(fs.local, |d| d.child(div().ml(px(6.0)).child(self.source_button(cx))))
             .child(div().flex_1())
             .child(
@@ -1925,7 +1999,7 @@ impl Home {
                         cx.notify();
                     })),
             )
-            .when(!tab_mode, |d| {
+            .when(!tab_mode && !embed, |d| {
                 d.child(tool_btn("files-close", IconName::X, true).on_click(cx.listener(|this, _, _, cx| this.close_files(cx))))
             });
 
@@ -2035,7 +2109,7 @@ impl Home {
             .child(self.more_button(2, more_items, cx));
 
         // 容器层的提醒:不在挂载卷里的改动,重建容器就没了
-        let warn = (!is_host && mount.is_none() && path != "/").then(|| {
+        let warn = (!is_host && !self.sftp_real() && mount.is_none() && path != "/").then(|| {
             let mounts = fs.target.mounts().into_iter().map(|(m, _)| m).collect::<Vec<_>>().join("、");
             div()
                 .flex()
@@ -2390,14 +2464,13 @@ impl Home {
             .child(remote);
 
         div()
-            .id(if tab_mode { "files-tab" } else { "files-drawer" })
+            .id(if tab_mode { "files-tab" } else if embed { "files-embed" } else { "files-drawer" })
             .relative()
             .flex()
             .flex_col()
-            .when(!tab_mode, |d| d.bg(c::dialog()))
-            .occlude()
-            .when(tab_mode, |d| d.flex_1().min_w_0().min_h_0())
-            .when(!tab_mode, |d| {
+            .when(!tab_mode && !embed, |d| d.bg(c::dialog()).occlude())
+            .when(tab_mode || embed, |d| d.flex_1().min_w_0().min_h_0())
+            .when(!tab_mode && !embed, |d| {
                 d.absolute()
                     .top(px(TITLEBAR_H))
                     .right_0()
@@ -2414,7 +2487,7 @@ impl Home {
                     }])
             })
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.upload(paths.paths().to_vec(), cx)))
-            .child(header)
+            .children((!embed).then_some(header))
             .child(body)
             .child(status)
             .child(overlay)

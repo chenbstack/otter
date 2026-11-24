@@ -520,6 +520,10 @@ enum Cmd {
     LoginHttp { registry: String, user: String, pass: zeroize::Zeroizing<String> },
     /// 运维页读一份数据(进程、服务……),结果用 `sys_take` 取
     Sys { kind: crate::sysops::Kind, script: String, root: bool },
+    /// 容器抽屉读一份数据(日志、目录列表、文件内容),结果用 `ct_take` 取;`tag` 原样带回,界面靠它认出这是哪次请求
+    Ct { kind: crate::ctfiles::CtKind, tag: String, args: Vec<String>, merge: bool },
+    /// 容器里的文件操作:界面是 SFTP 那套文件管理,命令在这里换成 docker exec / docker cp
+    CtFs { name: String, sh: Arc<crate::sftp::Shared>, cmd: crate::sftp::Cmd },
 }
 
 struct Shared {
@@ -540,6 +544,8 @@ struct Shared {
     registries: Mutex<Option<Result<Vec<RegAuth>, String>>>,
     /// 运维页读到的原始输出,按种类存放;界面取走后清空
     sys: Mutex<HashMap<crate::sysops::Kind, Result<String, String>>>,
+    /// 容器抽屉读到的内容:(请求的标签, 输出),按种类存放;界面取走后清空
+    ct: Mutex<HashMap<crate::ctfiles::CtKind, (String, Result<String, String>)>>,
     /// 等用户确认的 HTTP 仓库登录:(仓库, 用户名, 密码),确认或取消后清掉
     pending_login: Mutex<Option<(String, String, zeroize::Zeroizing<String>)>>,
     /// 需要向用户确认的 HTTP 仓库地址;界面取走后清空
@@ -601,6 +607,7 @@ impl Docker {
             daemon: Mutex::new(None),
             registries: Mutex::new(None),
             sys: Mutex::new(HashMap::new()),
+            ct: Mutex::new(HashMap::new()),
             pending_login: Mutex::new(None),
             insecure_ask: Mutex::new(None),
             version: AtomicU64::new(1),
@@ -627,6 +634,14 @@ impl Docker {
 
     pub fn epoch(&self) -> Option<u32> {
         self.epoch
+    }
+
+    /// 这个容器里的文件管理:用 SFTP 同一套界面状态,命令通过本连接的 docker exec / cp 执行
+    pub fn container_fs(&self, name: &str) -> crate::sftp::Sftp {
+        let (tx, name) = (self.cmd.clone(), name.to_string());
+        crate::sftp::Sftp::via(self.epoch, move |cmd, sh| {
+            let _ = tx.send(Cmd::CtFs { name: name.clone(), sh, cmd });
+        })
     }
 
     pub fn status(&self) -> Status {
@@ -695,6 +710,15 @@ impl Docker {
         self.sh.daemon.lock().ok().and_then(|mut d| d.take())
     }
 
+    /// 请求读容器抽屉的数据(日志、目录、文件);结果用 `ct_take` 取
+    pub fn ct_load(&self, kind: crate::ctfiles::CtKind, tag: &str, args: Vec<String>, merge: bool) {
+        let _ = self.cmd.send(Cmd::Ct { kind, tag: tag.to_string(), args, merge });
+    }
+
+    pub fn ct_take(&self, kind: crate::ctfiles::CtKind) -> Option<(String, Result<String, String>)> {
+        self.sh.ct.lock().ok().and_then(|mut m| m.remove(&kind))
+    }
+
     /// 请求读一份运维数据;结果用 `sys_take` 取
     pub fn sys_load(&self, kind: crate::sysops::Kind, script: &str, root: bool) {
         let _ = self.cmd.send(Cmd::Sys { kind, script: script.to_string(), root });
@@ -755,7 +779,19 @@ pub(crate) struct Output {
     pub(crate) stderr: String,
 }
 
+/// 字节形式的 exec 结果(`docker cp` 的 tar 流是二进制)
+pub(crate) struct RawOutput {
+    pub(crate) code: u32,
+    pub(crate) out: Vec<u8>,
+    pub(crate) err: Vec<u8>,
+}
+
 pub(crate) async fn exec(session: &SshHandle<Client>, cmd: &str, stdin: Option<&[u8]>, timeout: Duration) -> Result<Output, String> {
+    let r = exec_raw(session, cmd, stdin, timeout).await?;
+    Ok(Output { code: r.code, stdout: String::from_utf8_lossy(&r.out).into_owned(), stderr: String::from_utf8_lossy(&r.err).into_owned() })
+}
+
+pub(crate) async fn exec_raw(session: &SshHandle<Client>, cmd: &str, stdin: Option<&[u8]>, timeout: Duration) -> Result<RawOutput, String> {
     let fut = async {
         let mut ch = session.channel_open_session().await.map_err(|e| format!("打开通道失败:{e}"))?;
         ch.exec(true, cmd).await.map_err(|e| format!("执行失败:{e}"))?;
@@ -773,7 +809,7 @@ pub(crate) async fn exec(session: &SshHandle<Client>, cmd: &str, stdin: Option<&
                 _ => {}
             }
         }
-        Ok::<_, String>(Output { code: code.unwrap_or(255), stdout: String::from_utf8_lossy(&out).into_owned(), stderr: String::from_utf8_lossy(&err).into_owned() })
+        Ok::<_, String>(RawOutput { code: code.unwrap_or(255), out, err })
     };
     tokio::time::timeout(timeout, fut).await.map_err(|_| format!("命令超时({} 秒)", timeout.as_secs()))?
 }
@@ -806,6 +842,22 @@ impl Runner {
 }
 
 impl Runner {
+    /// 跑 docker 命令并拿字节形式的输出;`merge` 把 stderr 并进 stdout(`docker logs` 要按时间顺序看两路输出)。`input` 通过 stdin 交给命令。
+    async fn docker_raw(&self, args: &[String], input: Option<&[u8]>, merge: bool, timeout: Duration) -> Result<RawOutput, String> {
+        let quoted = args.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
+        let tail = if merge { " 2>&1" } else { "" };
+        match self.sudo {
+            Sudo::No => exec_raw(&self.session, &format!("docker {quoted}{tail}"), input, timeout).await,
+            Sudo::Passwordless => exec_raw(&self.session, &format!("sudo -n docker {quoted}{tail}"), input, timeout).await,
+            Sudo::WithPassword => {
+                let pw = self.password.as_deref().map(String::as_str).unwrap_or("");
+                let mut data = zeroize::Zeroizing::new(format!("{pw}\n").into_bytes());
+                data.extend_from_slice(input.unwrap_or(&[]));
+                exec_raw(&self.session, &format!("sudo -S -p '' docker {quoted}{tail}"), Some(&data), timeout).await
+            }
+        }
+    }
+
     /// 以 root 身份跑一段 shell:已经是 root 就直接跑,否则走 sudo(免密,或用节点保存的密码)。`input` 通过 stdin 传给脚本。
     async fn root(&self, script: &str, input: Option<&str>, timeout: Duration) -> Result<Output, String> {
         let q = shell_quote(script);
@@ -886,6 +938,170 @@ async fn sys_exec(r: &Runner, script: &str, root: bool, input: Option<&str>, t: 
 fn last_line(o: &Output) -> String {
     let t = if o.stderr.trim().is_empty() { &o.stdout } else { &o.stderr };
     t.trim().lines().last().unwrap_or("未知错误").trim().to_string()
+}
+
+/// 容器抽屉读数据:输出原样存起来(带上请求的标签),解析在界面一侧
+async fn ct_load(r: &Runner, sh: &Shared, kind: crate::ctfiles::CtKind, tag: String, args: Vec<String>, merge: bool) {
+    let res = match r.docker_raw(&args, None, merge, Duration::from_secs(30)).await {
+        Ok(o) if o.code == 0 || (merge && !o.out.is_empty()) => Ok(String::from_utf8_lossy(&o.out).into_owned()),
+        Ok(o) => {
+            let t = if o.err.is_empty() { &o.out } else { &o.err };
+            Err(String::from_utf8_lossy(t).trim().lines().last().unwrap_or("未知错误").to_string())
+        }
+        Err(e) => Err(e),
+    };
+    sh.ct.lock().unwrap().insert(kind, (tag, res));
+    sh.bump();
+}
+
+fn raw_last_line(o: &RawOutput) -> String {
+    let t = if o.err.is_empty() { &o.out } else { &o.err };
+    String::from_utf8_lossy(t).trim().lines().last().unwrap_or("未知错误").trim().to_string()
+}
+
+/// 容器里的文件操作。结果写进和 SFTP 同一套共享状态,界面不用区分。
+async fn ctfs_run(r: &Runner, name: &str, sh: &crate::sftp::Shared, cmd: crate::sftp::Cmd) {
+    use crate::sftp::{self, Cmd as F, Direction};
+    let arg = |v: &[&str]| -> Vec<String> { ["exec", name].iter().chain(v).map(|x| x.to_string()).collect() };
+    match cmd {
+        F::List(path) => ctfs_list(r, name, sh, &path).await,
+        F::Mkdir(path) => {
+            if !crate::ctfiles::safe_path(&path) {
+                sftp::notice(sh, "新建文件夹失败:路径不合法".into());
+            } else {
+                match r.docker_raw(&arg(&["mkdir", "-p", "--", &path]), None, false, Duration::from_secs(30)).await {
+                    Ok(o) if o.code == 0 => {}
+                    Ok(o) => sftp::notice(sh, format!("新建文件夹失败:{}", raw_last_line(&o))),
+                    Err(e) => sftp::notice(sh, format!("新建文件夹失败:{e}")),
+                }
+            }
+            ctfs_list(r, name, sh, &sftp::parent_of(&path)).await;
+        }
+        F::Remove { path, .. } => {
+            let short = path.rsplit('/').next().unwrap_or(&path).to_string();
+            if path.trim_matches('/').is_empty() || !crate::ctfiles::safe_path(&path) {
+                sftp::notice(sh, "不能删除这个路径".into());
+            } else {
+                match r.docker_raw(&arg(&["rm", "-rf", "--", &path]), None, false, Duration::from_secs(120)).await {
+                    Ok(o) if o.code == 0 => sftp::notice(sh, format!("已删除 {short}")),
+                    Ok(o) => sftp::notice(sh, format!("删除 {short} 失败:{}", raw_last_line(&o))),
+                    Err(e) => sftp::notice(sh, format!("删除 {short} 失败:{e}")),
+                }
+            }
+            ctfs_list(r, name, sh, &sftp::parent_of(&path)).await;
+        }
+        F::Upload { locals, remote_dir } => {
+            let names: Vec<String> = locals.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
+            let id = sftp::new_transfer(sh, sftp::transfer_name(&names), Direction::Up, 1);
+            let res: Result<(), String> = async {
+                if !crate::ctfiles::safe_path(&remote_dir) {
+                    return Err("路径不合法".into());
+                }
+                let tar = tokio::task::spawn_blocking(move || crate::ctfiles::build_tar(&locals)).await.map_err(|e| e.to_string())??;
+                if let Ok(mut t) = sh.transfers.lock() {
+                    if let Some(x) = t.iter_mut().find(|x| x.id == id) {
+                        x.total = (tar.len() as u64).max(1);
+                    }
+                }
+                let args: Vec<String> = ["cp".to_string(), "-".to_string(), format!("{name}:{remote_dir}")].into();
+                let o = r.docker_raw(&args, Some(&tar), false, Duration::from_secs(600)).await?;
+                if o.code != 0 {
+                    return Err(raw_last_line(&o));
+                }
+                Ok(())
+            }
+            .await;
+            sftp::finish(sh, id, res);
+            ctfs_list(r, name, sh, &remote_dir).await;
+        }
+        F::Download { remote, is_dir, local_dir } => {
+            let short = remote.trim_end_matches('/').rsplit('/').next().unwrap_or("文件").to_string();
+            let id = sftp::new_transfer(sh, short.clone(), Direction::Down, 1);
+            let res: Result<(), String> = async {
+                if !crate::ctfiles::safe_path(&remote) || !crate::ctfiles::safe_filename(&short) {
+                    return Err("路径不合法".into());
+                }
+                let args: Vec<String> = ["cp".to_string(), format!("{name}:{remote}"), "-".to_string()].into();
+                let o = r.docker_raw(&args, None, false, Duration::from_secs(600)).await?;
+                if o.code != 0 {
+                    return Err(raw_last_line(&o));
+                }
+                if o.out.len() as u64 > crate::ctfiles::XFER_MAX {
+                    return Err(format!("内容太大(上限 {} MB)", crate::ctfiles::XFER_MAX / 1024 / 1024));
+                }
+                if let Ok(mut t) = sh.transfers.lock() {
+                    if let Some(x) = t.iter_mut().find(|x| x.id == id) {
+                        x.total = (o.out.len() as u64).max(1);
+                    }
+                }
+                let _ = std::fs::create_dir_all(&local_dir);
+                let data = o.out;
+                tokio::task::spawn_blocking(move || {
+                    if is_dir {
+                        crate::ctfiles::extract_dir(&data, &local_dir)
+                    } else {
+                        crate::ctfiles::extract_file(&data, &sftp::unique_local(&local_dir, &short))
+                    }
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            }
+            .await;
+            sftp::finish(sh, id, res);
+        }
+    }
+}
+
+/// 读目录:`ls -la`,符号链接再补一次「指向的是不是目录」
+async fn ctfs_list(r: &Runner, name: &str, sh: &crate::sftp::Shared, path: &str) {
+    use crate::sftp::{DirState, RemoteEntry};
+    let fail = |e: String| DirState { entries: vec![], loading: false, error: Some(e) };
+    let state = async {
+        if !crate::ctfiles::safe_path(path) {
+            return fail("路径不合法".into());
+        }
+        let dir = if path.ends_with('/') { path.to_string() } else { format!("{path}/") };
+        let args: Vec<String> = ["exec", name, "ls", "-la", &dir].iter().map(|x| x.to_string()).collect();
+        let o = match r.docker_raw(&args, None, false, Duration::from_secs(30)).await {
+            Ok(o) => o,
+            Err(e) => return fail(e),
+        };
+        if o.code != 0 {
+            return fail(raw_last_line(&o));
+        }
+        let list = match crate::ctfiles::parse_ls(&String::from_utf8_lossy(&o.out)) {
+            Ok(l) => l,
+            Err(e) => return fail(e),
+        };
+        let links: Vec<String> = list.iter().filter(|e| e.kind == crate::ctfiles::EKind::Link).map(|e| e.name.clone()).collect();
+        let mut dirs: Vec<String> = Vec::new();
+        if !links.is_empty() {
+            let mut a: Vec<String> = ["exec", "-w", &dir, name, "sh", "-c", r#"for f; do [ -d "$f" ] && printf '%s\n' "$f"; done; true"#, "_"].iter().map(|x| x.to_string()).collect();
+            a.extend(links);
+            if let Ok(o) = r.docker_raw(&a, None, false, Duration::from_secs(30)).await {
+                dirs = String::from_utf8_lossy(&o.out).lines().map(String::from).collect();
+            }
+        }
+        let entries = list
+            .into_iter()
+            .map(|e| {
+                let is_link = e.kind == crate::ctfiles::EKind::Link;
+                RemoteEntry {
+                    is_dir: e.kind == crate::ctfiles::EKind::Dir || (is_link && dirs.contains(&e.name)),
+                    is_link,
+                    size: e.size,
+                    mtime: crate::ctfiles::mtime_secs(&e.mtime),
+                    mode: e.mode,
+                    owner: e.owner,
+                    link: e.link,
+                    name: e.name,
+                }
+            })
+            .collect();
+        DirState { entries, loading: false, error: None }
+    }
+    .await;
+    crate::sftp::set_dir(sh, path, state);
 }
 
 /// 运维页读数据:输出原样存起来,解析在界面一侧
@@ -1314,6 +1530,16 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
                     Cmd::Act(Action::Sys(job)) => {
                         let (r, sh2) = (sys.clone(), sh.clone());
                         tokio::spawn(async move { sys_job(&r, &sh2, job).await });
+                        continue;
+                    }
+                    Cmd::Ct { kind, tag, args, merge } => {
+                        let (r, sh2) = (runner.clone(), sh.clone());
+                        tokio::spawn(async move { ct_load(&r, &sh2, kind, tag, args, merge).await });
+                        continue;
+                    }
+                    Cmd::CtFs { name, sh: fsh, cmd } => {
+                        let r = runner.clone();
+                        tokio::spawn(async move { ctfs_run(&r, &name, &fsh, cmd).await });
                         continue;
                     }
                     Cmd::Act(a) => {

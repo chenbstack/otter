@@ -46,6 +46,7 @@ pub(crate) struct DockUi {
     pub conf: super::daemonpage::ConfUi,
     pub reg: super::registrypage::RegUi,
     pub sys: super::syspages::SysUi,
+    pub ct: super::ctpanel::CtUi,
     sort: (SortKey, bool),
     confirm: Option<DockAsk>,
     pub(super) notice: Option<(SharedString, Instant)>,
@@ -64,7 +65,7 @@ pub(crate) struct DockUi {
 
 impl DockUi {
     pub fn new() -> Self {
-        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
+        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
     }
 }
 
@@ -111,7 +112,7 @@ pub(super) fn state_color(c0: &Container) -> (Rgba, Rgba) {
 }
 
 impl Home {
-    fn dock_visible(&self) -> bool {
+    pub(crate) fn dock_visible(&self) -> bool {
         self.workspace.active.and_then(|a| self.workspace.tabs.get(a)).is_some_and(|t| matches!(t.kind, workspace::TabKind::Node(_)) && t.mode == workspace::NodeMode::Containers)
     }
 
@@ -155,6 +156,7 @@ impl Home {
             self.conf_sync(window, cx);
             self.reg_sync(window, cx);
             self.sys_sync(window, cx);
+            self.ct_sync(window, cx);
             return;
         }
         // 这个标签的终端已连上就复用它的连接;没连上等它(连接页显示终端的进度);没有终端才自己连。
@@ -194,6 +196,7 @@ impl Home {
         self.conf_sync(window, cx);
         self.reg_sync(window, cx);
         self.sys_sync(window, cx);
+        self.ct_sync(window, cx);
     }
 
     /// 定时器:后台有新数据、连接状态在变、提示过期时重绘
@@ -201,7 +204,7 @@ impl Home {
         if !self.dock_visible() {
             return;
         }
-        let mut redraw = self.sys_due();
+        let mut redraw = self.sys_due() || self.ct_due();
         if let Some(a) = self.workspace.active {
             if let Some(d) = self.workspace.tabs[a].docker.as_ref() {
                 d.touch();
@@ -415,8 +418,9 @@ impl Home {
     }
 
     /// 页面最上层的覆盖物:确认框、操作结果提示
-    pub(crate) fn dock_overlays(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(crate) fn dock_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut v: Vec<AnyElement> = Vec::new();
+        v.extend(self.ct_drawer(window, cx));
         if let Some(m) = self.cron_dialog(cx) {
             v.push(m.into_any_element());
         }
@@ -518,7 +522,7 @@ impl Home {
             .child(sorter("h-cpu", "CPU", SortKey::Cpu, cx).w(px(58.0)))
             .child(sorter("h-mem", "内存", SortKey::Mem, cx).w(px(74.0)))
             .child(head("端口").w(px(150.0)))
-            .child(div().w(px(112.0)));
+            .child(div().w(px(144.0)));
 
         let mut rows: Vec<Stateful<Div>> = Vec::new();
         for (i, ct) in list.iter().enumerate() {
@@ -527,13 +531,17 @@ impl Home {
             let (fg, bg) = state_color(ct);
             let busy = self.is_busy(&ct.name);
             let name = ct.name.clone();
-            let mut acts = div().w(px(112.0)).flex().flex_row().justify_end().items_center().gap(px(2.0));
+            let mut acts = div().w(px(144.0)).flex().flex_row().justify_end().items_center().gap(px(2.0));
             if let Some(p) = ct.panel {
                 acts = acts.child(tag(format!("{p} · 只读")));
-            } else if busy {
-                acts = acts.child(small("处理中…", c::muted()));
             } else {
-                if up {
+                let (n, run) = (name.clone(), up);
+                acts = acts.child(icon_btn(("ct-logs", i), IconName::ScrollText, c::muted()).on_click(cx.listener(move |this, _, window, cx| this.ct_open(n.clone(), run, super::ctpanel::CtTab::Logs, window, cx))));
+                let n = name.clone();
+                acts = acts.child(icon_btn(("ct-files", i), IconName::FolderOpen, c::muted()).on_click(cx.listener(move |this, _, window, cx| this.ct_open(n.clone(), run, super::ctpanel::CtTab::Files, window, cx))));
+                if busy {
+                    acts = acts.child(small("处理中…", c::muted()));
+                } else if up {
                     let n = name.clone();
                     acts = acts.child(icon_btn(("stop", i), IconName::Square, c::muted()).on_click(cx.listener(move |this, _, _, cx| this.dock_act(Action::Stop(n.clone()), cx))));
                     let n = name.clone();
@@ -542,10 +550,12 @@ impl Home {
                     let n = name.clone();
                     acts = acts.child(icon_btn(("start", i), IconName::Play, c::online()).on_click(cx.listener(move |this, _, _, cx| this.dock_act(Action::Start(n.clone()), cx))));
                 }
-                let n = name.clone();
-                acts = acts.child(icon_btn(("rm", i), IconName::Trash, c::danger()).on_click(cx.listener(move |this, _, _, cx| {
-                    this.ask(DockAsk { title: "删除容器", tile: IconName::Box, name: n.clone(), detail: "Docker 容器", body: "强制删除,容器内未保存到存储卷的数据会丢失", label: "删除容器", action: Action::Remove(n.clone()), list: Vec::new() }, cx);
-                })));
+                if !busy {
+                    let n = name.clone();
+                    acts = acts.child(icon_btn(("rm", i), IconName::Trash, c::danger()).on_click(cx.listener(move |this, _, _, cx| {
+                        this.ask(DockAsk { title: "删除容器", tile: IconName::Box, name: n.clone(), detail: "Docker 容器", body: "强制删除,容器内未保存到存储卷的数据会丢失", label: "删除容器", action: Action::Remove(n.clone()), list: Vec::new() }, cx);
+                    })));
+                }
             }
             let ports = ct.ports.iter().take(2).map(|p| tag(p.clone())).collect::<Vec<_>>();
             let more = ct.ports.len().saturating_sub(2);
@@ -708,6 +718,6 @@ impl Home {
     // ---- 概览 ----
 }
 
-fn loading(msg: &'static str) -> Div {
+pub(super) fn loading(msg: &'static str) -> Div {
     div().flex_1().flex().items_center().justify_center().text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child(msg)
 }

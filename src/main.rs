@@ -13,6 +13,7 @@ mod platform;
 mod takeover;
 mod daemon_conf;
 mod sysops;
+mod ctfiles;
 mod docker;
 mod json_hl;
 mod group_form;
@@ -362,6 +363,8 @@ impl Render for Home {
         let body = div().relative().flex_1().min_h_0().flex().flex_col().child(body).children(overlay).children(takeover);
         let drawer = if is_files_tab { None } else { self.files_drawer(window, cx) };
         let dialog = self.takeover_prompt_dialog(cx).or_else(|| self.node_dialog(window, cx)).or_else(|| self.key_modal_view(window, cx)).or_else(|| self.import_dialog(cx)).or_else(|| self.group_delete_dialog(cx)).or_else(|| self.node_delete_dialog(cx)).or_else(|| self.group_form_dialog(window, cx));
+        // 容器页的抽屉、确认框、提示盖在整个窗口上(含标题栏)
+        let dock_layer = if self.dock_visible() { self.dock_overlays(window, cx) } else { Vec::new() };
         div()
             .size_full()
             .relative()
@@ -373,6 +376,7 @@ impl Render for Home {
             .child(titlebar)
             .child(body)
             .children(drawer)
+            .children(dock_layer)
             .children(dialog)
             // 接管确认框弹出时,标题栏盖在遮罩上面,让被申请的标签保持醒目
             .children(if self.takeover_prompts.is_empty() { None } else { Some(self.titlebar_spotlight(cx)) })
