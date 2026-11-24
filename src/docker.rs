@@ -448,6 +448,8 @@ pub enum Action {
     ConfirmInsecure(String),
     /// 运维页的操作(结束进程、重启服务、保存 crontab……),在服务器上执行一段脚本
     Sys(crate::sysops::Job),
+    /// 按 compose 文件重新部署堆栈(`docker compose up -d`)
+    ComposeUp { project: String, dir: String, files: Vec<String>, envs: Vec<String>, pull: bool },
 }
 
 impl Action {
@@ -467,12 +469,27 @@ impl Action {
             Action::SaveDaemon(_) | Action::SaveRestartDaemon(_) => Vec::new(),
             Action::Logout(h) => v(&["logout"], h),
             Action::ConfirmInsecure(_) | Action::Sys(_) => Vec::new(),
+            Action::ComposeUp { project, dir, files, envs, pull } => {
+                let mut v: Vec<String> = ["compose", "-p", project, "--project-directory", dir].map(String::from).to_vec();
+                for f in files {
+                    v.extend(["-f".to_string(), f.clone()]);
+                }
+                for e in envs {
+                    v.extend(["--env-file".to_string(), e.clone()]);
+                }
+                v.extend(["up", "-d"].map(String::from));
+                if *pull {
+                    v.extend(["--pull", "always"].map(String::from));
+                }
+                v
+            }
         }
     }
     pub fn target(&self) -> &str {
         match self {
             Action::Start(n) | Action::Stop(n) | Action::Restart(n) | Action::Remove(n) | Action::Pull(n) | Action::RemoveImage(n) | Action::RemoveVolume(n) | Action::Logout(n) | Action::ConfirmInsecure(n) => n,
             Action::Sys(j) => &j.target,
+            Action::ComposeUp { project, .. } => project,
             Action::PruneImages => "未使用的镜像",
             Action::PruneVolumes => "未使用的存储卷",
             Action::SaveDaemon(_) | Action::SaveRestartDaemon(_) => "daemon.json",
@@ -494,6 +511,7 @@ impl Action {
             Action::Logout(_) => "退出登录",
             Action::ConfirmInsecure(_) => "启用 HTTP 仓库",
             Action::Sys(_) => "执行",
+            Action::ComposeUp { .. } => "应用",
         }
     }
 }
@@ -1659,7 +1677,7 @@ async fn run_action(r: &Runner, sh: &Shared, a: Action) {
     let key = format!("{}:{}", a.verb(), a.target());
     sh.busy.lock().unwrap().insert(key.clone());
     sh.bump();
-    let timeout = if matches!(a, Action::Pull(_) | Action::PruneImages) { Duration::from_secs(600) } else { Duration::from_secs(60) };
+    let timeout = if matches!(a, Action::Pull(_) | Action::PruneImages | Action::ComposeUp { .. }) { Duration::from_secs(600) } else { Duration::from_secs(60) };
     let res = r.docker(&a.args(), timeout).await;
     sh.busy.lock().unwrap().remove(&key);
     let msg = match res {
@@ -1731,6 +1749,15 @@ pub fn demo_snapshot(stacks: &[Stack]) -> Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compose_up_passes_all_files_and_envs() {
+        let a = Action::ComposeUp { project: "p".into(), dir: "/d".into(), files: vec!["/d/a.yml".into(), "/d/b.yml".into()], envs: vec!["/d/.env.prod".into()], pull: true };
+        assert_eq!(
+            a.args().join(" "),
+            "compose -p p --project-directory /d -f /d/a.yml -f /d/b.yml --env-file /d/.env.prod up -d --pull always"
+        );
+    }
 
     const PS: &str = "abc123def456\tdemo-web\tnginx:alpine\trunning\tUp 2 hours\t0.0.0.0:8080->80/tcp, [::]:8080->80/tcp, 443/tcp\tdemo\tweb\t\tdemo-data\n\
                       111111111111\tdemo-exited\tbusybox\texited\tExited (3) 5 minutes ago\t\t\t\t\t\n\

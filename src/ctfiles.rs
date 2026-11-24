@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CtKind {
     Logs,
+    /// 堆栈的 compose 文件位置(`docker inspect` 读容器标签)
+    Compose,
 }
 
 /// 单个传输的大小上限(整个文件在内存里中转)

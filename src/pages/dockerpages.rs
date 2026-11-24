@@ -49,6 +49,7 @@ pub(crate) struct DockUi {
     pub ct: super::ctpanel::CtUi,
     sort: (SortKey, bool),
     confirm: Option<DockAsk>,
+    pub(super) comp: super::composeedit::CompUi,
     pub(super) notice: Option<(SharedString, Instant)>,
     polling: bool,
     /// 上次读到的 `Docker::version`
@@ -65,7 +66,7 @@ pub(crate) struct DockUi {
 
 impl DockUi {
     pub fn new() -> Self {
-        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
+        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), comp: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
     }
 }
 
@@ -157,6 +158,7 @@ impl Home {
             self.reg_sync(window, cx);
             self.sys_sync(window, cx);
             self.ct_sync(window, cx);
+            self.comp_sync(window, cx);
             return;
         }
         // 这个标签的终端已连上就复用它的连接;没连上等它(连接页显示终端的进度);没有终端才自己连。
@@ -185,6 +187,7 @@ impl Home {
         let snap = (ver != self.dock.seen).then(|| d.snapshot()).flatten();
         self.dock.seen = ver;
         if let Some(n) = notice {
+            self.comp_applied(&n, cx);
             self.dock.notice = Some((n.into(), Instant::now()));
         }
         if let Some(s) = snap {
@@ -197,6 +200,7 @@ impl Home {
         self.reg_sync(window, cx);
         self.sys_sync(window, cx);
         self.ct_sync(window, cx);
+        self.comp_sync(window, cx);
     }
 
     /// 定时器:后台有新数据、连接状态在变、提示过期时重绘
@@ -241,6 +245,9 @@ impl Home {
         if self.demo {
             self.dock.notice = Some(("演示数据,不会真的执行".into(), Instant::now()));
         } else if let Some(d) = self.workspace.active.and_then(|i| self.workspace.tabs.get(i)).and_then(|t| t.docker.as_ref()) {
+            if matches!(a, Action::ComposeUp { .. }) {
+                self.dock.comp.applying = true;
+            }
             d.act(a);
         }
         cx.notify();
@@ -422,6 +429,9 @@ impl Home {
         let mut v: Vec<AnyElement> = Vec::new();
         v.extend(self.ct_drawer(window, cx));
         if let Some(m) = self.cron_dialog(cx) {
+            v.push(m.into_any_element());
+        }
+        if let Some(m) = self.comp_dialog(window, cx) {
             v.push(m.into_any_element());
         }
         if let Some(cf) = &self.dock.confirm {

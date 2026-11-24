@@ -11,6 +11,10 @@ pub enum Kind {
     Cron,
     /// 某个目录下最大的子目录
     Top,
+    /// 堆栈的 compose 文件内容
+    ComposeFile,
+    /// 堆栈的 env 文件内容
+    ComposeEnv,
 }
 
 /// 一次要在服务器上执行的操作(结束进程、重启服务、保存 crontab……),完成后可以顺带重读一份数据

@@ -195,6 +195,7 @@ impl Home {
             Kind::Services => s.services = Some(res.and_then(|t| sysops::parse_services(&t))),
             Kind::Storage => s.storage = Some(res.and_then(|t| sysops::parse_storage(&t))),
             Kind::Cron => s.cron = Some(res.map(|t| sysops::parse_cron(&t))),
+            Kind::ComposeFile | Kind::ComposeEnv => {}
             Kind::Top => {
                 if let Some((_, slot)) = &mut s.top {
                     *slot = Some(res.and_then(|t| sysops::parse_top(&t)));

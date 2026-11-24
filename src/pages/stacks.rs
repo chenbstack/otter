@@ -359,6 +359,13 @@ impl Home {
             .child(metric_col("CPU", format!("{:.1}%", agg.cpu), &agg.cpu_s, c::cpu(), hide))
             .child(metric_col("内存", mock::fmt_mem(agg.mem_mb), &agg.mem_s, c::mem(), hide))
             .child(div().w(px(92.0)).flex().justify_end().child(pill(label, fg, bg)))
+            .children((s.name != "独立容器").then(|| {
+                let name = s.name.clone();
+                super::syspages::tip(super::dockerpages::icon_btn(("stack-edit", ix), IconName::Pencil, c::muted()), "编辑 compose 文件").on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.comp_open(&name, window, cx);
+                }))
+            }))
             .child(
                 div()
                     .id(("more", ix))

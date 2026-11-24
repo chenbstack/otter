@@ -34,7 +34,7 @@ csv = "1.4"
 russh = "0.65"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs"] }
-gpui-kit = "=0.9.1"
+gpui-kit = { version = "=0.9.1", features = ["tree-sitter-yaml"] }
 # 仅为用 Window::render_to_image 离屏截图:直接给底层 crate 开 test-support,靠特性统一生效
 gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 rusqlite = { version = "0.43.0", features = ["bundled"] }
