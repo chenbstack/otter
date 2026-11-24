@@ -1,10 +1,38 @@
-//! `otter ctl …` 和 `otter mcp`:连本地 socket 的薄客户端,不启动界面。
+//! `otter …` 和 `otter mcp`:连本地 socket 的薄客户端,不启动界面。
 //! MCP 是主入口(stdio,按行分隔的 JSON-RPC),CLI 只给人和脚本查询用。
 
 use std::io::{BufRead, BufReader, Write};
 use crate::ipc::SyncStream;
 
 use serde_json::{Value, json};
+
+/// agent 自报的名称:`--agent <名字>` > 环境变量 `OTTER_AGENT` > 默认值。界面上的确认框、遮罩、标签提示和日志
+/// 都显示它。名称只是给用户看的,不是身份。
+static AGENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn agent_name(default: &str) -> String {
+    AGENT
+        .get()
+        .cloned()
+        .or_else(|| std::env::var("OTTER_AGENT").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// 从参数里取出 `--agent <名字>`(任何位置),返回剩下的参数。
+fn take_agent(args: &[String]) -> Vec<String> {
+    let mut rest = Vec::with_capacity(args.len());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--agent" {
+            if let Some(n) = it.next().map(|n| n.trim()).filter(|n| !n.is_empty()) {
+                let _ = AGENT.set(n.to_string());
+            }
+        } else {
+            rest.push(a.clone());
+        }
+    }
+    rest
+}
 
 /// 一条到运行中 Otter 的连接。
 pub struct Conn {
@@ -20,7 +48,7 @@ pub struct CallError {
 
 impl Conn {
     pub fn open(client_name: &str) -> Result<Self, CallError> {
-        let wr = crate::ipc::connect().map_err(|_| CallError { kind: "not_running".into(), message: "Otter 没有在运行,请先打开 Otter".into() })?;
+        let wr = crate::ipc::connect().map_err(|_| CallError { kind: "not_running".into(), message: "Otter is not running; open Otter first".into() })?;
         let rd = BufReader::new(wr.try_clone().map_err(|e| CallError { kind: "internal".into(), message: e.to_string() })?);
         let mut c = Self { rd, wr, next: 1 };
         c.call("hello", json!({ "client_name": client_name, "parent_exe": crate::ipc::parent_exe() }))?;
@@ -28,7 +56,7 @@ impl Conn {
     }
 
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
-        let io = |e: std::io::Error| CallError { kind: "not_running".into(), message: format!("和 Otter 的连接断了: {e}") };
+        let io = |e: std::io::Error| CallError { kind: "not_running".into(), message: format!("lost the connection to Otter: {e}") };
         let id = self.next;
         self.next += 1;
         let mut line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string();
@@ -36,9 +64,9 @@ impl Conn {
         self.wr.write_all(line.as_bytes()).map_err(io)?;
         let mut buf = String::new();
         if self.rd.read_line(&mut buf).map_err(io)? == 0 {
-            return Err(CallError { kind: "not_running".into(), message: "Otter 已退出".into() });
+            return Err(CallError { kind: "not_running".into(), message: "Otter has quit".into() });
         }
-        let v: Value = serde_json::from_str(&buf).map_err(|e| CallError { kind: "internal".into(), message: format!("响应不是合法 JSON: {e}") })?;
+        let v: Value = serde_json::from_str(&buf).map_err(|e| CallError { kind: "internal".into(), message: format!("response is not valid JSON: {e}") })?;
         if let Some(e) = v.get("error") {
             let kind = e.pointer("/data/kind").and_then(Value::as_str).unwrap_or("internal").to_string();
             let mut message = e.get("message").and_then(Value::as_str).unwrap_or("").to_string();
@@ -51,7 +79,7 @@ impl Conn {
     }
 }
 
-/// `otter ctl nodes [--group <名字或id>]`
+/// `otter nodes [--group <名字或id>]`
 fn run_nodes(args: &[String]) -> i32 {
     let mut params = Value::Null;
     let mut it = args.iter();
@@ -61,17 +89,17 @@ fn run_nodes(args: &[String]) -> i32 {
                 // 纯数字按分组 id,否则按名字
                 Some(g) => params = json!({ "group": g.parse::<i64>().map_or_else(|_| json!(g), |n| json!(n)) }),
                 None => {
-                    eprintln!("--group 需要一个分组名或 id");
+                    eprintln!("--group needs a group name or id");
                     return 2;
                 }
             },
             other => {
-                eprintln!("不认识的参数 {other}\n用法: otter ctl nodes [--group <名字或id>]");
+                eprintln!("unknown argument {other}\nusage: otter nodes [--group <name|id>]");
                 return 2;
             }
         }
     }
-    match Conn::open("otter-cli").and_then(|mut c| c.call("list_nodes", params)) {
+    match Conn::open(&agent_name("otter-cli")).and_then(|mut c| c.call("list_nodes", params)) {
         Ok(v) => {
             println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
             0
@@ -83,23 +111,35 @@ fn run_nodes(args: &[String]) -> i32 {
     }
 }
 
-/// `otter ctl <nodes|groups|sessions|focus>`。返回退出码。
+fn query_help(cmd: &str) -> &'static str {
+    match cmd {
+        "nodes" => "usage: otter nodes [--group <name|id>]\nList nodes as JSON: id, name, host/user/port, group, tags, OS, created_at, last_connected_at, connected. --group takes a group id when numeric, otherwise a group name.",
+        "groups" => "usage: otter groups\nList groups as JSON: id, name, node_count.",
+        "sessions" => "usage: otter sessions\nList the sessions open in Otter as JSON: session id, node, state, focused, taken over.",
+        _ => "usage: otter current\nThe session the user is looking at, as JSON; null if there is none. Read-only, never switches tabs.",
+    }
+}
+
+/// `otter <nodes|groups|sessions|current|takeover|release|run|type|key|screen|scroll>`:`args[0]` 是命令名。返回退出码。
 pub fn run_ctl(args: &[String]) -> i32 {
+    let args = &take_agent(args)[..];
+    if args.len() > 1 && args[1..].iter().any(|a| a == "-h" || a == "--help") && matches!(args[0].as_str(), "nodes" | "groups" | "sessions" | "current") {
+        println!("{}", query_help(&args[0]));
+        return 0;
+    }
     let (method, usage) = match args.first().map(String::as_str) {
         Some("nodes") => return run_nodes(&args[1..]),
         Some("groups") => ("list_groups", ""),
         Some("sessions") => ("list_sessions", ""),
-        Some("focus") => ("get_focus", ""),
-        Some("shell") => return run_shell(&args[1..]),
-        Some("run") => return run_once(&args[1..]),
-        Some("screen") => return run_once(&args[..]),
-        _ => ("", "用法: otter ctl <nodes [--group 名字或id]|groups|sessions|focus|shell [会话id]|run [选项] <命令>|screen [选项]>"),
+        Some("current") => ("get_focus", ""),
+        Some(c @ ("takeover" | "release" | "run" | "type" | "key" | "screen" | "scroll")) => return run_leased(c, &args[1..]),
+        _ => ("", "usage: otter <nodes|groups|sessions|current|takeover|release|run|type|key|screen|scroll> (see: otter --help)"),
     };
     if method.is_empty() {
         eprintln!("{usage}");
         return 2;
     }
-    match Conn::open("otter-cli").and_then(|mut c| c.call(method, Value::Null)) {
+    match Conn::open(&agent_name("otter-cli")).and_then(|mut c| c.call(method, Value::Null)) {
         Ok(v) => {
             println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
             0
@@ -124,16 +164,17 @@ fn tools() -> Value {
         tool("get_focus", "用户当前看着的会话;没有则返回 null", json!({}), &[]),
         tool("takeover_begin", "接管一个已连上的终端会话。每次都会弹窗请用户确认;用户随时能中止。之后才能输入、读屏幕", json!({ "session": sid, "reason": { "type": "string", "description": "告诉用户你要做什么" } }), &["session"]),
         tool("takeover_end", "交还接管。不会向终端发送任何按键", json!({ "session": sid }), &["session"]),
-        tool("send_input", "向被接管的终端输入文本。单次最多 8KB。execute 为 true 时在末尾自动按回车执行,不要在 text 里自己带换行", json!({ "session": sid, "text": { "type": "string" }, "execute": { "type": "boolean", "description": "输入后自动回车执行,默认 false" } }), &["session", "text"]),
+        tool("send_input", "向被接管的终端输入文本。单次最多 8KB。execute 为 true 时在末尾自动按回车执行,不要在 text 里自己带换行,并返回 mark(命令开始的位置,交给 wait_for 的 since)", json!({ "session": sid, "text": { "type": "string" }, "execute": { "type": "boolean", "description": "输入后自动回车执行,默认 false" } }), &["session", "text"]),
         tool("send_key", "向被接管的终端发送一个按键:enter、tab、esc、up、down、left、right、home、end、pageup、pagedown、backspace、delete、space、ctrl+<字母>", json!({ "session": sid, "key": { "type": "string" } }), &["session", "key"]),
         tool("read_screen", "读取被接管终端当前屏幕的文本和光标位置", json!({ "session": sid }), &["session"]),
         tool("read_scrollback", "读取被接管终端最近的 N 行(含已滚出屏幕的),最多 500", json!({ "session": sid, "lines": { "type": "integer" } }), &["session"]),
-        tool("wait_for", "等到屏幕出现匹配 pattern(正则)、或静默 idle_ms 毫秒、或超时,然后返回屏幕", json!({ "session": sid, "pattern": { "type": "string" }, "idle_ms": { "type": "integer" }, "timeout_ms": { "type": "integer", "description": "默认 10000,最大 120000" } }), &["session"]),
+        tool("wait_for", "等到屏幕出现匹配 pattern(正则)、或静默 idle_ms 毫秒、或超时,然后返回屏幕。执行命令的推荐用法:send_input(execute:true) 拿到 mark,再 wait_for 带上 since=mark,读返回的 output", json!({ "session": sid, "pattern": { "type": "string" }, "idle_ms": { "type": "integer" }, "timeout_ms": { "type": "integer", "description": "默认 10000,最大 120000" }, "since": { "type": "object", "description": "send_input(execute:true) 返回的 mark。带上它,返回里多一个 output:这条命令之后的新输出(含命令回显和结束时的提示符),pattern 也只在新输出里匹配" } }), &["session"]),
     ])
 }
 
 /// `otter mcp`:stdio 上的 MCP 服务器。返回退出码。
-pub fn run_mcp() -> i32 {
+pub fn run_mcp(args: &[String]) -> i32 {
+    take_agent(args);
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
     let mut client_name = String::from("mcp-client");
@@ -162,7 +203,7 @@ pub fn run_mcp() -> i32 {
                     Err(CallError { kind: "bad_request".into(), message: format!("未知工具 {name}") })
                 } else {
                     if conn.is_none() {
-                        match Conn::open(&client_name) {
+                        match Conn::open(&agent_name(&client_name)) {
                             Ok(c) => conn = Some(c),
                             Err(e) => {
                                 reply(&mut out, id, tool_result(Err(e)));
@@ -235,136 +276,77 @@ mod tests {
     }
 }
 
-const SHELL_HELP: &str = "命令:
-  begin [原因]        申请接管(会在 Otter 里弹确认)
-  run <命令>          输入并自动回车执行
-  type <文本>         只输入,不回车
-  key <按键>          enter / tab / esc / up / ctrl+c ...
-  screen              读当前屏幕
-  scroll [行数]       读最近的行,默认 100
-  wait <正则> [毫秒]   等屏幕出现匹配,默认 10000
-  idle <毫秒> [超时]   等屏幕静默
-  stop                交还接管(不发 Ctrl+C)
-  help / quit         帮助 / 退出(退出也会交还)";
-
 fn print_ok(v: &Value) {
-    match v.get("text").and_then(Value::as_str).or_else(|| v.get("screen").and_then(Value::as_str)) {
+    match v.get("text").and_then(Value::as_str).or_else(|| v.get("output").and_then(Value::as_str)).or_else(|| v.get("screen").and_then(Value::as_str)) {
         Some(t) => println!("{t}"),
         None => println!("{}", serde_json::to_string(v).unwrap_or_default()),
     }
 }
 
-/// `otter ctl shell [会话id]`:交互模式。一个进程里保持连接,所以接管能跨多条命令。
-fn run_shell(args: &[String]) -> i32 {
-    let mut c = match Conn::open("otter-cli") {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{}: {}", e.kind, e.message);
-            return 3;
-        }
-    };
-    let sid = match args.first().and_then(|a| a.parse::<u64>().ok()) {
-        Some(s) => s,
-        None => match c.call("get_focus", Value::Null) {
-            Ok(v) => match v.get("session").and_then(Value::as_u64) {
-                Some(s) => {
-                    println!("当前焦点会话: {s} ({})", v.get("node_name").and_then(Value::as_str).unwrap_or("?"));
-                    s
-                }
-                None => {
-                    eprintln!("Otter 里当前没有可用的会话,请指定会话 id(otter ctl sessions)");
-                    return 1;
-                }
-            },
-            Err(e) => {
-                eprintln!("{}: {}", e.kind, e.message);
-                return 1;
-            }
-        },
-    };
-    println!("会话 {sid}。输入 help 查看命令。");
-    let stdin = std::io::stdin();
-    let mut held = false;
-    loop {
-        print!("otter[{sid}]{}> ", if held { "*" } else { "" });
-        let _ = std::io::stdout().flush();
-        let mut line = String::new();
-        if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 {
-            break;
-        }
-        let line = line.trim_end_matches(['\n', '\r']);
-        let (cmd, rest) = line.trim_start().split_once(' ').unwrap_or((line.trim(), ""));
-        let rest = rest.trim_start();
-        let (method, params) = match cmd {
-            "" => continue,
-            "help" | "?" => {
-                println!("{SHELL_HELP}");
-                continue;
-            }
-            "quit" | "exit" | "q" => break,
-            "begin" => ("takeover_begin", json!({ "session": sid, "reason": rest })),
-            "stop" => ("takeover_end", json!({ "session": sid })),
-            "run" => ("send_input", json!({ "session": sid, "text": rest, "execute": true })),
-            "type" => ("send_input", json!({ "session": sid, "text": rest })),
-            "key" => ("send_key", json!({ "session": sid, "key": rest })),
-            "screen" => ("read_screen", json!({ "session": sid })),
-            "scroll" => ("read_scrollback", json!({ "session": sid, "lines": rest.parse::<u64>().unwrap_or(100) })),
-            "wait" => {
-                let (pat, ms) = rest.rsplit_once(' ').filter(|(_, m)| m.parse::<u64>().is_ok()).map_or((rest, 10_000), |(p, m)| (p, m.parse().unwrap_or(10_000)));
-                ("wait_for", json!({ "session": sid, "pattern": pat, "timeout_ms": ms }))
-            }
-            "idle" => {
-                let mut it = rest.split_whitespace().filter_map(|x| x.parse::<u64>().ok());
-                ("wait_for", json!({ "session": sid, "idle_ms": it.next().unwrap_or(1000), "timeout_ms": it.next().unwrap_or(10_000) }))
-            }
-            _ => {
-                println!("不认识的命令 {cmd},输入 help 查看");
-                continue;
-            }
-        };
-        match c.call(method, params) {
-            Ok(v) => {
-                held = match method {
-                    "takeover_begin" => true,
-                    "takeover_end" => false,
-                    _ => held,
-                };
-                print_ok(&v);
-            }
-            Err(e) => {
-                if e.kind == "takeover_revoked" || e.kind == "takeover_denied" {
-                    held = false;
-                }
-                eprintln!("{}: {}", e.kind, e.message);
-                if e.kind == "not_running" {
-                    return 3;
-                }
-            }
-        }
-    }
-    if held {
-        let _ = c.call("takeover_end", json!({ "session": sid }));
-    }
-    0
+const ONCE_HELP: &str = "Taking over and releasing are separate commands: take over once, run as many commands as you like, release at the end.
+The takeover is not tied to the command that created it (a token is kept under leases/ in Otter's data directory), so a failing command does not drop it.
+
+Usage:
+  otter takeover [options]          ask to take over a session (Otter shows a confirmation); stays held on success
+  otter release [options]           hand the session back (sends no Ctrl+C)
+  otter run [options] <command>     type a command, press Enter, wait for output, print it (needs a takeover)
+  otter type [options] <text>       type text without pressing Enter
+  otter key [options] <key>         press a key: enter tab esc up down ctrl+c ...
+  otter screen [options]            print the current screen
+  otter scroll [options] [lines]    print recent scrollback, 100 lines by default
+Options:
+  --session <id>     session id; default is the session the user is looking at (see: otter sessions)
+  --reason <text>    why you want to take over; shown in the confirmation (takeover)
+  --wait <regex>     run: wait until the new output matches (default: wait until output goes quiet)
+  --idle <ms>        run: how long output must stay quiet, default 1000
+  --timeout <ms>     run: longest wait, default 10000
+  --agent <name>     tell the user which agent this is (shown in the confirmation, overlay, tab tooltip and log); or set OTTER_AGENT
+  --once             no persistent takeover: take over, act and release within this one command (asks every time)
+A takeover ends after 30 minutes, or after 30 idle minutes; the user can stop it in Otter at any time.";
+
+// ---- 持久接管的令牌:一条命令一个连接,令牌记在本机,下一条命令凭它继续 ----
+
+fn lease_path(sid: u64) -> Option<std::path::PathBuf> {
+    crate::ipc::data_dir().map(|d| d.join("leases").join(sid.to_string()))
 }
 
-const ONCE_HELP: &str = "用法:
-  otter ctl run [选项] <命令>    接管、输入并回车执行、等输出、打印屏幕、交还
-  otter ctl screen [选项]        接管、打印当前屏幕、交还
-选项:
-  --session <id>   会话 id,默认用户当前焦点的会话
-  --reason <文字>  显示在确认框里的原因
-  --wait <正则>    等屏幕出现匹配(默认改为等静默)
-  --idle <毫秒>    等屏幕静默这么久,默认 1000
-  --timeout <毫秒> 最长等待,默认 10000
-每次都会在 Otter 里弹确认;命令结束时交还接管,不发 Ctrl+C。";
+fn lease_read(sid: u64) -> Option<String> {
+    std::fs::read_to_string(lease_path(sid)?).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
 
-/// `otter ctl run|screen`:一次性命令。一条命令内完成接管 → 操作 → 交还。
-fn run_once(args: &[String]) -> i32 {
-    let screen_only = args.first().is_some_and(|a| a == "screen");
-    let args = if screen_only { &args[1..] } else { args };
-    let (mut sid, mut reason, mut pattern, mut idle, mut timeout) = (None::<u64>, String::new(), None::<String>, 1000u64, 10_000u64);
-    let mut cmd: Vec<&str> = vec![];
+fn lease_write(sid: u64, token: &str) {
+    let Some(p) = lease_path(sid) else { return };
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if std::fs::write(&p, token).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
+fn lease_clear(sid: u64) {
+    if let Some(p) = lease_path(sid) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+fn fail(e: &CallError) -> i32 {
+    eprintln!("{}: {}", e.kind, e.message);
+    match e.kind.as_str() {
+        "not_running" => 3,
+        "takeover_denied" => 4,
+        _ => 1,
+    }
+}
+
+/// `otter takeover|release|run|type|key|screen|scroll`。
+fn run_leased(cmd_name: &str, args: &[String]) -> i32 {
+    let (mut sid, mut reason, mut pattern, mut idle, mut timeout, mut once) = (None::<u64>, String::new(), None::<String>, 1000u64, 10_000u64, false);
+    let mut rest: Vec<&str> = vec![];
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -373,65 +355,132 @@ fn run_once(args: &[String]) -> i32 {
             "--wait" => pattern = it.next().cloned(),
             "--idle" => idle = it.next().and_then(|v| v.parse().ok()).unwrap_or(idle),
             "--timeout" => timeout = it.next().and_then(|v| v.parse().ok()).unwrap_or(timeout),
+            "--once" => once = true,
             "-h" | "--help" => {
                 println!("{ONCE_HELP}");
                 return 0;
             }
-            other => cmd.push(other),
+            other => rest.push(other),
         }
     }
-    let cmd = cmd.join(" ");
-    if !screen_only && cmd.is_empty() {
+    let text = rest.join(" ");
+    if matches!(cmd_name, "run" | "type" | "key") && text.is_empty() {
         eprintln!("{ONCE_HELP}");
         return 2;
     }
-    let fail = |e: CallError| {
-        eprintln!("{}: {}", e.kind, e.message);
-        match e.kind.as_str() {
-            "not_running" => 3,
-            "takeover_denied" => 4,
-            _ => 1,
-        }
-    };
-    let mut c = match Conn::open("otter-cli") {
+    let mut c = match Conn::open(&agent_name("otter-cli")) {
         Ok(c) => c,
-        Err(e) => return fail(e),
+        Err(e) => return fail(&e),
     };
     let sid = match sid {
         Some(s) => s,
         None => match c.call("get_focus", Value::Null).map(|v| v.get("session").and_then(Value::as_u64)) {
             Ok(Some(s)) => s,
             Ok(None) => {
-                eprintln!("Otter 里当前没有可用的会话,用 --session 指定(otter ctl sessions)");
+                eprintln!("no session is open in Otter; pick one with --session (see: otter sessions)");
                 return 1;
             }
-            Err(e) => return fail(e),
+            Err(e) => return fail(&e),
         },
     };
-    if let Err(e) = c.call("takeover_begin", json!({ "session": sid, "reason": if reason.is_empty() { cmd.clone() } else { reason } })) {
-        return fail(e);
+
+    // 申请接管:成功后把令牌记下来,命令结束也不放手
+    if cmd_name == "takeover" {
+        let token = lease_read(sid);
+        let mut p = json!({ "session": sid, "lease": true, "reason": reason });
+        if let Some(t) = &token {
+            p["token"] = json!(t);
+        }
+        return match c.call("takeover_begin", p) {
+            Ok(v) => {
+                if let Some(l) = v.get("lease").and_then(Value::as_str) {
+                    lease_write(sid, l);
+                }
+                println!("{}", json!({ "session": sid, "taken": true, "granted": v.get("granted"), "already": v.get("already") }));
+                0
+            }
+            Err(e) => fail(&e),
+        };
     }
-    let result = (|| {
-        if screen_only {
-            return c.call("read_screen", json!({ "session": sid }));
+    if cmd_name == "release" {
+        let token = lease_read(sid);
+        let r = c.call("takeover_end", json!({ "session": sid, "token": token }));
+        lease_clear(sid);
+        return match r {
+            Ok(_) => {
+                println!("{}", json!({ "session": sid, "released": true }));
+                0
+            }
+            // 已经不在接管了(被用户停止、超时、App 重启)也算交还完成,只是提示一下
+            Err(e) if matches!(e.kind.as_str(), "takeover_required" | "takeover_revoked" | "no_such_session") => {
+                println!("{}", json!({ "session": sid, "released": false, "note": e.message }));
+                0
+            }
+            Err(e) => fail(&e),
+        };
+    }
+
+    // 其余命令:凭令牌操作;--once 时就地接管、结束时交还
+    let token = if once {
+        let begin = json!({ "session": sid, "reason": if reason.is_empty() { text.clone() } else { reason.clone() } });
+        if let Err(e) = c.call("takeover_begin", begin) {
+            return fail(&e);
         }
-        c.call("send_input", json!({ "session": sid, "text": cmd, "execute": true }))?;
-        let mut w = json!({ "session": sid, "timeout_ms": timeout });
-        match &pattern {
-            Some(p) => w["pattern"] = json!(p),
-            None => w["idle_ms"] = json!(idle),
+        None
+    } else {
+        match lease_read(sid) {
+            Some(t) => Some(t),
+            None => {
+                eprintln!("takeover_required: session {sid} is not taken over; run: otter takeover --session {sid}");
+                return 1;
+            }
         }
-        c.call("wait_for", w)
+    };
+    let with = |mut v: Value| {
+        v["session"] = json!(sid);
+        if let Some(t) = &token {
+            v["token"] = json!(t);
+        }
+        v
+    };
+    let result = (|| match cmd_name {
+        "screen" => c.call("read_screen", with(json!({}))),
+        "scroll" => c.call("read_scrollback", with(json!({ "lines": rest.first().and_then(|n| n.parse::<u64>().ok()).unwrap_or(100) }))),
+        "type" => c.call("send_input", with(json!({ "text": text, "execute": false }))),
+        "key" => c.call("send_key", with(json!({ "key": text }))),
+        _ => {
+            let sent = c.call("send_input", with(json!({ "text": text, "execute": true })))?;
+            let mut w = with(json!({ "timeout_ms": timeout }));
+            // 带上命令开始的位置,返回的 output 就只有这条命令之后的新内容
+            if let Some(m) = sent.get("mark") {
+                w["since"] = m.clone();
+            }
+            match &pattern {
+                Some(p) => w["pattern"] = json!(p),
+                None => w["idle_ms"] = json!(idle),
+            }
+            c.call("wait_for", w)
+        }
     })();
-    let _ = c.call("takeover_end", json!({ "session": sid }));
+    if once {
+        let _ = c.call("takeover_end", json!({ "session": sid }));
+    }
     match result {
         Ok(v) => {
             print_ok(&v);
             if v.get("timeout").and_then(Value::as_bool) == Some(true) {
-                eprintln!("(等待超时,以上是当时的屏幕)");
+                eprintln!("(timed out waiting; the output above is what was on screen)");
             }
             0
         }
-        Err(e) => fail(e),
+        Err(e) => {
+            // 接管已经没了:令牌作废,告诉 agent 重新接管
+            if matches!(e.kind.as_str(), "takeover_required" | "takeover_revoked" | "no_such_session") {
+                lease_clear(sid);
+                eprintln!("{}: {} (token discarded; to continue run: otter takeover --session {sid})", e.kind, e.message);
+                return 1;
+            }
+            fail(&e)
+        }
     }
 }

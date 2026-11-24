@@ -42,6 +42,21 @@ pub struct Takeover {
     pub last_action: String,
     /// 正在 `wait_for` 里等待,此时不算空闲
     pub waiting: bool,
+    /// 持久接管的令牌:接管不随连接断开而结束,凭令牌可以从别的连接继续操作(命令行一条命令一个连接)
+    pub lease: Option<String>,
+}
+
+impl Takeover {
+    /// 这次调用是不是接管的持有者:同一个连接,或者带着正确的令牌。
+    fn owned_by(&self, client: &Client, params: &Value) -> bool {
+        self.client_id == client.id || self.lease.as_deref().is_some_and(|l| params.get("token").and_then(Value::as_str) == Some(l))
+    }
+}
+
+fn new_lease() -> String {
+    use rand::RngExt as _;
+    let b: [u8; 16] = rand::rng().random();
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// 等用户确认的接管申请。
@@ -49,6 +64,7 @@ pub struct Prompt {
     tab_id: u64,
     client: Arc<Client>,
     reason: String,
+    lease: bool,
     reply: Reply,
 }
 
@@ -116,6 +132,26 @@ pub fn key_bytes(key: &str) -> Option<Vec<u8>> {
     Some(b.to_vec())
 }
 
+/// 「命令从这里开始」的标记:光标所在行的绝对行号,加上这一行当时的内容(用来校验行号没有因为回滚被挤掉而错位)。
+/// `send_input` 带 `execute` 时返回它,`wait_for` 的 `since` 收回它,返回这条命令之后的新输出。
+fn output_mark(snap: &gpui_xterm::TextSnapshot) -> Value {
+    let anchor = snap.lines.get(snap.screen_start + snap.cursor_line).cloned().unwrap_or_default();
+    json!({ "row": snap.history_total + snap.cursor_line, "anchor": anchor })
+}
+
+/// 标记之后的新输出(含命令回显和结束时的提示符)。行号对不上(回滚被挤掉、屏幕被清了)时返回 `None`,调用方退回整屏。
+fn output_since(snap: &gpui_xterm::TextSnapshot, mark: &Value) -> Option<String> {
+    let row = mark.get("row")?.as_u64()? as i64;
+    let anchor = mark.get("anchor").and_then(Value::as_str).unwrap_or("");
+    // 窗口第一行的绝对行号
+    let window_start = snap.history_total as i64 - snap.screen_start as i64;
+    let idx = usize::try_from(row - window_start).ok().filter(|i| *i < snap.lines.len())?;
+    if !snap.lines[idx].starts_with(anchor) {
+        return None;
+    }
+    Some(trim_trailing_blank(snap.lines[idx..].to_vec()).join("\n"))
+}
+
 /// 屏幕文本:去掉末尾的空行。
 fn trim_trailing_blank(mut lines: Vec<String>) -> Vec<String> {
     while lines.last().is_some_and(|l| l.is_empty()) {
@@ -142,7 +178,7 @@ impl Home {
         };
         let Some(ix) = self.tab_ix_by_id(sid) else {
             // 标签已经没了:如果这个客户端刚被中止过,告诉它原因
-            let err = match self.takeover_revoked.remove(&(client.id, sid)) {
+            let err = match self.take_revoked(client.id, sid, params) {
                 Some(r) => RpcError::revoked(r),
                 None => RpcError::new("no_such_session", "没有这个会话"),
             };
@@ -152,7 +188,7 @@ impl Home {
         match method {
             "takeover_begin" => self.takeover_begin(client, ix, params, reply, window, cx),
             "takeover_end" => {
-                let mine = self.workspace.tabs[ix].takeover.as_ref().is_some_and(|t| t.client_id == client.id);
+                let mine = self.workspace.tabs[ix].takeover.as_ref().is_some_and(|t| t.owned_by(client, params));
                 if mine {
                     self.end_takeover(sid, None, window, cx);
                     let _ = reply.send(Ok(json!({ "ended": true })));
@@ -183,8 +219,12 @@ impl Home {
             return;
         }
         match &tab.takeover {
-            Some(t) if t.client_id == client.id => {
-                let _ = reply.send(Ok(json!({ "session": sid, "already": true })));
+            Some(t) if t.owned_by(client, params) => {
+                let mut r = json!({ "session": sid, "already": true });
+                if let Some(l) = &t.lease {
+                    r["lease"] = json!(l);
+                }
+                let _ = reply.send(Ok(r));
                 return;
             }
             Some(_) => {
@@ -198,21 +238,28 @@ impl Home {
             return;
         }
         let reason = clip(params.get("reason").and_then(Value::as_str).unwrap_or("").trim(), 200);
+        let lease = params.get("lease").and_then(Value::as_bool).unwrap_or(false);
         let granted = self.store.as_ref().is_some_and(|s| s.grant_has(&client.name, &client.parent_exe, node));
         if granted {
-            self.start_takeover(ix, client, &reason, window, cx);
-            let _ = reply.send(Ok(json!({ "session": sid, "granted": "always" })));
+            let l = self.start_takeover(ix, client, &reason, lease, window, cx);
+            let mut r = json!({ "session": sid, "granted": "always" });
+            if let Some(l) = l {
+                r["lease"] = json!(l);
+            }
+            let _ = reply.send(Ok(r));
             return;
         }
         alog(format!("{} 申请接管 {}", client.name, self.node_name(Some(node))));
-        self.takeover_prompts.push_back(Prompt { tab_id: sid, client: client.clone(), reason, reply });
+        self.takeover_prompts.push_back(Prompt { tab_id: sid, client: client.clone(), reason, lease, reply });
         // 申请要让用户看见:把窗口带到前台
         cx.activate(true);
         cx.notify();
     }
 
-    fn start_takeover(&mut self, ix: usize, client: &Arc<Client>, reason: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// 开始接管;`lease` 为真时返回令牌。
+    fn start_takeover(&mut self, ix: usize, client: &Arc<Client>, reason: &str, lease: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<String> {
         let now = Instant::now();
+        let token = lease.then(new_lease);
         let node = self.workspace.tabs[ix].node();
         self.workspace.tabs[ix].takeover = Some(Takeover {
             client_id: client.id,
@@ -221,6 +268,7 @@ impl Home {
             last_call: now,
             last_action: if reason.is_empty() { "已开始接管".into() } else { clip(reason, 60) },
             waiting: false,
+            lease: token.clone(),
         });
         alog(format!("{} 开始接管 {}{}", client.name, self.node_name(node), if reason.is_empty() { String::new() } else { format!("(原因:{reason})") }));
         let fh = self.takeover_focus.get_or_insert_with(|| cx.focus_handle()).clone();
@@ -228,6 +276,26 @@ impl Home {
             window.focus(&fh, cx);
         }
         cx.notify();
+        token
+    }
+
+    /// 取出并清掉「接管被结束」的记录:先按连接找,再按令牌找。
+    fn take_revoked(&mut self, client_id: u64, sid: u64, params: &Value) -> Option<&'static str> {
+        self.takeover_revoked.remove(&(client_id, sid)).or_else(|| {
+            let token = params.get("token").and_then(Value::as_str)?;
+            self.lease_revoked.remove(token)
+        })
+    }
+
+    /// 记下一次接管被结束的原因,让 agent 下次调用时知道。
+    fn record_revoked(&mut self, t: &Takeover, tab_id: u64, reason: &'static str) {
+        self.takeover_revoked.insert((t.client_id, tab_id), reason);
+        if let Some(l) = &t.lease {
+            if self.lease_revoked.len() >= 64 {
+                self.lease_revoked.clear();
+            }
+            self.lease_revoked.insert(l.clone(), reason);
+        }
     }
 
     /// 结束接管。`revoked` 为 `Some(原因)` 时记下来,agent 下次调用会收到 `takeover_revoked`;
@@ -238,7 +306,7 @@ impl Home {
         let node = self.node_name(self.workspace.tabs[ix].node());
         match revoked {
             Some(r) => {
-                self.takeover_revoked.insert((t.client_id, tab_id), r);
+                self.record_revoked(&t, tab_id, r);
                 alog(format!("{} 对 {} 的接管被结束({})", t.client_name, node, revoke_label(r)));
             }
             None => alog(format!("{} 交还了对 {} 的接管", t.client_name, node)),
@@ -258,10 +326,10 @@ impl Home {
         }
     }
 
-    /// 客户端连接断开:释放它持有的接管,撤掉它排队的申请。
+    /// 客户端连接断开:释放它持有的接管(持久接管不释放,凭令牌可以继续),撤掉它排队的申请。
     pub(crate) fn takeover_client_closed(&mut self, client_id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.takeover_prompts.retain(|p| p.client.id != client_id);
-        let ids: Vec<u64> = self.workspace.tabs.iter().filter(|t| t.takeover.as_ref().is_some_and(|k| k.client_id == client_id)).map(|t| t.id).collect();
+        let ids: Vec<u64> = self.workspace.tabs.iter().filter(|t| t.takeover.as_ref().is_some_and(|k| k.client_id == client_id && k.lease.is_none())).map(|t| t.id).collect();
         for id in ids {
             // 客户端已经断开,不需要记「被中止」
             let ix = self.tab_ix_by_id(id);
@@ -279,11 +347,11 @@ impl Home {
     /// 标签要被关掉了:它上面的接管记成 `tab_closed`,agent 下次调用能知道。
     pub(crate) fn takeover_tab_closing(&mut self, ix: usize) {
         let Some(tab) = self.workspace.tabs.get_mut(ix) else { return };
-        if let Some(t) = tab.takeover.take() {
-            self.takeover_revoked.insert((t.client_id, tab.id), "tab_closed");
-            alog(format!("{} 的接管随标签关闭而结束", t.client_name));
-        }
         let id = tab.id;
+        if let Some(t) = tab.takeover.take() {
+            alog(format!("{} 的接管随标签关闭而结束", t.client_name));
+            self.record_revoked(&t, id, "tab_closed");
+        }
         self.takeover_prompts.retain(|p| p.tab_id != id);
     }
 
@@ -306,8 +374,12 @@ impl Home {
                         alog(format!("用户选择总是允许 {} 接管 {}", p.client.name, node_name));
                     }
                 }
-                self.start_takeover(ix, &p.client, &p.reason, window, cx);
-                let _ = p.reply.send(Ok(json!({ "session": p.tab_id, "granted": if d == Decision::Always { "always" } else { "once" } })));
+                let l = self.start_takeover(ix, &p.client, &p.reason, p.lease, window, cx);
+                let mut r = json!({ "session": p.tab_id, "granted": if d == Decision::Always { "always" } else { "once" } });
+                if let Some(l) = l {
+                    r["lease"] = json!(l);
+                }
+                let _ = p.reply.send(Ok(r));
             }
             _ => {
                 let _ = p.reply.send(Err(RpcError::new("no_such_session", "会话已经不存在或已被接管")));
@@ -319,13 +391,17 @@ impl Home {
     fn takeover_op(&mut self, client: &Arc<Client>, ix: usize, method: &str, params: &Value, reply: Reply, cx: &mut Context<Self>) {
         let sid = self.workspace.tabs[ix].id;
         match self.workspace.tabs[ix].takeover.as_mut() {
-            Some(t) if t.client_id == client.id => t.last_call = Instant::now(),
+            Some(t) if t.owned_by(client, params) => {
+                t.last_call = Instant::now();
+                // 持久接管换了连接:此后这个连接就是持有者
+                t.client_id = client.id;
+            }
             Some(_) => {
                 let _ = reply.send(Err(RpcError::new("busy", "这个会话已经被另一个 agent 接管")));
                 return;
             }
             None => {
-                let err = match self.takeover_revoked.remove(&(client.id, sid)) {
+                let err = match self.take_revoked(client.id, sid, params) {
                     Some(r) => RpcError::revoked(r),
                     None => RpcError::new("takeover_required", "先调用 takeover_begin 接管这个会话"),
                 };
@@ -355,6 +431,8 @@ impl Home {
                     let _ = reply.send(Err(RpcError::new("not_connected", "终端已断开")));
                     return;
                 }
+                // 先记下光标位置,命令的输出从这里开始算
+                let mark = execute.then(|| output_mark(&term.view.read(cx).text_snapshot(0)));
                 let mut bytes = text.as_bytes().to_vec();
                 if execute {
                     bytes.push(b'\r');
@@ -363,7 +441,11 @@ impl Home {
                 let shown = clip(&text.replace(['\n', '\r'], "⏎"), LOG_TEXT_MAX);
                 alog(format!("→ {node} 输入:{shown}{}", if execute { " ⏎" } else { "" }));
                 set_action(self, format!("{}:{}", if execute { "执行" } else { "输入" }, clip(&text.replace(['\n', '\r'], " "), 40)));
-                let _ = reply.send(Ok(json!({ "sent": text.len(), "executed": execute })));
+                let mut r = json!({ "sent": text.len(), "executed": execute });
+                if let Some(m) = mark {
+                    r["mark"] = m;
+                }
+                let _ = reply.send(Ok(r));
             }
             "send_key" => {
                 let key = params.get("key").and_then(Value::as_str).unwrap_or("");
@@ -423,6 +505,7 @@ impl Home {
             let _ = reply.send(Err(RpcError::new("bad_request", "pattern 和 idle_ms 至少给一个")));
             return;
         }
+        let since = params.get("since").cloned().filter(|v| v.is_object());
         let timeout = Duration::from_millis(params.get("timeout_ms").and_then(Value::as_u64).unwrap_or(WAIT_DEFAULT_MS).min(WAIT_MAX_MS));
         if let Some(t) = self.workspace.tabs[ix].takeover.as_mut() {
             t.waiting = true;
@@ -448,8 +531,16 @@ impl Home {
                         last_text = text.clone();
                         last_change = Instant::now();
                     }
-                    let out = |key: &str, text: String| Some(Ok(json!({ key: true, "screen": limit_output(text) })));
-                    if pattern.as_ref().is_some_and(|r| r.is_match(&text)) {
+                    // 给了 since 就只看这条命令之后的新输出:正则也只在新输出里匹配,免得被屏幕上旧的提示符骗过去
+                    let new_out = since.as_ref().and_then(|m| output_since(&term.view.read(cx).text_snapshot(SCROLLBACK_MAX), m));
+                    let out = |key: &str, text: String| {
+                        let mut r = json!({ key: true, "screen": limit_output(text) });
+                        if let Some(o) = &new_out {
+                            r["output"] = json!(limit_output(o.clone()));
+                        }
+                        Some(Ok(r))
+                    };
+                    if pattern.as_ref().is_some_and(|r| r.is_match(new_out.as_deref().unwrap_or(&text))) {
                         out("matched", text)
                     } else if idle.is_some_and(|d| last_change.elapsed() >= d) {
                         out("idle", text)
@@ -515,9 +606,9 @@ impl Home {
         if mode == "prompt" {
             let (reply, _rx) = tokio::sync::oneshot::channel();
             let tab_id = self.workspace.tabs[a].id;
-            self.takeover_prompts.push_back(Prompt { tab_id, client, reason: "排查磁盘占用,执行 df -h 和 du".into(), reply });
+            self.takeover_prompts.push_back(Prompt { tab_id, client, reason: "排查磁盘占用,执行 df -h 和 du".into(), lease: false, reply });
         } else {
-            self.start_takeover(a, &client, "", window, cx);
+            self.start_takeover(a, &client, "", false, window, cx);
             self.workspace.tabs[a].takeover.as_mut().map(|t| {
                 t.last_action = "输入:df -h".into();
                 t.waiting = mode == "wait";
@@ -613,7 +704,7 @@ impl Home {
         )
     }
 
-    /// 接管申请的确认框:拒绝 / 允许一次 / 总是允许。
+    /// 接管申请的确认框:拒绝 / 允许一次(默认) / 总是允许,三个按钮等宽。
     pub(crate) fn takeover_prompt_dialog(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let p = self.takeover_prompts.front()?;
         let ix = self.tab_ix_by_id(p.tab_id)?;
@@ -693,11 +784,14 @@ impl Home {
                 .child(icon(ic, 14.0, color))
                 .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CONTROL)).text_color(c::secondary()).child(text))
         }));
-        let deny = crate::node_form::ctl_btn("tp-deny", None, "拒绝", 38.0).flex_1().justify_center().on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Deny, window, cx)));
-        let once = crate::node_form::ctl_btn("tp-once", None, "允许一次", 38.0).flex_1().justify_center().on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Once, window, cx)));
-        let always = div()
-            .id("tp-always")
-            .flex_1()
+        // 三个按钮等宽;「允许一次」是默认项(主色,回车也触发),「总是允许」是更重的决定,不抢眼
+        let btn_w = (crate::nodes::CONFIRM_W - 58.0 - 20.0) / 3.0;
+        let deny = crate::node_form::ctl_btn("tp-deny", None, "拒绝", 38.0).w(px(btn_w)).flex_none().justify_center().on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Deny, window, cx)));
+        let always = crate::node_form::ctl_btn("tp-always", None, "总是允许", 38.0).w(px(btn_w)).flex_none().justify_center().on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Always, window, cx)));
+        let once = div()
+            .id("tp-once")
+            .w(px(btn_w))
+            .flex_none()
             .flex()
             .flex_row()
             .items_center()
@@ -710,8 +804,8 @@ impl Home {
             .font_weight(FontWeight::SEMIBOLD)
             .cursor_pointer()
             .hover(|s| s.opacity(0.88))
-            .child("总是允许")
-            .on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Always, window, cx)));
+            .child("允许一次")
+            .on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Once, window, cx)));
         let buttons = div().w_full().flex().flex_row().gap(px(10.0)).child(deny).child(once).child(always);
         let body = div().flex().flex_col().items_center().gap(px(18.0)).px(px(28.0)).pt(px(28.0)).pb(px(24.0)).child(hero).child(target).child(points).child(buttons);
         Some(crate::ui::modal_bg(
@@ -719,10 +813,12 @@ impl Home {
             crate::nodes::CONFIRM_W,
             c::dialog_glass(),
             cx.listener(|this, e: &KeyDownEvent, window, cx| {
-                if e.keystroke.key == "escape" {
-                    this.resolve_takeover_prompt(Decision::Deny, window, cx);
-                    cx.stop_propagation();
+                match e.keystroke.key.as_str() {
+                    "escape" => this.resolve_takeover_prompt(Decision::Deny, window, cx),
+                    "enter" => this.resolve_takeover_prompt(Decision::Once, window, cx),
+                    _ => return,
                 }
+                cx.stop_propagation();
             }),
             [body.into_any_element()],
         ))
@@ -741,7 +837,61 @@ fn revoke_label(r: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{INPUT_MAX, OUTPUT_MAX, key_bytes, limit_output, trim_trailing_blank};
+    use super::{INPUT_MAX, OUTPUT_MAX, Takeover, key_bytes, limit_output, new_lease, trim_trailing_blank};
+    use crate::ctl::Client;
+    use serde_json::json;
+    use std::time::Instant;
+
+    fn client(id: u64) -> Client {
+        Client { id, name: "c".into(), parent_exe: String::new() }
+    }
+
+    fn takeover(client_id: u64, lease: Option<&str>) -> Takeover {
+        let now = Instant::now();
+        Takeover { client_id, client_name: "c".into(), started: now, last_call: now, last_action: String::new(), waiting: false, lease: lease.map(String::from) }
+    }
+
+    fn snap(lines: &[&str], screen_start: usize, cursor_line: usize, history_total: usize) -> gpui_xterm::TextSnapshot {
+        gpui_xterm::TextSnapshot { lines: lines.iter().map(|s| s.to_string()).collect(), screen_start, cursor_line, cursor_col: 0, history_total }
+    }
+
+    #[test]
+    fn output_since_returns_only_new_lines() {
+        use super::{output_mark, output_since};
+        // 命令前:屏幕 3 行,光标在第 2 行(提示符)
+        let before = snap(&["Welcome", "old output", "root@h:~#", ""], 0, 2, 0);
+        let mark = output_mark(&before);
+        assert_eq!(mark["row"], 2);
+        // 命令后:多了输出和新提示符,没有滚动
+        let after = snap(&["Welcome", "old output", "root@h:~# ls", "a b c", "root@h:~#"], 0, 4, 0);
+        assert_eq!(output_since(&after, &mark).unwrap(), "root@h:~# ls\na b c\nroot@h:~#");
+        // 滚动了:回滚多了 2 行,窗口起点后移,行号靠 history_total 对齐
+        let scrolled = snap(&["root@h:~# ls", "a b c", "root@h:~#"], 1, 1, 3);
+        assert_eq!(output_since(&scrolled, &mark).unwrap(), "root@h:~# ls\na b c\nroot@h:~#");
+        // 回滚被挤掉导致错位、或屏幕被清空:校验行对不上,返回 None 让调用方退回整屏
+        let wrong = snap(&["foo", "bar", "baz"], 0, 2, 0);
+        assert!(output_since(&wrong, &mark).is_none());
+    }
+
+    #[test]
+    fn lease_lets_another_connection_continue() {
+        let t = takeover(1, Some("tok"));
+        assert!(t.owned_by(&client(1), &json!({})), "同一连接");
+        assert!(t.owned_by(&client(2), &json!({ "token": "tok" })), "新连接带令牌");
+        assert!(!t.owned_by(&client(2), &json!({ "token": "bad" })));
+        assert!(!t.owned_by(&client(2), &json!({})));
+        // 普通接管不认令牌
+        let t = takeover(1, None);
+        assert!(!t.owned_by(&client(2), &json!({ "token": "tok" })));
+    }
+
+    #[test]
+    fn leases_are_unique_hex() {
+        let (a, b) = (new_lease(), new_lease());
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn keys_map_to_bytes() {

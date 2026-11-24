@@ -47,6 +47,7 @@ impl Home {
                 None => if on { c::accent() } else { c::ghost() },
             };
             let taken = tab.takeover.is_some();
+            let taken_by = tab.takeover.as_ref().map(|t| t.client_name.clone());
             let busy = tab.busy_elapsed_ms();
             let group: SharedString = format!("tab-{ix}").into();
             div()
@@ -74,6 +75,7 @@ impl Home {
                 })
                 // 被 agent 接管:整个标签描一圈强调色边,标题后面放一个呼吸的机器人徽标(后台标签也看得见)
                 .when(taken, |d| d.border_color(c::accent().opacity(0.55)).bg(c::accent().opacity(0.08)))
+                .when_some(taken_by, |d, name| d.tooltip(move |_, cx| cx.new(|_| crate::files::Tip(format!("{name} 正在接管"))).into()))
                 .child(icon(kind_icon, 14.0, icon_color))
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 // 正在执行任务:一小段亮光沿标签边框绕圈,带渐隐的尾巴;后台标签也看得见

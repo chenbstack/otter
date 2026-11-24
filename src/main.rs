@@ -143,6 +143,8 @@ struct Home {
     takeover_prompts: std::collections::VecDeque<takeover::Prompt>,
     /// 被结束但 agent 还没得知的接管:(连接 id, 会话 id) → 原因
     takeover_revoked: std::collections::HashMap<(u64, u64), &'static str>,
+    /// 持久接管(lease)被结束的原因,按令牌记,下一个带着令牌来的连接能知道
+    lease_revoked: std::collections::HashMap<String, &'static str>,
     /// 接管遮罩的焦点句柄:接管期间焦点放在它上面,键盘到不了终端
     takeover_focus: Option<FocusHandle>,
     /// 节点页的排序方式(存在设置里,重启后保留)
@@ -219,6 +221,7 @@ impl Home {
             fstore: files::Store::default(),
             takeover_prompts: Default::default(),
             takeover_revoked: Default::default(),
+            lease_revoked: Default::default(),
             takeover_focus: None,
             node_sort,
             sort_menu: false,

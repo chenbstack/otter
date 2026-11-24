@@ -47,6 +47,8 @@ pub struct TextSnapshot {
     /// 光标在屏幕里的行、列(从 0 起)
     pub cursor_line: usize,
     pub cursor_col: usize,
+    /// 终端里全部回滚的行数(不受 `history` 参数限制)。`history_total + cursor_line` 是光标所在行从回滚最顶端算起的绝对行号
+    pub history_total: usize,
 }
 
 pub struct TerminalState {
@@ -178,7 +180,7 @@ impl TerminalState {
             lines.push(s.trim_end().to_string());
         }
         let cur = grid.cursor.point;
-        TextSnapshot { lines, screen_start: hist, cursor_line: cur.line.0.max(0) as usize, cursor_col: cur.column.0 }
+        TextSnapshot { lines, screen_start: hist, cursor_line: cur.line.0.max(0) as usize, cursor_col: cur.column.0, history_total: grid.history_size() }
     }
 
     pub fn term_arc(&self) -> Arc<Mutex<Term<GpuiEventProxy>>> {

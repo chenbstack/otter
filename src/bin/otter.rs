@@ -6,26 +6,43 @@ mod ctl_cli;
 #[path = "../ipc.rs"]
 mod ipc;
 
-const USAGE: &str = "otter — 通过本地接口访问运行中的 Otter App
+const USAGE: &str = "otter - talk to a running Otter app through its local interface (open Otter first)
 
-用法:
-  otter ctl nodes [--group <名字或id>]   列出节点
-  otter ctl groups                        列出分组
-  otter ctl sessions                      列出已连接的终端会话
-  otter ctl focus                         当前聚焦的会话
-  otter ctl shell [会话id]                交互模式(接管 → 操作 → 交还)
-  otter ctl run [选项] <命令>             一次性:接管、执行、交还
-  otter ctl screen [选项]                 一次性:接管、读屏幕、交还
-  otter mcp                               以 MCP 服务器方式运行(stdio),给 Claude Code 等 agent 用
+Query (read-only, prints JSON):
+  otter nodes [--group <name|id>]   server nodes
+  otter groups                      node groups
+  otter sessions                    open terminal sessions
+  otter current                     the session the user is looking at (never switches tabs)
+
+Takeover (taking over and releasing are separate commands; a failing command does not drop it):
+  otter takeover [options]          ask to take over a session; Otter shows a confirmation, then it stays held
+  otter release [options]           hand the session back (sends no Ctrl+C)
+
+Act (needs an active takeover):
+  otter run [options] <command>     type a command and press Enter, print only its new output
+  otter type [options] <text>       type text without pressing Enter
+  otter key [options] <key>         press a key: enter tab esc up down ctrl+c ...
+  otter screen [options]            print the current screen
+  otter scroll [options] [lines]    print recent scrollback, 100 lines by default
+
+For agents:
+  otter mcp [--agent <name>]        run as an MCP server over stdio
+
+Other:
   otter --version | --help
+  otter <command> --help            options of one command
 
-需要先打开 Otter App。接管会在 App 里弹出确认框。";
+Every command accepts --agent <name> (or the OTTER_AGENT environment variable) so the user can see
+in Otter which agent is acting; without it MCP uses the client's own name and the CLI shows otter-cli.
+--session <id> picks the session; the default is the one the user is looking at.";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let code = match args.get(1).map(String::as_str) {
+        Some("nodes" | "groups" | "sessions" | "current" | "takeover" | "release" | "run" | "type" | "key" | "screen" | "scroll") => ctl_cli::run_ctl(&args[1..]),
+        // 旧写法 `otter ctl <命令>` 继续能用
         Some("ctl") => ctl_cli::run_ctl(&args[2..]),
-        Some("mcp") => ctl_cli::run_mcp(),
+        Some("mcp") => ctl_cli::run_mcp(&args[2..]),
         Some("--version" | "-V" | "version") => {
             println!("otter {}", env!("CARGO_PKG_VERSION"));
             0
@@ -35,7 +52,7 @@ fn main() {
             0
         }
         Some(other) => {
-            eprintln!("不认识的命令: {other}\n\n{USAGE}");
+            eprintln!("unknown command: {other}\n\n{USAGE}");
             2
         }
     };
