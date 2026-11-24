@@ -9,6 +9,8 @@ cd "$ROOT"
 VER="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 ARCH="$(uname -m)"
 ID="${OTTER_SIGN_ID:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)}"
+# CI 上没有证书时用 ad-hoc 签名("-"),不影响运行,只是首次打开要右键 → 打开
+[ -n "$ID" ] || { [ -n "$CI" ] && ID="-"; }
 [ -n "$ID" ] || { echo "没找到代码签名证书" >&2; exit 1; }
 
 cargo build --release
