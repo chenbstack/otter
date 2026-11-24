@@ -29,17 +29,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --bin otter-gui --bin otter
+      # 安装程序是自己写的(src/bin/setup.rs),把上面构建好的两个 exe 编进去
       - name: Build installer
         shell: pwsh
         run: |
+          cargo build --release --bin otter-setup --features payload
           $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
-          choco install innosetup -y --no-progress
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$ver" scripts/otter.iss
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/otter-setup.exe "dist/Otter-$ver-windows-x86_64-setup.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: target/installer/Otter-*-setup.exe
+          path: dist/Otter-*-setup.exe
 
   linux:
     runs-on: ubuntu-22.04

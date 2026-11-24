@@ -13,8 +13,16 @@ name = "otter"
 path = "src/bin/otter.rs"
 
 [[bin]]
+name = "otter-setup"
+path = "src/bin/setup.rs"
+
+[[bin]]
 name = "bench"
 path = "src/bin/bench.rs"
+
+[features]
+# 安装程序里编入 target/release 下已构建好的 otter-gui.exe / otter.exe(CI 先构建它们,再带此特性构建 otter-setup)
+payload = []
 
 [dependencies]
 # 上游 0.3.0 的副本,为了给渲染层加关键字高亮钩子,改动见 docs/modules/terminal.md
