@@ -58,16 +58,49 @@ fn parent_exe() -> String {
     std::process::Command::new("ps").args(["-o", "comm=", "-p", &ppid.to_string()]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
 }
 
-/// `otter ctl <nodes|sessions|focus>`。返回退出码。
+/// `otter ctl nodes [--group <名字或id>]`
+fn run_nodes(args: &[String]) -> i32 {
+    let mut params = Value::Null;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--group" => match it.next() {
+                // 纯数字按分组 id,否则按名字
+                Some(g) => params = json!({ "group": g.parse::<i64>().map_or_else(|_| json!(g), |n| json!(n)) }),
+                None => {
+                    eprintln!("--group 需要一个分组名或 id");
+                    return 2;
+                }
+            },
+            other => {
+                eprintln!("不认识的参数 {other}\n用法: otter ctl nodes [--group <名字或id>]");
+                return 2;
+            }
+        }
+    }
+    match Conn::open("otter-cli").and_then(|mut c| c.call("list_nodes", params)) {
+        Ok(v) => {
+            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+            0
+        }
+        Err(e) => {
+            eprintln!("{}: {}", e.kind, e.message);
+            if e.kind == "not_running" { 3 } else { 1 }
+        }
+    }
+}
+
+/// `otter ctl <nodes|groups|sessions|focus>`。返回退出码。
 pub fn run_ctl(args: &[String]) -> i32 {
     let (method, usage) = match args.first().map(String::as_str) {
-        Some("nodes") => ("list_nodes", ""),
+        Some("nodes") => return run_nodes(&args[1..]),
+        Some("groups") => ("list_groups", ""),
         Some("sessions") => ("list_sessions", ""),
         Some("focus") => ("get_focus", ""),
         Some("shell") => return run_shell(&args[1..]),
         Some("run") => return run_once(&args[1..]),
         Some("screen") => return run_once(&args[..]),
-        _ => ("", "用法: otter ctl <nodes|sessions|focus|shell [会话id]|run [选项] <命令>|screen [选项]>"),
+        _ => ("", "用法: otter ctl <nodes [--group 名字或id]|groups|sessions|focus|shell [会话id]|run [选项] <命令>|screen [选项]>"),
     };
     if method.is_empty() {
         eprintln!("{usage}");
@@ -92,7 +125,8 @@ fn tool(name: &str, desc: &str, props: Value, required: &[&str]) -> Value {
 fn tools() -> Value {
     let sid = json!({ "type": "integer", "description": "会话 id,来自 list_sessions" });
     json!([
-        tool("list_nodes", "列出 Otter 里的服务器节点(不含密码、私钥等秘密)", json!({}), &[]),
+        tool("list_groups", "列出节点分组:id、名字、节点数", json!({}), &[]),
+        tool("list_nodes", "列出 Otter 里的服务器节点(不含密码、私钥等秘密)。可用 group 只看某个分组", json!({ "group": { "description": "分组 id(数字)或分组名;不给则列出全部节点", "type": ["integer", "string"] } }), &[]),
         tool("list_sessions", "列出 Otter 里当前打开的会话(标签),含是否被接管", json!({}), &[]),
         tool("get_focus", "用户当前看着的会话;没有则返回 null", json!({}), &[]),
         tool("takeover_begin", "接管一个已连上的终端会话。每次都会弹窗请用户确认;用户随时能中止。之后才能输入、读屏幕", json!({ "session": sid, "reason": { "type": "string", "description": "告诉用户你要做什么" } }), &["session"]),

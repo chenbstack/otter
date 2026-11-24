@@ -193,7 +193,10 @@ impl Home {
             UiMsg::Closed { client_id } => self.takeover_client_closed(client_id, window, cx),
             UiMsg::Call { client, method, params, reply } => match method.as_str() {
                 "list_nodes" => {
-                    let _ = reply.send(Ok(self.ctl_list_nodes()));
+                    let _ = reply.send(self.ctl_list_nodes(&params));
+                }
+                "list_groups" => {
+                    let _ = reply.send(Ok(self.ctl_list_groups()));
                 }
                 "list_sessions" => {
                     let _ = reply.send(Ok(self.ctl_list_sessions()));
@@ -215,7 +218,7 @@ impl Home {
                 let (user, host, port) = split_user_host(&n.user_host);
                 json!({
                     "id": n.id.0, "name": n.name, "host": host, "user": user, "port": port,
-                    "group": g.name, "tags": n.tags, "os": n.os.key(), "connected": self.node_connected(n.id),
+                    "group_id": g.id, "group": g.name, "tags": n.tags, "os": n.os.key(), "connected": self.node_connected(n.id),
                 })
             }
             _ => Value::Null,
@@ -226,8 +229,38 @@ impl Home {
         self.workspace.tabs.iter().any(|t| t.node() == Some(id) && t.term.as_ref().is_some_and(|s| s.handle.status() == Status::Connected))
     }
 
-    pub(crate) fn ctl_list_nodes(&self) -> Value {
-        Value::Array(self.groups.iter().flat_map(|g| g.nodes.iter()).map(|n| self.ctl_node_json(n.id)).collect())
+    /// 分组参数:数字按分组 id,字符串按名字(名字重复时要求改用 id)。
+    fn resolve_group(&self, v: &Value) -> Result<usize, RpcError> {
+        let by_id = |id: i64| self.groups.iter().position(|g| g.id == id);
+        let ix = match v {
+            Value::Number(n) => n.as_i64().and_then(by_id),
+            Value::String(name) => {
+                let hits: Vec<usize> = (0..self.groups.len()).filter(|&i| self.groups[i].name == *name).collect();
+                match hits.as_slice() {
+                    [i] => Some(*i),
+                    [] => name.parse::<i64>().ok().and_then(by_id),
+                    _ => {
+                        let ids: Vec<String> = hits.iter().map(|&i| self.groups[i].id.to_string()).collect();
+                        return Err(RpcError::new("bad_request", format!("有多个叫「{name}」的分组,请改用分组 id: {}", ids.join(", "))));
+                    }
+                }
+            }
+            _ => return Err(RpcError::new("bad_request", "group 要么是分组 id(数字),要么是分组名")),
+        };
+        ix.ok_or_else(|| RpcError::new("no_such_group", "没有这个分组"))
+    }
+
+    /// `group` 参数可选:给了只列该分组的节点,没给列全部。
+    pub(crate) fn ctl_list_nodes(&self, params: &Value) -> Result<Value, RpcError> {
+        let groups: Vec<usize> = match params.get("group").filter(|v| !v.is_null()) {
+            Some(v) => vec![self.resolve_group(v)?],
+            None => (0..self.groups.len()).collect(),
+        };
+        Ok(Value::Array(groups.into_iter().flat_map(|i| self.groups[i].nodes.iter()).map(|n| self.ctl_node_json(n.id)).collect()))
+    }
+
+    pub(crate) fn ctl_list_groups(&self) -> Value {
+        Value::Array(self.groups.iter().map(|g| json!({ "id": g.id, "name": g.name, "node_count": g.nodes.len() })).collect())
     }
 
     fn ctl_session_json(&self, ix: usize) -> Value {
