@@ -16,6 +16,14 @@ Otter 是一个原生桌面客户端,给手上有几台 Linux 机器(VPS、NAS�
 
 所有服务器放在一个窗口里,按分组整理;每台机器开成一个标签,终端和文件放在一起,可以同时开任意多个会话。Otter 还提供一个本地接口,让 AI agent 直接在你已经打开的终端里干活:读取服务器列表不需要确认,接管会话则每次都要你同意。
 
+## 截图
+
+![节点页](assets/screenshots/nodes.png)
+
+![文件管理](assets/screenshots/files.png)
+
+![Agent 接管确认](assets/screenshots/takeover.png)
+
 ## 特点
 
 - **原生、体积小**:Rust 编写,直接用 GPU 渲染,没有打包 Electron 或浏览器内核。macOS 安装包约 16 MB。
