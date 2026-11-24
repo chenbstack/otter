@@ -15,7 +15,7 @@ English · [简体中文](README.zh-CN.md)
 - **Nodes & groups**: organize servers, search, import from CSV or `~/.ssh/config`.
 - **SSH terminal**: password, private key or SSH agent auth.
 - **Files (SFTP)**: browse, preview, drag-and-drop upload, create folders, delete; also inside containers.
-- **Docker**: stacks, containers, images and volumes; start, stop, restart, delete.
+- **Docker** (in development): stacks, containers, images and volumes; start, stop, restart, delete.
 - **Agent interface**: let an AI agent read your nodes and, with your approval, take over a terminal session.
 
 ## Install
