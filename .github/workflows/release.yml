@@ -53,10 +53,10 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
-          cargo build --release --bin otter-setup --features payload
+          cargo build --profile setup --bin otter-setup --features payload
           $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item target/release/otter-setup.exe "dist/Otter-$ver-windows-x86_64-setup.exe"
+          Copy-Item target/setup/otter-setup.exe "dist/Otter-$ver-windows-x86_64-setup.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: windows

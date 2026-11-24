@@ -69,3 +69,13 @@ winresource = "0.1"
 
 [profile.release]
 debug = 1
+
+# 只给安装程序用:体积优先(CI 里 `cargo build --profile setup --bin otter-setup --features payload`)
+[profile.setup]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = true
