@@ -5,6 +5,7 @@
 // release 版在 Windows 上不弹控制台窗口(CLI 是另一个二进制 otter.exe)
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod confirm;
 mod ctl;
 mod ipc;
 mod ipc_server;
@@ -337,6 +338,8 @@ impl Render for Home {
             .child(body)
             .children(drawer)
             .children(dialog)
+            // 接管确认框弹出时,标题栏盖在遮罩上面,让被申请的标签保持醒目
+            .children(if self.takeover_prompts.is_empty() { None } else { Some(self.titlebar_spotlight(cx)) })
             .children(self.tab_menu_overlay(cx))
             .children(self.node_menu_overlay(cx))
     }

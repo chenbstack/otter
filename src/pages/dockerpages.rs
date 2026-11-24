@@ -24,10 +24,13 @@ pub(crate) enum SortKey {
     Mem,
 }
 
-/// 等用户确认的危险操作
-pub(crate) struct Confirm {
-    title: String,
-    body: String,
+/// 等用户确认的危险操作(弹窗用删除确认框 `Home::delete_confirm` 渲染)
+pub(crate) struct DockAsk {
+    title: &'static str,
+    tile: IconName,
+    name: String,
+    detail: &'static str,
+    body: &'static str,
     label: &'static str,
     action: Action,
 }
@@ -39,7 +42,7 @@ pub(crate) struct DockUi {
     pull: Option<Entity<InputState>>,
     pull_open: bool,
     sort: (SortKey, bool),
-    confirm: Option<Confirm>,
+    confirm: Option<DockAsk>,
     notice: Option<(SharedString, Instant)>,
     polling: bool,
     /// 上次读到的 `Docker::version`
@@ -355,63 +358,19 @@ impl Home {
         let mut v: Vec<AnyElement> = Vec::new();
         if let Some(cf) = &self.dock.confirm {
             let action = cf.action.clone();
-            v.push(
-                div()
-                    .id("dock-confirm")
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(c::scrim_dialog())
-                    .occlude()
-                    .child(
-                        div()
-                            .w(px(380.0))
-                            .p(px(20.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.0))
-                            .rounded(px(t::RADIUS_XL))
-                            .bg(c::dialog())
-                            .border_1()
-                            .border_color(c::dialog_border())
-                            .child(div().text_size(px(t::TYPE_TITLE)).font_weight(FontWeight::SEMIBOLD).child(cf.title.clone()))
-                            .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(cf.body.clone()))
-                            .child(
-                                div()
-                                    .mt(px(10.0))
-                                    .flex()
-                                    .flex_row()
-                                    .justify_end()
-                                    .gap(px(8.0))
-                                    .child(button("dock-cancel", IconName::X, "取消").on_click(cx.listener(|this, _, _, cx| {
-                                        this.dock.confirm = None;
-                                        cx.notify();
-                                    })))
-                                    .child(
-                                        div()
-                                            .id("dock-ok")
-                                            .h(px(30.0))
-                                            .px(px(14.0))
-                                            .flex()
-                                            .items_center()
-                                            .rounded(px(t::RADIUS_MD))
-                                            .bg(c::danger())
-                                            .text_color(c::on_accent())
-                                            .text_size(px(t::TYPE_CONTROL))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .cursor_pointer()
-                                            .child(cf.label)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.dock.confirm = None;
-                                                this.dock_act(action.clone(), cx);
-                                            })),
-                                    ),
-                            ),
-                    )
-                    .into_any_element(),
-            );
+            let spec = crate::confirm::Confirm {
+                ids: ["dock-cancel", "dock-ok"],
+                title: cf.title,
+                tile: Self::icon_tile(cf.tile, c::accent(), c::accent_soft()).into_any_element(),
+                name: cf.name.clone().into(),
+                detail: cf.detail.into(),
+                points: vec![(IconName::Trash, c::danger(), cf.body.into())],
+                ok_label: cf.label,
+            };
+            v.push(self.delete_confirm("dock-confirm", spec, |this| this.dock.confirm = None, move |this, cx| {
+                this.dock.confirm = None;
+                this.dock_act(action.clone(), cx);
+            }, cx).into_any_element());
         }
         if let Some((msg, _)) = &self.dock.notice {
             v.push(
@@ -429,8 +388,8 @@ impl Home {
         v
     }
 
-    fn ask(&mut self, title: String, body: String, label: &'static str, action: Action, cx: &mut Context<Self>) {
-        self.dock.confirm = Some(Confirm { title, body, label, action });
+    fn ask(&mut self, ask: DockAsk, cx: &mut Context<Self>) {
+        self.dock.confirm = Some(ask);
         cx.notify();
     }
 
@@ -511,7 +470,7 @@ impl Home {
                 }
                 let n = name.clone();
                 acts = acts.child(icon_btn(("rm", i), IconName::Trash, c::danger()).on_click(cx.listener(move |this, _, _, cx| {
-                    this.ask(format!("删除容器 {n}?"), "容器会被强制删除(运行中的先停止),容器内未保存到存储卷的数据会丢失。".into(), "删除", Action::Remove(n.clone()), cx);
+                    this.ask(DockAsk { title: "删除容器", tile: IconName::Box, name: n.clone(), detail: "Docker 容器", body: "强制删除,容器内未保存到存储卷的数据会丢失", label: "删除容器", action: Action::Remove(n.clone()) }, cx);
                 })));
             }
             let ports = ct.ports.iter().take(2).map(|p| tag(p.clone())).collect::<Vec<_>>();
@@ -612,7 +571,7 @@ impl Home {
             } else if users == 0 {
                 let (tg, nm) = (target.clone(), name.clone());
                 act = act.child(icon_btn(("rmi", i), IconName::Trash, c::danger()).on_click(cx.listener(move |this, _, _, cx| {
-                    this.ask(format!("删除镜像 {nm}?"), "只删除本地副本,需要时可以重新拉取。".into(), "删除", Action::RemoveImage(tg.clone()), cx);
+                    this.ask(DockAsk { title: "删除镜像", tile: IconName::Image, name: nm.clone(), detail: "Docker 镜像", body: "只删除本地副本,需要时可以重新拉取", label: "删除镜像", action: Action::RemoveImage(tg.clone()) }, cx);
                 })));
             }
             rows.push(
@@ -646,7 +605,7 @@ impl Home {
             } else if users.is_empty() {
                 let n = v.name.clone();
                 act = act.child(icon_btn(("rmv", i), IconName::Trash, c::danger()).on_click(cx.listener(move |this, _, _, cx| {
-                    this.ask(format!("删除存储卷 {n}?"), "卷里的数据会永久丢失,无法恢复。".into(), "删除", Action::RemoveVolume(n.clone()), cx);
+                    this.ask(DockAsk { title: "删除存储卷", tile: IconName::HardDrive, name: n.clone(), detail: "Docker 存储卷", body: "卷里的数据会永久丢失", label: "删除存储卷", action: Action::RemoveVolume(n.clone()) }, cx);
                 })));
             }
             let mounted: Vec<Div> = users.iter().take(3).map(|c| tag(c.name.clone())).collect();

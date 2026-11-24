@@ -7,6 +7,15 @@ use workspace::{NodeMode, TabKind};
 
 impl Home {
     pub(crate) fn titlebar(&self, cx: &mut Context<Self>) -> Div {
+        self.titlebar_inner(cx, false)
+    }
+
+    /// 接管确认框弹出时盖在遮罩上面的标题栏:透明底(下面就是遮罩),别的标签压暗且点不了,只有被申请的那个标签保持原样。
+    pub(crate) fn titlebar_spotlight(&self, cx: &mut Context<Self>) -> Div {
+        self.titlebar_inner(cx, true).absolute().top_0().left_0().right_0()
+    }
+
+    fn titlebar_inner(&self, cx: &mut Context<Self>, spotlight: bool) -> Div {
         let active = self.workspace.active;
 
         let tab = |ix: usize, cx: &mut Context<Self>| {
@@ -47,7 +56,10 @@ impl Home {
                 None => if on { c::accent() } else { c::ghost() },
             };
             let taken = tab.takeover.is_some();
+            // 有 agent 正在申请接管这个标签:警示色描边 + 闪烁的机器人徽标
+            let asking = self.takeover_prompts.front().is_some_and(|p| p.tab_id == tab.id);
             let taken_by = tab.takeover.as_ref().map(|t| t.client_name.clone());
+            let dim = spotlight && !asking;
             let busy = tab.busy_elapsed_ms();
             let group: SharedString = format!("tab-{ix}").into();
             div()
@@ -75,11 +87,31 @@ impl Home {
                 })
                 // 被 agent 接管:整个标签描一圈强调色边,标题后面放一个呼吸的机器人徽标(后台标签也看得见)
                 .when(taken, |d| d.border_color(c::accent().opacity(0.55)).bg(c::accent().opacity(0.08)))
+                .when(dim, |d| d.opacity(0.4))
+                .when(asking, |d| d.border_color(c::warn()).bg(c::warn().opacity(0.14)))
                 .when_some(taken_by, |d, name| d.tooltip(move |_, cx| cx.new(|_| crate::files::Tip(format!("{name} 正在接管"))).into()))
                 .child(icon(kind_icon, 14.0, icon_color))
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 // 正在执行任务:一小段亮光沿标签边框绕圈,带渐隐的尾巴;后台标签也看得见
                 .when_some(busy, |d, ms| d.child(busy_border(t::RADIUS_MD, c::accent(), ms)))
+                .when(asking, |d| {
+                    d.child(
+                        div()
+                            .flex_shrink_0()
+                            .size(px(18.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(t::RADIUS_XS))
+                            .bg(c::warn().opacity(0.28))
+                            .child(icon(IconName::Bot, 12.0, c::warn()))
+                            .with_animation(
+                                ("tab-asking", ix),
+                                Animation::new(Duration::from_millis(900)).repeat().with_easing(ease_in_out),
+                                |d, t| d.opacity(0.35 + 0.65 * (1.0 - (2.0 * t - 1.0).abs())),
+                            ),
+                    )
+                })
                 .when(taken, |d| {
                     d.child(
                         div()
@@ -117,10 +149,12 @@ impl Home {
                             })),
                     )
                 })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.activate(ix);
-                    cx.notify();
-                }))
+                .when(!spotlight, |d| {
+                    d.on_click(cx.listener(move |this, _, _, cx| {
+                        this.activate(ix);
+                        cx.notify();
+                    }))
+                })
                 .when(!pinned, |d| {
                     d.on_mouse_down(
                         MouseButton::Right,
@@ -149,8 +183,7 @@ impl Home {
             .child(div().w(px(8.0)).flex_shrink_0())
             .child(div().id("tabs").flex().flex_row().items_center().gap(px(4.0)).min_w_0().overflow_x_scroll().children(rest))
             .child(div().flex_1().min_w(px(12.0)))
-            .children(self.mode_switch(cx))
-            .children(self.update_button(cx))
+            .child(div().flex().flex_row().items_center().when(spotlight, |d| d.opacity(0.4)).children(self.mode_switch(cx)).children(self.update_button(cx)))
     }
 
     /// 标题栏最右侧的更新按钮:发现新版本时出现一个小的下载图标,点一下直接更新。

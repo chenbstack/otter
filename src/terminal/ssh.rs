@@ -283,6 +283,8 @@ pub fn connect(conn: Conn, cols: usize, rows: usize, activity: Arc<super::Activi
             // 没进过 shell、认证/指纹问题、没有可自动使用的认证、次数用完:不再自动重连
             let retry = io.ever.load(Ordering::Relaxed) && conn.has_saved_auth() && !io.failed_at_auth() && !is_fatal(&lost) && attempt < RECONNECT_DELAYS.len();
             if !retry {
+                // 重试用完了:写明次数,界面浮层据此告诉用户「不是没试」
+                let lost = if attempt >= RECONNECT_DELAYS.len() { format!("已自动重试 {attempt} 次,仍然连不上:{lost}") } else { lost };
                 logs::push(logs::Level::Error, &label, lost.clone());
                 io.say(&format!("\r\n\x1b[31m{lost}\x1b[0m\r\n"));
                 io.fail_step(&lost);

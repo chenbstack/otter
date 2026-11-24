@@ -7,23 +7,6 @@ use super::*;
 use crate::node_form::NodeForm;
 use crate::workspace::NodeMode;
 
-/// 删除确认框的内容(节点、分组、密钥共用,见 `confirm_parts`)
-pub(crate) struct Confirm {
-    /// 取消、确认两个按钮的元素 id
-    pub ids: [&'static str; 2],
-    pub title: &'static str,
-    /// 对象卡片左边的图标块
-    pub tile: AnyElement,
-    pub name: SharedString,
-    pub detail: SharedString,
-    /// 后果清单,一条一行:(图标, 图标颜色, 文字)。会丢的东西用红色,不受影响的用绿色
-    pub points: Vec<(IconName, Rgba, SharedString)>,
-    pub ok_label: &'static str,
-}
-
-/// 删除确认框宽度(比表单弹窗窄:内容少,居中排版)
-pub(crate) const CONFIRM_W: f32 = 400.0;
-
 /// 右键菜单的目标:节点卡片或分组卡片(分组下标)
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum NodeMenuTarget {
@@ -406,6 +389,11 @@ impl Home {
             .child(content)
     }
 
+    /// 提示框里的目标节点卡片:图标块 + 名称 + user@host。
+    pub(crate) fn node_target_card(node: &Node) -> Div {
+        crate::ui::alert_target(Self::os_tile(node.os), node.name.clone().into(), node.user_host.clone().into())
+    }
+
     /// 节点卡片的图标块:认出系统就用系统自己的图标和品牌色(macOS 是苹果图标,发行版是内置的 logo),否则是通用服务器图标
     pub(crate) fn os_tile(os: crate::osinfo::OsKind) -> Div {
         use crate::osinfo::OsKind;
@@ -683,7 +671,7 @@ impl Home {
         let gid = self.group_delete?;
         let g = self.groups.iter().find(|g| g.id == gid)?;
         let fg = rgb(g.color);
-        let spec = Confirm {
+        let spec = crate::confirm::Confirm {
             ids: ["gd-cancel", "gd-ok"],
             title: "删除分组",
             tile: Self::icon_tile(IconName::Folder, fg, fg.opacity(0.18)).into_any_element(),
@@ -703,7 +691,7 @@ impl Home {
     pub(crate) fn node_delete_dialog(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let id = self.node_delete?;
         let n = self.groups.iter().flat_map(|g| &g.nodes).find(|n| n.id == id)?;
-        let spec = Confirm {
+        let spec = crate::confirm::Confirm {
             ids: ["nd-cancel", "nd-ok"],
             title: "删除节点",
             tile: Self::os_tile(n.os).into_any_element(),
@@ -726,137 +714,6 @@ impl Home {
             },
             cx,
         ))
-    }
-
-    /// 删除确认框:包一层弹窗外壳,Esc 取消。内容见 `confirm_parts`。
-    pub(crate) fn delete_confirm(
-        &self,
-        dialog_id: &'static str,
-        spec: Confirm,
-        cancel_fn: impl Fn(&mut Self) + Copy + 'static,
-        ok_fn: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let parts = self.confirm_parts(spec, cancel_fn, ok_fn, cx);
-        modal_glass(
-            dialog_id,
-            CONFIRM_W,
-            cx.listener(move |this, e: &KeyDownEvent, _, cx| {
-                if e.keystroke.key == "escape" {
-                    cancel_fn(this);
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-            }),
-            parts,
-        )
-    }
-
-    /// 删除确认框的内容(节点、分组、密钥共用),居中排版,自上而下:
-    /// 红色图标(带一圈淡光晕) → 标题 + “此操作无法撤销” → 对象卡片(和节点页的节点卡片同款) → 后果清单(一行一项,图标区分“会丢的”和“不受影响的”) → 取消 / 删除两个等宽按钮。
-    /// 不再单独做底栏:按钮直接放在内容里,整体更紧凑。
-    pub(crate) fn confirm_parts(
-        &self,
-        spec: Confirm,
-        cancel_fn: impl Fn(&mut Self) + Copy + 'static,
-        ok_fn: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let hero = div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(4.0))
-            .child(
-                // 外圈淡光晕 + 内层图标块
-                div()
-                    .size(px(68.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(t::RADIUS_2XL))
-                    .bg(c::danger().opacity(0.06))
-                    .border_1()
-                    .border_color(c::danger().opacity(0.12))
-                    .child(
-                        div()
-                            .size(px(48.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(t::RADIUS_XL))
-                            .bg(c::danger().opacity(0.14))
-                            .border_1()
-                            .border_color(c::danger().opacity(0.32))
-                            .child(icon(IconName::Trash, 22.0, c::danger())),
-                    ),
-            )
-            .child(div().mt(px(10.0)).text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).text_color(c::text()).child(spec.title))
-            .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child("此操作无法撤销"));
-
-        // 对象卡片:和节点页的节点卡片一模一样(`card_shell` 同款尺寸、玻璃样式、间距、字号)
-        let target = div()
-            .w_full()
-            .h(px(NODE_CARD_H))
-            .glass(t::RADIUS_LG, GlassStyle::CARD)
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .px(px(12.0))
-            .child(spec.tile)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(div().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(spec.name))
-                    .child(div().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(spec.detail)),
-            );
-
-        // 后果清单:一个整块的圆角容器,行与行之间一根细线
-        let n = spec.points.len();
-        let points = div().w_full().flex().flex_col().rounded(px(t::RADIUS_MD)).border_1().border_color(c::field_border()).bg(c::field()).children(spec.points.into_iter().enumerate().map(|(i, (ic, color, text))| {
-            div()
-                .h(px(38.0))
-                .px(px(12.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.0))
-                .when(i + 1 < n, |d| d.border_b_1().border_color(c::line()))
-                .child(icon(ic, 14.0, color))
-                .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::secondary()).child(text))
-        }));
-
-        let cancel = crate::node_form::ctl_btn(spec.ids[0], None, "取消", 38.0).flex_1().justify_center().on_click(cx.listener(move |this, _, _, cx| {
-            cancel_fn(this);
-            cx.notify();
-        }));
-        let ok = div()
-            .id(spec.ids[1])
-            .flex_1()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .gap(px(6.0))
-            .h(px(38.0))
-            .rounded(px(t::RADIUS_MD))
-            .bg(c::danger())
-            .text_color(c::on_accent())
-            .text_size(px(t::TYPE_CONTROL))
-            .font_weight(FontWeight::SEMIBOLD)
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.88))
-            .child(icon(IconName::Trash, 13.0, c::on_accent()))
-            .child(spec.ok_label)
-            .on_click(cx.listener(move |this, _, _, cx| ok_fn(this, cx)));
-        let buttons = div().w_full().flex().flex_row().gap(px(10.0)).child(cancel).child(ok);
-
-        vec![div().flex().flex_col().items_center().gap(px(18.0)).px(px(28.0)).pt(px(28.0)).pb(px(24.0)).child(hero).child(target).child(points).child(buttons).into_any_element()]
     }
 
     /// 拖拽把节点移到分组 `gi`:先写库,成功后再改内存列表。

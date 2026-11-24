@@ -4,7 +4,7 @@ pub(crate) mod connecting;
 pub mod highlight;
 pub mod ssh;
 
-use ::gpui::{Animation, AnimationExt as _, Transformation, ease_out_quint, percentage};
+use ::gpui::{Animation, AnimationExt as _, Transformation, percentage};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -14,9 +14,6 @@ use super::*;
 use ssh::{Conn, Status};
 
 const OVERLAY_SPIN_MS: u64 = 900;
-const OVERLAY_FADE_MS: u64 = 220;
-const OVERLAY_SCRIM: f32 = 0.62;
-const OVERLAY_PILL_H: f32 = 44.0;
 const BADGE_H: f32 = 32.0;
 
 /// 一个服务器终端标签持有的东西。丢弃即断开连接。
@@ -28,6 +25,8 @@ pub struct TermSession {
     pub bracketed_paste: Arc<AtomicBool>,
     /// 终端输出活跃度,标签栏据此显示「正在执行」
     pub activity: Arc<Activity>,
+    /// 用户关掉了「连接已断开」浮层(之后只剩右上角的「重新连接」)
+    pub overlay_dismissed: bool,
 }
 
 /// 终端的「正在执行」状态,标签栏据此转圈。
@@ -193,7 +192,7 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 impl Home {
     /// 连接中断时盖在整个标签内容区上的状态层:能透过它隐约看到后面的内容。
     /// - 自动重连中(所有模式):转圈 + 提示;
-    /// - 重连放弃了(非终端模式;终端模式自己有「重新连接」按钮):提示 + 重新连接。
+    /// - 重连放弃了:一张卡片,写明原因,「重试」和(终端模式)「关闭」。
     /// GPUI 没有背景模糊,这里用半透明遮罩压暗后面的内容代替。
     pub(crate) fn reconnect_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let a = self.workspace.active?;
@@ -204,18 +203,20 @@ impl Home {
         // 调试:OTTER_FAKE_RECONNECT=1 / =lost 在没有真实终端时也画出遮罩(截图用)
         let fake = std::env::var("OTTER_FAKE_RECONNECT").ok();
         let (status, ever) = match (tab.term.as_ref(), fake.as_deref()) {
-            (Some(t), _) => (t.handle.status(), t.handle.ever_connected()),
-            (None, Some("lost")) => (Status::Closed(Some("连接中断".into())), true),
-            (None, Some(_)) => (Status::Reconnecting(2), true),
+            (_, Some("lost")) => (Status::Closed(Some("已自动重试 6 次,仍然连不上:连接超时".into())), true),
+            (_, Some(_)) => (Status::Reconnecting(2), true),
+            (Some(t), None) => (t.handle.status(), t.handle.ever_connected()),
             (None, None) => return None,
         };
         let (title, sub, lost) = match status {
             Status::Reconnecting(n) => ("连接中断,正在重连".to_string(), format!("第 {n} 次尝试"), false),
-            Status::Closed(Some(e)) if ever && tab.mode != workspace::NodeMode::Terminal => ("连接已断开".to_string(), e, true),
+            Status::Closed(Some(e)) if ever && !tab.term.as_ref().is_some_and(|t| t.overlay_dismissed) => ("连接已断开".to_string(), e, true),
             _ => return None,
         };
+        // 终端模式里关掉浮层后还能看历史输出,右上角仍有「重新连接」;其它模式没有别的入口,所以不给关闭
+        let can_dismiss = tab.mode == workspace::NodeMode::Terminal;
         let glyph: AnyElement = if lost {
-            icon(IconName::WifiOff, 16.0, c::warn()).into_any_element()
+            icon(IconName::WifiOff, 24.0, c::warn()).into_any_element()
         } else {
             icon(IconName::LoaderCircle, 16.0, c::accent())
                 .with_animation("recon-spin", Animation::new(std::time::Duration::from_millis(OVERLAY_SPIN_MS)).repeat(), |i, t| i.transform(Transformation::rotate(percentage(t))))
@@ -245,58 +246,42 @@ impl Home {
                     .into_any_element(),
             );
         }
-        // 一条紧凑的胶囊:图标 + 一行文字 + 重新连接,居中压在压暗的内容上
+        // 样式和接管确认框共用 ui::alert_* 部件
+        let hero = crate::ui::alert_hero(IconName::WifiOff, c::warn(), title, "网络可能不稳定,或服务器暂时不可达");
+        let target = tab.node().and_then(|id| self.all_nodes().find(|n| n.id == id)).map(Self::node_target_card);
+        let mut rows: Vec<(IconName, Rgba, String)> = vec![(IconName::WifiOff, c::warn(), sub)];
+        if can_dismiss {
+            rows.push((IconName::ScanEye, c::muted(), "关闭后仍可查看终端里已有的内容".into()));
+        }
+        let btn_w = crate::ui::alert_btn_w(if can_dismiss { 2 } else { 1 });
+        let retry = crate::ui::alert_primary_btn("overlay-reconnect", Some(IconName::RotateCw), "重试", can_dismiss.then_some(btn_w)).on_click(cx.listener(|this, _, window, cx| this.reconnect_terminal(window, cx)));
+        let close = crate::node_form::ctl_btn("overlay-dismiss", None, "关闭", 38.0).w(px(btn_w)).flex_none().justify_center().on_click(cx.listener(|this, _, _, cx| this.dismiss_lost_overlay(cx)));
+        let buttons = div().w_full().flex().flex_row().gap(px(10.0)).when(can_dismiss, |d| d.child(close)).child(retry);
+        let body = crate::ui::alert_body(hero, target, crate::ui::alert_rows(rows), buttons);
         Some(
-            div()
-                .id("reconnect-overlay")
-                .absolute()
-                .inset_0()
-                .occlude()
-                .bg(c::bg().opacity(OVERLAY_SCRIM))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    // 节点卡片的底是半透明的,先垫一层不透明底色,免得后面的文字透上来
-                    div().rounded(px(OVERLAY_PILL_H / 2.0)).bg(c::bg()).child(
-                    div()
-                        .h(px(OVERLAY_PILL_H))
-                        .pl(px(16.0))
-                        .pr(if lost { px(7.0) } else { px(18.0) })
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .glass(OVERLAY_PILL_H / 2.0, GlassStyle::CARD)
-                        .child(glyph)
-                        .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::MEDIUM).text_color(c::text()).child(title))
-                        .child(div().max_w(px(320.0)).truncate().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(sub))
-                        .when(lost, |d| {
-                            d.child(
-                                div()
-                                    .id("overlay-reconnect")
-                                    .ml(px(4.0))
-                                    .h(px(30.0))
-                                    .px(px(12.0))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .rounded_full()
-                                    .bg(c::accent())
-                                    .text_color(c::on_accent())
-                                    .text_size(px(t::TYPE_CONTROL))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .cursor_pointer()
-                                    .hover(|s| s.opacity(0.88))
-                                    .child(icon(IconName::RotateCw, 13.0, c::on_accent()))
-                                    .child("重新连接")
-                                    .on_click(cx.listener(|this, _, window, cx| this.reconnect_terminal(window, cx))),
-                            )
-                        }),
-                    ),
-                )
-                .with_animation("recon-fade", Animation::new(std::time::Duration::from_millis(OVERLAY_FADE_MS)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
-                .into_any_element(),
+            crate::ui::modal_glass(
+                "reconnect-overlay",
+                crate::confirm::CONFIRM_W,
+                cx.listener(move |this, e: &KeyDownEvent, window, cx| {
+                    match e.keystroke.key.as_str() {
+                        "escape" if can_dismiss => this.dismiss_lost_overlay(cx),
+                        "enter" => this.reconnect_terminal(window, cx),
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                }),
+                [body.into_any_element()],
+            )
+            .into_any_element(),
         )
+    }
+
+    /// 关掉「连接已断开」浮层(终端里的内容和右上角的「重新连接」还在)。
+    fn dismiss_lost_overlay(&mut self, cx: &mut Context<Self>) {
+        if let Some(t) = self.workspace.active.and_then(|a| self.workspace.tabs[a].term.as_mut()) {
+            t.overlay_dismissed = true;
+        }
+        cx.notify();
     }
 
     pub(crate) fn active_term(&self) -> Option<&TermSession> {
@@ -366,7 +351,7 @@ impl Home {
             }
         })
         .detach();
-        TermSession { view, handle, conn, bracketed_paste, activity }
+        TermSession { view, handle, conn, bracketed_paste, activity, overlay_dismissed: false }
     }
 
     /// 重新连接:丢弃旧会话,用同样的连接信息开新会话。

@@ -542,7 +542,7 @@ impl Home {
                     points.push((IconName::Server, c::warn(), format!("{used} 个节点正在使用,删除后需要重新选择密钥才能连接").into()));
                 }
                 points.push((IconName::KeyRound, c::danger(), "私钥会从本机删除".into()));
-                let spec = crate::nodes::Confirm {
+                let spec = crate::confirm::Confirm {
                     ids: ["key-del-cancel", "key-del-ok"],
                     title: "删除密钥",
                     tile: Self::icon_tile(IconName::KeyRound, c::accent(), c::accent_soft()).into_any_element(),
@@ -551,14 +551,13 @@ impl Home {
                     points,
                     ok_label: "删除密钥",
                 };
-                ("key-del-dialog", self.confirm_parts(spec, |this| this.key_modal = None, |this, cx| this.confirm_delete_key(cx), cx))
+                return Some(self.delete_confirm("key-del-dialog", spec, |this| this.key_modal = None, |this, cx| this.confirm_delete_key(cx), cx));
             }
         };
-        let confirm = key_id == "key-del-dialog";
         Some(crate::ui::modal_bg(
             key_id,
-            if confirm { crate::nodes::CONFIRM_W } else { 440.0 },
-            if confirm { c::dialog_glass() } else { c::dialog() },
+            440.0,
+            c::dialog(),
             cx.listener(|this, e: &KeyDownEvent, _, cx| match e.keystroke.key.as_str() {
                 "escape" => {
                     this.key_modal = None;

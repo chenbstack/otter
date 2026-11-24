@@ -61,7 +61,7 @@ fn new_lease() -> String {
 
 /// 等用户确认的接管申请。
 pub struct Prompt {
-    tab_id: u64,
+    pub(crate) tab_id: u64,
     client: Arc<Client>,
     reason: String,
     lease: bool,
@@ -253,8 +253,9 @@ impl Home {
         }
         alog(format!("{} 申请接管 {}", client.name, self.node_name(Some(node))));
         self.takeover_prompts.push_back(Prompt { tab_id: sid, client: client.clone(), reason, lease, reply });
-        // 申请要让用户看见:把窗口带到前台
+        // 申请要让用户看见:把窗口带到前台,并切到被申请的那个标签
         cx.activate(true);
+        self.activate(ix);
         cx.notify();
     }
 
@@ -713,56 +714,8 @@ impl Home {
         let ix = self.tab_ix_by_id(p.tab_id)?;
         let node_id = self.workspace.tabs[ix].node()?;
         let node = self.all_nodes().find(|n| n.id == node_id)?;
-        let hero = div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .size(px(68.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(t::RADIUS_2XL))
-                    .bg(c::accent().opacity(0.08))
-                    .border_1()
-                    .border_color(c::accent().opacity(0.18))
-                    .child(
-                        div()
-                            .size(px(48.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(t::RADIUS_XL))
-                            .bg(c::accent().opacity(0.16))
-                            .border_1()
-                            .border_color(c::accent().opacity(0.36))
-                            .child(icon(IconName::Bot, 22.0, c::accent())),
-                    ),
-            )
-            .child(div().mt(px(10.0)).max_w(px(340.0)).truncate().text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).text_color(c::text()).child(format!("允许 {} 接管终端？", p.client.name)))
-            .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child("它将直接使用你正在用的这个会话"));
-        let target = div()
-            .w_full()
-            .h(px(crate::NODE_CARD_H))
-            .glass(t::RADIUS_LG, GlassStyle::CARD)
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .px(px(12.0))
-            .child(Self::os_tile(node.os))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(div().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(node.name.clone()))
-                    .child(div().truncate().text_size(px(t::TYPE_MICRO)).font_family(crate::MONO).text_color(c::ghost()).child(node.user_host.clone())),
-            );
+        let hero = crate::ui::alert_hero(IconName::Bot, c::accent(), format!("允许 {} 接管终端？", p.client.name), "它将直接使用你正在用的这个会话");
+        let target = Self::node_target_card(node);
         let mut rows: Vec<(IconName, Rgba, String)> = vec![];
         if !p.reason.is_empty() {
             rows.push((IconName::Sparkles, c::accent(), format!("原因:{}", p.reason)));
@@ -773,46 +726,16 @@ impl Home {
         rows.push((IconName::Keyboard, c::warn(), "能在终端里输入命令、读取屏幕".into()));
         rows.push((IconName::ScanEye, c::warn(), "能看到终端里已有的历史内容".into()));
         rows.push((IconName::OctagonX, c::online(), format!("随时点「停止接管」或按 {}. 中止", crate::platform::accel_name())));
-        let n = rows.len();
-        let points = div().w_full().flex().flex_col().rounded(px(t::RADIUS_MD)).border_1().border_color(c::field_border()).bg(c::field()).children(rows.into_iter().enumerate().map(|(i, (ic, color, text))| {
-            div()
-                .min_h(px(38.0))
-                .px(px(12.0))
-                .py(px(6.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.0))
-                .when(i + 1 < n, |d| d.border_b_1().border_color(c::line()))
-                .child(icon(ic, 14.0, color))
-                .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CONTROL)).text_color(c::secondary()).child(text))
-        }));
+        let points = crate::ui::alert_rows(rows);
         // 两排:上面三个允许选项等宽(「允许一次」是默认项,主色,回车也触发;「24 小时」「总是允许」是更重的决定,不抢眼),下面整行宽的「拒绝」
-        let btn_w = (crate::nodes::CONFIRM_W - 58.0 - 20.0) / 3.0;
+        let btn_w = crate::ui::alert_btn_w(3);
         let choice = |id: &'static str, label: &'static str, d: Decision, cx: &mut Context<Self>| {
             crate::node_form::ctl_btn(id, None, label, 38.0).w(px(btn_w)).flex_none().justify_center().on_click(cx.listener(move |this, _, window, cx| this.resolve_takeover_prompt(d, window, cx)))
         };
         let day = choice("tp-day", "24 小时", Decision::Day, cx);
         let always = choice("tp-always", "总是允许", Decision::Always, cx);
         let deny = crate::node_form::ctl_btn("tp-deny", None, "拒绝", 38.0).w_full().flex_none().justify_center().on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Deny, window, cx)));
-        let once = div()
-            .id("tp-once")
-            .w(px(btn_w))
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .h(px(38.0))
-            .rounded(px(t::RADIUS_MD))
-            .bg(c::accent())
-            .text_color(c::on_accent())
-            .text_size(px(t::TYPE_CONTROL))
-            .font_weight(FontWeight::SEMIBOLD)
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.88))
-            .child("允许一次")
-            .on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Once, window, cx)));
+        let once = crate::ui::alert_primary_btn("tp-once", None, "允许一次", Some(btn_w)).on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Once, window, cx)));
         let hint = div().w_full().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).text_center().child(format!("「24 小时」「总是允许」只对 {} 生效,可在「信任」页撤销", node.name));
         let buttons = div()
             .w_full()
@@ -822,10 +745,10 @@ impl Home {
             .child(div().w_full().flex().flex_row().gap(px(10.0)).child(always).child(day).child(once))
             .child(deny)
             .child(hint);
-        let body = div().flex().flex_col().items_center().gap(px(18.0)).px(px(28.0)).pt(px(28.0)).pb(px(24.0)).child(hero).child(target).child(points).child(buttons);
+        let body = crate::ui::alert_body(hero, Some(target), points, buttons);
         Some(crate::ui::modal_bg(
             "takeover-prompt",
-            crate::nodes::CONFIRM_W,
+            crate::confirm::CONFIRM_W,
             c::dialog_glass(),
             cx.listener(|this, e: &KeyDownEvent, window, cx| {
                 match e.keystroke.key.as_str() {

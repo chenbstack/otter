@@ -206,6 +206,122 @@ pub fn modal_anim(
     modal_panel(id, to.0, Some(to.1), (from != to).then_some(from), c::dialog(), key, content)
 }
 
+// ---- 提示框公用部件(接管确认、连接已断开等同一套样式)-----------------------------------------
+/// 提示框的内边距与按钮宽度:`n` 个等宽按钮排一行时每个的宽度。
+pub fn alert_btn_w(n: usize) -> f32 {
+    let gap = 10.0;
+    (crate::confirm::CONFIRM_W - 58.0 - gap * (n as f32 - 1.0)) / n as f32
+}
+
+/// 顶部:带两层光圈的图标(`tone` 决定颜色)、标题、副标题。
+pub fn alert_hero(ic: IconName, tone: Rgba, title: String, sub: &str) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(4.0))
+        .child(
+            div()
+                .size(px(68.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(t::RADIUS_2XL))
+                .bg(tone.opacity(0.08))
+                .border_1()
+                .border_color(tone.opacity(0.18))
+                .child(
+                    div()
+                        .size(px(48.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(t::RADIUS_XL))
+                        .bg(tone.opacity(0.16))
+                        .border_1()
+                        .border_color(tone.opacity(0.36))
+                        .child(icon(ic, 22.0, tone)),
+                ),
+        )
+        .child(div().mt(px(10.0)).max_w(px(340.0)).truncate().text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).text_color(c::text()).child(title))
+        .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(SharedString::from(sub.to_string())))
+}
+
+/// 一组「图标 + 一行说明」的清单。
+pub fn alert_rows(rows: Vec<(IconName, Rgba, String)>) -> Div {
+    let n = rows.len();
+    div().w_full().flex().flex_col().rounded(px(t::RADIUS_MD)).border_1().border_color(c::field_border()).bg(c::field()).children(rows.into_iter().enumerate().map(|(i, (ic, color, text))| {
+        div()
+            .min_h(px(38.0))
+            .px(px(12.0))
+            .py(px(6.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .when(i + 1 < n, |d| d.border_b_1().border_color(c::line()))
+            .child(icon(ic, 14.0, color))
+            .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CONTROL)).text_color(c::secondary()).child(text))
+    }))
+}
+
+/// 把各部分按统一的间距和内边距排好:hero、(可选)节点卡片、清单、按钮。
+pub fn alert_body(hero: Div, target: Option<Div>, rows: Div, buttons: Div) -> Div {
+    div().flex().flex_col().items_center().gap(px(18.0)).px(px(28.0)).pt(px(28.0)).pb(px(24.0)).child(hero).children(target).child(rows).child(buttons)
+}
+
+/// 实心按钮:`w` 为 None 时占满整行;`bg` 是底色(主色或危险色)。
+pub fn alert_solid_btn(id: &'static str, ic: Option<IconName>, label: &'static str, w: Option<f32>, bg: Rgba) -> Stateful<Div> {
+    div()
+        .id(id)
+        .when_some(w, |d, w| d.w(px(w)).flex_none())
+        .when(w.is_none(), |d| d.w_full())
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap(px(6.0))
+        .h(px(38.0))
+        .rounded(px(t::RADIUS_MD))
+        .bg(bg)
+        .text_color(c::on_accent())
+        .text_size(px(t::TYPE_CONTROL))
+        .font_weight(FontWeight::SEMIBOLD)
+        .cursor_pointer()
+        .hover(|s| s.opacity(0.88))
+        .when_some(ic, |d, ic| d.child(icon(ic, 14.0, c::on_accent())))
+        .child(label)
+}
+
+/// 主色的实心按钮(默认项)。
+pub fn alert_primary_btn(id: &'static str, ic: Option<IconName>, label: &'static str, w: Option<f32>) -> Stateful<Div> {
+    alert_solid_btn(id, ic, label, w, c::accent())
+}
+
+/// 对象卡片:左边图标块 + 名称 + 副标题,和节点页的节点卡片同款。
+pub fn alert_target(tile: impl IntoElement, name: SharedString, detail: SharedString) -> Div {
+    div()
+        .w_full()
+        .h(px(crate::NODE_CARD_H))
+        .glass(t::RADIUS_LG, GlassStyle::CARD)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(12.0))
+        .child(tile)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(div().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(name))
+                .child(div().truncate().text_size(px(t::TYPE_MICRO)).font_family(crate::MONO).text_color(c::ghost()).child(detail)),
+        )
+}
+
 fn modal_panel(
     id: &'static str,
     width: f32,
