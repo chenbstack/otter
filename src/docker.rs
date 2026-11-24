@@ -434,6 +434,10 @@ pub enum Action {
     Pull(String),
     RemoveImage(String),
     RemoveVolume(String),
+    /// 清理所有没被容器用到的镜像(`docker image prune -a`)
+    PruneImages,
+    /// 清理所有没被容器用到的存储卷(`docker volume prune`)
+    PruneVolumes,
 }
 
 impl Action {
@@ -447,11 +451,15 @@ impl Action {
             Action::Pull(n) => v(&["pull"], n),
             Action::RemoveImage(n) => v(&["rmi"], n),
             Action::RemoveVolume(n) => v(&["volume", "rm"], n),
+            Action::PruneImages => ["image", "prune", "-a", "-f"].iter().map(|s| s.to_string()).collect(),
+            Action::PruneVolumes => ["volume", "prune", "-f"].iter().map(|s| s.to_string()).collect(),
         }
     }
     pub fn target(&self) -> &str {
         match self {
             Action::Start(n) | Action::Stop(n) | Action::Restart(n) | Action::Remove(n) | Action::Pull(n) | Action::RemoveImage(n) | Action::RemoveVolume(n) => n,
+            Action::PruneImages => "未使用的镜像",
+            Action::PruneVolumes => "未使用的存储卷",
         }
     }
     fn verb(&self) -> &'static str {
@@ -463,6 +471,8 @@ impl Action {
             Action::Pull(_) => "拉取",
             Action::RemoveImage(_) => "删除镜像",
             Action::RemoveVolume(_) => "删除存储卷",
+            Action::PruneImages => "清理镜像",
+            Action::PruneVolumes => "清理存储卷",
         }
     }
 }
@@ -949,7 +959,8 @@ async fn monitor_task(session: Arc<SshHandle<Client>>, sh: Arc<Shared>) {
 }
 
 async fn run_action(r: &Runner, sh: &Shared, a: Action) {
-    if !safe_name(a.target()) {
+    let prune = matches!(a, Action::PruneImages | Action::PruneVolumes);
+    if !prune && !safe_name(a.target()) {
         *sh.notice.lock().unwrap() = Some(format!("{}失败:名称「{}」含有不支持的字符", a.verb(), a.target()));
         sh.bump();
         return;
@@ -957,10 +968,18 @@ async fn run_action(r: &Runner, sh: &Shared, a: Action) {
     let key = format!("{}:{}", a.verb(), a.target());
     sh.busy.lock().unwrap().insert(key.clone());
     sh.bump();
-    let timeout = if matches!(a, Action::Pull(_)) { Duration::from_secs(600) } else { Duration::from_secs(60) };
+    let timeout = if matches!(a, Action::Pull(_) | Action::PruneImages) { Duration::from_secs(600) } else { Duration::from_secs(60) };
     let res = r.docker(&a.args(), timeout).await;
     sh.busy.lock().unwrap().remove(&key);
     let msg = match res {
+        Ok(o) if o.code == 0 && prune => {
+            // docker 会在最后一行报「Total reclaimed space: 1.2GB」,带上这个数
+            let freed = o.stdout.lines().rev().find_map(|l| l.split_once("reclaimed space:").map(|(_, v)| v.trim().to_string()));
+            match freed {
+                Some(f) => format!("已{},释放 {f}", a.verb()),
+                None => format!("已{}", a.verb()),
+            }
+        }
         Ok(o) if o.code == 0 => format!("已{}:{}", a.verb(), a.target()),
         Ok(o) => format!("{}失败:{}", a.verb(), o.stderr.trim().lines().last().unwrap_or("未知错误")),
         Err(e) => format!("{}失败:{e}", a.verb()),

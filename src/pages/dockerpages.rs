@@ -33,6 +33,8 @@ pub(crate) struct DockAsk {
     body: &'static str,
     label: &'static str,
     action: Action,
+    /// 会被影响的对象清单(清理镜像时列出未使用的镜像),为空就不列
+    list: Vec<String>,
 }
 
 pub(crate) struct DockUi {
@@ -78,14 +80,16 @@ fn table(id: &'static str, header: Div, rows: Vec<Stateful<Div>>) -> Div {
         .min_h_0()
         .flex()
         .flex_col()
-        .glass(t::RADIUS_XL, GlassStyle::CARD)
+        .rounded(px(t::RADIUS_XL))
+        .border_1()
+        .border_color(c::dialog_border())
         .overflow_hidden()
         .child(header.h(px(34.0)).flex_shrink_0().flex().flex_row().items_center().gap(px(12.0)).px(px(16.0)).border_b_1().border_color(c::border()))
         .child(div().id(id).flex_1().min_h_0().overflow_y_scroll().children(rows))
 }
 
 fn row(id: (&'static str, usize)) -> Stateful<Div> {
-    div().id(id).h(px(44.0)).flex_shrink_0().flex().flex_row().items_center().gap(px(12.0)).px(px(16.0)).border_b_1().border_color(c::border()).hover(|s| s.bg(c::hover()))
+    div().id(id).h(px(44.0)).flex_shrink_0().flex().flex_row().items_center().gap(px(12.0)).px(px(16.0)).border_b_1().border_color(c::border()).hover(|s| s.bg(c::field_hover()))
 }
 
 fn icon_btn(id: (&'static str, usize), ic: IconName, color: Rgba) -> Stateful<Div> {
@@ -311,6 +315,40 @@ impl Home {
                     }))
                     .into_any_element(),
             );
+            v.push(
+                button("dock-prune-images", IconName::Trash, "清理镜像")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        // 没被任何容器用到的镜像(和 docker image prune -a 的范围一致)
+                        let snap = this.dock.snap.clone();
+                        let unused: Vec<&docker::Image> = snap.images.iter().filter(|i| !snap.containers.iter().any(|ct| i.matches(&ct.image))).collect();
+                        if unused.is_empty() {
+                            this.dock.notice = Some(("没有未使用的镜像可清理".into(), Instant::now()));
+                            cx.notify();
+                            return;
+                        }
+                        let list = unused.iter().map(|i| format!("{}:{}  ·  {}", i.repo, i.tag, i.size)).collect();
+                        this.ask(DockAsk { title: "清理镜像", tile: IconName::Image, name: format!("{} 个未使用的镜像", unused.len()), detail: "Docker 镜像", body: "删除下面这些没有被任何容器使用的镜像,需要时可以重新拉取", label: "清理镜像", action: Action::PruneImages, list }, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if self.page == Page::Volumes {
+            v.push(
+                button("dock-prune-volumes", IconName::Trash, "清理存储卷")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        // 没被任何容器挂载的存储卷(含已停止的容器,和 docker volume prune 一致)
+                        let snap = this.dock.snap.clone();
+                        let unused: Vec<&docker::Volume> = snap.volumes.iter().filter(|v| snap.volume_users(v).is_empty()).collect();
+                        if unused.is_empty() {
+                            this.dock.notice = Some(("没有未使用的存储卷可清理".into(), Instant::now()));
+                            cx.notify();
+                            return;
+                        }
+                        let list = unused.iter().map(|v| match &v.size { Some(sz) => format!("{}  ·  {}", v.name, sz), None => v.name.clone() }).collect();
+                        this.ask(DockAsk { title: "清理存储卷", tile: IconName::HardDrive, name: format!("{} 个未使用的存储卷", unused.len()), detail: "Docker 存储卷", body: "删除下面这些没有被任何容器使用的存储卷,里面的数据无法恢复", label: "清理存储卷", action: Action::PruneVolumes, list }, cx);
+                    }))
+                    .into_any_element(),
+            );
         }
         v.push(button("dock-refresh", IconName::RefreshCw, "刷新").on_click(cx.listener(|this, _, _, cx| this.dock_refresh(cx))).into_any_element());
         v
@@ -348,8 +386,12 @@ impl Home {
                 tile: Self::icon_tile(cf.tile, c::accent(), c::accent_soft()).into_any_element(),
                 name: cf.name.clone().into(),
                 detail: cf.detail.into(),
-                points: vec![(IconName::Trash, c::danger(), cf.body.into())],
+                points: std::iter::once((IconName::Trash, c::danger(), cf.body.into()))
+                    .chain(cf.list.iter().take(8).map(|x| (cf.tile, c::muted(), x.clone().into())))
+                    .chain((cf.list.len() > 8).then(|| (cf.tile, c::ghost(), format!("…还有 {} 个", cf.list.len() - 8).into())))
+                    .collect(),
                 ok_label: cf.label,
+                compact: true,
             };
             v.push(self.delete_confirm("dock-confirm", spec, |this| this.dock.confirm = None, move |this, cx| {
                 this.dock.confirm = None;
@@ -454,7 +496,7 @@ impl Home {
                 }
                 let n = name.clone();
                 acts = acts.child(icon_btn(("rm", i), IconName::Trash, c::danger()).on_click(cx.listener(move |this, _, _, cx| {
-                    this.ask(DockAsk { title: "删除容器", tile: IconName::Box, name: n.clone(), detail: "Docker 容器", body: "强制删除,容器内未保存到存储卷的数据会丢失", label: "删除容器", action: Action::Remove(n.clone()) }, cx);
+                    this.ask(DockAsk { title: "删除容器", tile: IconName::Box, name: n.clone(), detail: "Docker 容器", body: "强制删除,容器内未保存到存储卷的数据会丢失", label: "删除容器", action: Action::Remove(n.clone()), list: Vec::new() }, cx);
                 })));
             }
             let ports = ct.ports.iter().take(2).map(|p| tag(p.clone())).collect::<Vec<_>>();
@@ -474,7 +516,7 @@ impl Home {
                     )
                     .child(div().w(px(110.0)).truncate().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(ct.project.clone().unwrap_or_else(|| "—".into())))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CONTROL)).font_family(MONO).text_color(c::muted()).child(ct.image.clone()))
-                    .child(div().w(px(104.0)).child(pill(docker::uptime_text(ct), fg, bg)))
+                    .child(div().w(px(104.0)).flex().flex_row().child(pill(docker::uptime_text(ct), fg, bg)))
                     .child(div().w(px(58.0)).text_size(px(t::TYPE_CONTROL)).font_family(MONO).text_color(c::secondary()).child(if up { format!("{:.1}%", st.cpu) } else { "—".into() }))
                     .child(div().w(px(74.0)).text_size(px(t::TYPE_CONTROL)).font_family(MONO).text_color(c::secondary()).child(if up { docker::fmt_bytes(st.mem) } else { "—".into() }))
                     .child(div().w(px(150.0)).flex().flex_row().gap(px(4.0)).overflow_hidden().children(ports).children((more > 0).then(|| small(format!("+{more}"), c::ghost()))))
@@ -555,7 +597,7 @@ impl Home {
             } else if users == 0 {
                 let (tg, nm) = (target.clone(), name.clone());
                 act = act.child(icon_btn(("rmi", i), IconName::Trash, c::danger()).on_click(cx.listener(move |this, _, _, cx| {
-                    this.ask(DockAsk { title: "删除镜像", tile: IconName::Image, name: nm.clone(), detail: "Docker 镜像", body: "只删除本地副本,需要时可以重新拉取", label: "删除镜像", action: Action::RemoveImage(tg.clone()) }, cx);
+                    this.ask(DockAsk { title: "删除镜像", tile: IconName::Image, name: nm.clone(), detail: "Docker 镜像", body: "只删除本地副本,需要时可以重新拉取", label: "删除镜像", action: Action::RemoveImage(tg.clone()), list: Vec::new() }, cx);
                 })));
             }
             rows.push(
@@ -589,7 +631,7 @@ impl Home {
             } else if users.is_empty() {
                 let n = v.name.clone();
                 act = act.child(icon_btn(("rmv", i), IconName::Trash, c::danger()).on_click(cx.listener(move |this, _, _, cx| {
-                    this.ask(DockAsk { title: "删除存储卷", tile: IconName::HardDrive, name: n.clone(), detail: "Docker 存储卷", body: "卷里的数据会永久丢失", label: "删除存储卷", action: Action::RemoveVolume(n.clone()) }, cx);
+                    this.ask(DockAsk { title: "删除存储卷", tile: IconName::HardDrive, name: n.clone(), detail: "Docker 存储卷", body: "卷里的数据会永久丢失", label: "删除存储卷", action: Action::RemoveVolume(n.clone()), list: Vec::new() }, cx);
                 })));
             }
             let mounted: Vec<Div> = users.iter().take(3).map(|c| tag(c.name.clone())).collect();

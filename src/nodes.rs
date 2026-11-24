@@ -683,6 +683,7 @@ impl Home {
                 (IconName::ShieldCheck, c::online(), "服务器上的内容不受影响".into()),
             ],
             ok_label: "删除分组",
+            compact: false,
         };
         Some(self.delete_confirm("group-del-dialog", spec, |this| this.group_delete = None, move |this, cx| this.delete_group_now(gid, cx), cx))
     }
@@ -703,6 +704,7 @@ impl Home {
                 (IconName::ShieldCheck, c::online(), "服务器上的内容不受影响".into()),
             ],
             ok_label: "删除节点",
+            compact: false,
         };
         Some(self.delete_confirm(
             "node-del-dialog",

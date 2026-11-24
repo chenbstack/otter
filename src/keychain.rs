@@ -550,6 +550,7 @@ impl Home {
                     detail: k.map(|k| k.fingerprint.clone()).unwrap_or_default().into(),
                     points,
                     ok_label: "删除密钥",
+                    compact: false,
                 };
                 return Some(self.delete_confirm("key-del-dialog", spec, |this| this.key_modal = None, |this, cx| this.confirm_delete_key(cx), cx));
             }

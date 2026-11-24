@@ -91,8 +91,9 @@ impl Home {
                     .text_color(c::ghost())
                     .child("节点详情"),
             );
-        for (i, p) in Page::ALL.into_iter().enumerate() {
-            let active = self.page == p;
+        // 侧边栏只有两项:概览,和把容器/堆栈/镜像/存储卷合在一起的「容器」(里面用页签切换)
+        for (i, p) in [Page::Overview, Page::Containers].into_iter().enumerate() {
+            let active = if p == Page::Overview { self.page == p } else { self.page != Page::Overview };
             let count = menu_count(node, &self.dock.snap, p);
             col = col.child(
                 div()
@@ -226,13 +227,13 @@ impl Home {
                     .children(self.dock_header_actions(cx))
             });
 
-        let stats = (self.page == Page::Stacks && !gated).then(|| self.summary());
         let scroll_header = self.page == Page::Overview && !gated;
 
+        let tabs = (self.page != Page::Overview && !gated).then(|| self.docker_tabs(cx).into_any_element());
         let inner: Vec<AnyElement> = if scroll_header {
             vec![div().id("overview-scroll").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().child(header).child(body).into_any_element()]
         } else {
-            vec![header.into_any_element(), stats.map(IntoElement::into_any_element).unwrap_or_else(|| div().into_any_element()), body]
+            vec![header.into_any_element(), tabs.unwrap_or_else(|| div().into_any_element()), body]
         };
         div()
             .flex_1()
@@ -247,103 +248,36 @@ impl Home {
             .children(self.dock_overlays(cx))
     }
 
-    /// 页头下方的一排汇总卡片。
-    pub(crate) fn summary(&self) -> Div {
+    /// 容器相关四个页面的页签:容器 / 堆栈 / 镜像 / 存储卷
+    fn docker_tabs(&self, cx: &mut Context<Self>) -> Div {
         let node = self.node();
-        let total = node.service_count();
-        let running: usize = node.stacks.iter().map(|s| s.running()).sum();
-        let healthy = node.stacks.iter().filter(|s| s.running() == s.services.len()).count();
-        let agg = aggregate(node.stacks.iter().flat_map(|s| s.services.iter()));
-
-        let tile = |ic: IconName, label: &'static str, value: String, sub: Div, chart: Option<Div>| {
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_row()
-                .items_end()
-                .gap(px(12.0))
-                .p(px(14.0))
-                .glass(t::RADIUS_XL, GlassStyle::CARD)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .text_size(px(t::TYPE_CAPTION))
-                                .text_color(c::muted())
-                                .child(icon(ic, 12.0, c::ghost()))
-                                .child(label),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_baseline()
-                                .gap(px(6.0))
-                                .child(
-                                    div()
-                                        .text_size(px(t::TYPE_DISPLAY))
-                                        .font_family(MONO)
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(value),
-                                )
-                                .child(sub),
-                        ),
-                )
-                .children(chart.map(|c| div().w(px(84.0)).flex_shrink_0().child(c)))
-        };
-
-        let small = |s: String, color: Rgba| div().text_size(px(t::TYPE_CAPTION)).text_color(color).child(s);
-        let mem = mock::fmt_mem(agg.mem_mb);
-        let (mem_v, mem_u) = mem.split_once(' ').unwrap_or((&mem, ""));
-
-        div()
-            .flex()
-            .flex_row()
-            .gap(px(10.0))
-            .pb(px(14.0))
-            .flex_shrink_0()
-            .child(tile(
-                IconName::Layers,
-                "堆栈",
-                node.stacks.len().to_string(),
-                small(format!("{healthy} 个全部正常"), c::muted()),
-                None,
-            ))
-            .child(tile(
-                IconName::Box,
-                "服务",
-                format!("{running}/{total}"),
-                if running == total {
-                    small("全部运行".into(), c::online())
-                } else {
-                    small(format!("{} 个已停止", total - running), c::warn())
-                },
-                None,
-            ))
-            .child(tile(
-                IconName::Cpu,
-                "CPU 合计",
-                format!("{:.1}", agg.cpu),
-                small("%".into(), c::muted()),
-                (!self.hide_charts).then(|| spark(&agg.cpu_s, c::cpu(), 26.0, 2.0)),
-            ))
-            .child(tile(
-                IconName::MemoryStick,
-                "内存合计",
-                mem_v.to_string(),
-                small(mem_u.to_string(), c::muted()),
-                (!self.hide_charts).then(|| spark(&agg.mem_s, c::mem(), 26.0, 2.0)),
-            ))
+        let mut row = div().flex().flex_row().items_center().gap(px(4.0)).pb(px(10.0)).flex_shrink_0();
+        for (i, p) in [Page::Containers, Page::Stacks, Page::Images, Page::Volumes].into_iter().enumerate() {
+            let active = self.page == p;
+            let count = menu_count(node, &self.dock.snap, p).filter(|n| *n > 0);
+            row = row.child(
+                div()
+                    .id(("dtab", i))
+                    .h(px(30.0))
+                    .px(px(12.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .cursor_pointer()
+                    .text_size(px(t::TYPE_CONTROL))
+                    .when(active, |d| d.glass(t::RADIUS_MD, GlassStyle::CONTROL).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
+                    .when(!active, |d| d.rounded(px(t::RADIUS_MD)).border_1().border_color(gpui_kit::transparent_black()).text_color(c::muted()).hover(|s| s.bg(c::field_hover()).text_color(c::secondary())))
+                    .child(icon(p.icon(), 14.0, if active { c::accent() } else { c::ghost() }))
+                    .child(p.label())
+                    .when_some(count, |d, n| d.child(div().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(if active { c::accent() } else { c::ghost() }).child(n.to_string())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.page = p;
+                        cx.notify();
+                    })),
+            );
+        }
+        row
     }
 
     pub(crate) fn stack_card(&self, ix: usize, cx: &mut Context<Self>) -> Div {
@@ -379,7 +313,9 @@ impl Home {
             .pl(px(14.0))
             .pr(px(10.0))
             .cursor_pointer()
-            .hover(|st| st.bg(c::hover()))
+            .when(s.expanded, |d| d.rounded_t(px(t::RADIUS_XL - 1.0)))
+            .when(!s.expanded, |d| d.rounded(px(t::RADIUS_XL - 1.0)))
+            .hover(|st| st.bg(c::field_hover()))
             .child(icon(
                 if s.expanded { IconName::ChevronDown } else { IconName::ChevronRight },
                 14.0,
@@ -443,7 +379,9 @@ impl Home {
 
         let mut card = div()
             .w_full()
-            .glass(t::RADIUS_XL, GlassStyle::CARD)
+            .rounded(px(t::RADIUS_XL))
+            .border_1()
+            .border_color(c::dialog_border())
             .overflow_hidden()
             .child(header);
 
