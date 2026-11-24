@@ -493,6 +493,9 @@ fn main() {
                 if !demo && shot.is_none() {
                     h.start_activity_watch(window, cx);
                     h.start_ctl(window, cx);
+                    if let Some(msg) = platform::install_cli_link() {
+                        logs::push(logs::Level::Info, "Otter", msg);
+                    }
                 }
                 if add {
                     h.open_add_node(window, cx);
