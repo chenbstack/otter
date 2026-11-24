@@ -1,44 +1,52 @@
-# otter
+<div align="center">
 
-DeskPanel 重做版:macOS 原生桌面客户端,经 SSH 管理多台服务器的终端、文件、Docker、数据库、网站,服务器上不装任何东西。
-当前是外观与交互原型(GPUI Kit,纯 Rust 原生,全部 mock 数据)。
+<img src="assets/logo/otter-1024.png" width="112" alt="Otter logo">
 
-**文档**:[docs/README.md](docs/README.md)(产品定位与需求见 [docs/product/overview.md](docs/product/overview.md))
+# Otter
 
-- `src/main.rs` + `src/mock.rs`:**首页外观**(三栏 + 堆栈页,全部 mock 数据)
-- `src/node_form.rs`:添加 / 编辑节点弹窗
-- `src/files.rs`:文件管理抽屉(服务器 / 容器,拖入上传)
-- `src/bin/bench.rs`:堆栈页变高卡片列表的**滚动性能压测**
+**Manage your servers over plain SSH: terminal, files and Docker in one native window. Nothing to install on the server.**
 
-## 首页
+English · [简体中文](README.zh-CN.md)
+
+</div>
+
+## Features
+
+- **Nodes & groups**: organize servers, search, import from CSV or `~/.ssh/config`.
+- **SSH terminal**: password, private key or SSH agent auth.
+- **Files (SFTP)**: browse, preview, drag-and-drop upload, create folders, delete; also inside containers.
+- **Docker**: stacks, containers, images and volumes; start, stop, restart, delete.
+- **Agent interface**: let an AI agent read your nodes and, with your approval, take over a terminal session.
+
+## Install
+
+Download from the [Releases](../../releases) page:
+
+- **macOS**: `.dmg`. Not notarized: right-click → Open on first launch.
+- **Windows**: `-setup.exe`. Installs per user, no admin rights needed.
+- **Linux**: `.tar.gz` containing `otter-gui` and `otter`.
+
+## Usage
+
+Open Otter, add a node (or import), and click it to open its terminal, files and Docker tabs.
+
+### Agents
+
+Reading nodes and sessions needs no approval. Taking over a terminal always asks you first, shows an overlay while the agent types, and can be stopped with one click. Granted agents are listed on the **Trust** page, where you can revoke them.
+
+Command line:
 
 ```bash
-cargo run --release                                  # 打开首页(界面程序 otter-gui;命令行程序是 otter,见 docs/modules/ctl.md)
-cargo run --release -- --shot out.png --expand 3     # 离屏截图后退出(不需要屏幕录制权限)
-#   可选: --node 1,2(选节点)  --plain(隐藏图表)  --page 0..6(菜单页)  --add(打开添加节点弹窗)
-#   文件抽屉: --files host | --files emby/emby_av(容器)  --fcd /etc(进目录)  --fsel hosts(选中)
-#   注意:锁屏时窗口收不到渲染帧,--shot 会一直卡住
+otter nodes                          # server nodes (JSON)
+otter sessions                       # open terminal sessions
+otter takeover --reason "check disk" --agent my-agent
+otter run "df -h"                    # prints only the new output
+otter release                        # hand the session back
+otter --help                         # all commands
 ```
 
-
-## 运行
+MCP (stdio), e.g. Claude Code:
 
 ```bash
-cargo run --release --bin bench      # 交互,默认 300 个堆栈;点卡片头展开/折叠
-cargo run --release --bin bench -- 1000          # 1000 个堆栈
-cargo run --release --bin bench -- 300 --bench   # 自动滚动压测 3 个场景(各 5s),打印报告后退出
-DY_SCENE=2 cargo run --release --bin bench -- 300 --bench   # 只跑指定场景(0 折叠 / 1 混合 / 2 展开)
+claude mcp add otter -- otter mcp
 ```
-
-## 环境坑
-
-- **必须 nightly**:`gpui-pre-macos 0.3.12` 用了 `Option::map_or_default`,stable 1.96 还没稳定。
-  已用 `rust-toolchain.toml` 局部指定 nightly,不影响全局。
-- **Metal 工具链**:`.cargo/config.toml` 把 `DEVELOPER_DIR` 指到完整 Xcode(CLT 里没有 metal 编译器)。
-  需要先下载过 MetalToolchain 组件,见 `../DeskPanel_gpui/README.md`。
-
-## 关键 API 事实
-
-`v_virtual_list` 要求**提前给出每项高度**(`item_sizes`),不靠渲染后测量。
-堆栈卡片高度由数据决定(折叠 / 展开 + 服务数),直接算出来即可,
-不需要 gpuix 版 `VirtualStackList` 那套"测量 + 回填 + sizeKey"。
