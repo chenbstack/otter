@@ -185,6 +185,8 @@ struct Home {
     fstore: files::Store,
     /// 等用户确认的 agent 接管申请(队首正在弹窗)
     takeover_prompts: std::collections::VecDeque<takeover::Prompt>,
+    /// 等用户确认的提权(sudo 代填)请求
+    sudo_prompt: Option<takeover::SudoPrompt>,
     /// 被结束但 agent 还没得知的接管:(连接 id, 会话 id) → 原因
     takeover_revoked: std::collections::HashMap<(u64, u64), &'static str>,
     /// 持久接管(lease)被结束的原因,按令牌记,下一个带着令牌来的连接能知道
@@ -265,6 +267,7 @@ impl Home {
             update: update::State::Idle,
             fstore: files::Store::default(),
             takeover_prompts: Default::default(),
+            sudo_prompt: None,
             takeover_revoked: Default::default(),
             lease_revoked: Default::default(),
             takeover_focus: None,
@@ -362,7 +365,7 @@ impl Render for Home {
         let takeover = self.takeover_overlay(cx);
         let body = div().relative().flex_1().min_h_0().flex().flex_col().child(body).children(overlay).children(takeover);
         let drawer = if is_files_tab { None } else { self.files_drawer(window, cx) };
-        let dialog = self.takeover_prompt_dialog(cx).or_else(|| self.node_dialog(window, cx)).or_else(|| self.key_modal_view(window, cx)).or_else(|| self.import_dialog(cx)).or_else(|| self.group_delete_dialog(cx)).or_else(|| self.node_delete_dialog(cx)).or_else(|| self.group_form_dialog(window, cx));
+        let dialog = self.sudo_prompt_dialog(window, cx).or_else(|| self.takeover_prompt_dialog(cx)).or_else(|| self.node_dialog(window, cx)).or_else(|| self.key_modal_view(window, cx)).or_else(|| self.import_dialog(cx)).or_else(|| self.group_delete_dialog(cx)).or_else(|| self.node_delete_dialog(cx)).or_else(|| self.group_form_dialog(window, cx));
         // 容器页的抽屉、确认框、提示盖在整个窗口上(含标题栏)
         let dock_layer = if self.dock_visible() { self.dock_overlays(window, cx) } else { Vec::new() };
         div()
@@ -379,7 +382,7 @@ impl Render for Home {
             .children(dock_layer)
             .children(dialog)
             // 接管确认框弹出时,标题栏盖在遮罩上面,让被申请的标签保持醒目
-            .children(if self.takeover_prompts.is_empty() { None } else { Some(self.titlebar_spotlight(window, cx)) })
+            .children(if self.takeover_prompts.is_empty() && self.sudo_prompt.is_none() { None } else { Some(self.titlebar_spotlight(window, cx)) })
             .children(self.tab_menu_overlay(cx))
             .children(self.node_menu_overlay(cx))
     }

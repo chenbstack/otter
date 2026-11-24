@@ -6,16 +6,22 @@ use crate::ipc::SyncStream;
 
 use serde_json::{Value, json};
 
-/// agent 自报的名称:`--agent <名字>` > 环境变量 `OTTER_AGENT` > 默认值。界面上的确认框、遮罩、标签提示和日志
+/// agent 自报的名称(必须提供):`--agent <名字>` > 环境变量 `OTTER_AGENT` > MCP 客户端自报的 `clientInfo.name`。界面上的确认框、遮罩、标签提示和日志
 /// 都显示它。名称只是给用户看的,不是身份。
 static AGENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-fn agent_name(default: &str) -> String {
+fn agent_name(default: Option<&str>) -> Result<String, CallError> {
     AGENT
         .get()
         .cloned()
         .or_else(|| std::env::var("OTTER_AGENT").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| default.to_string())
+        .or_else(|| default.map(String::from))
+        .ok_or_else(|| CallError { kind: "bad_request".into(), message: "必须说明你是谁:加 --agent <名字>(或设环境变量 OTTER_AGENT),它会显示在用户的确认框和日志里".into() })
+}
+
+/// 连接 Otter:身份必须提供。
+fn open_conn(default: Option<&str>) -> Result<Conn, CallError> {
+    agent_name(default).and_then(|n| Conn::open(&n))
 }
 
 /// 从参数里取出 `--agent <名字>`(任何位置),返回剩下的参数。
@@ -99,7 +105,7 @@ fn run_nodes(args: &[String]) -> i32 {
             }
         }
     }
-    match Conn::open(&agent_name("otter-cli")).and_then(|mut c| c.call("list_nodes", params)) {
+    match open_conn(None).and_then(|mut c| c.call("list_nodes", params)) {
         Ok(v) => {
             println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
             0
@@ -132,14 +138,14 @@ pub fn run_ctl(args: &[String]) -> i32 {
         Some("groups") => ("list_groups", ""),
         Some("sessions") => ("list_sessions", ""),
         Some("current") => ("get_focus", ""),
-        Some(c @ ("takeover" | "release" | "run" | "type" | "key" | "screen" | "scroll")) => return run_leased(c, &args[1..]),
+        Some(c @ ("takeover" | "release" | "run" | "type" | "key" | "screen" | "scroll" | "sudo")) => return run_leased(c, &args[1..]),
         _ => ("", "usage: otter <nodes|groups|sessions|current|takeover|release|run|type|key|screen|scroll> (see: otter --help)"),
     };
     if method.is_empty() {
         eprintln!("{usage}");
         return 2;
     }
-    match Conn::open(&agent_name("otter-cli")).and_then(|mut c| c.call(method, Value::Null)) {
+    match open_conn(None).and_then(|mut c| c.call(method, Value::Null)) {
         Ok(v) => {
             println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
             0
@@ -162,9 +168,10 @@ fn tools() -> Value {
         tool("list_nodes", "列出 Otter 里的服务器节点(不含密码、私钥等秘密)。可用 group 只看某个分组", json!({ "group": { "description": "分组 id(数字)或分组名;不给则列出全部节点", "type": ["integer", "string"] } }), &[]),
         tool("list_sessions", "列出 Otter 里当前打开的会话(标签),含是否被接管", json!({}), &[]),
         tool("get_focus", "用户当前看着的会话;没有则返回 null", json!({}), &[]),
-        tool("takeover_begin", "接管一个已连上的终端会话。每次都会弹窗请用户确认;用户随时能中止。之后才能输入、读屏幕", json!({ "session": sid, "reason": { "type": "string", "description": "告诉用户你要做什么" } }), &["session"]),
+        tool("takeover_begin", "接管一个已连上的终端会话。每次都会弹窗请用户确认;用户随时能中止。之后才能输入、读屏幕", json!({ "session": sid, "reason": { "type": "string", "description": "必填:告诉用户你要做什么" } }), &["session", "reason"]),
         tool("takeover_end", "交还接管。不会向终端发送任何按键", json!({ "session": sid }), &["session"]),
         tool("send_input", "向被接管的终端输入文本。单次最多 8KB。execute 为 true 时在末尾自动按回车执行,不要在 text 里自己带换行,并返回 mark(命令开始的位置,交给 wait_for 的 since)", json!({ "session": sid, "text": { "type": "string" }, "execute": { "type": "boolean", "description": "输入后自动回车执行,默认 false" } }), &["session", "text"]),
+        tool("request_sudo", "屏幕上出现 sudo 的密码提示(「[sudo] password for …」「[sudo: authenticate] Password:」之类)后调用。命令行里 `otter run --sudo '<命令>'` 会自动完成这一步:请用户同意由 Otter 代为输入 sudo 密码,你拿不到密码。用户可选「仅这一次 / 10 分钟 / 30 分钟」;授权期内再遇到 sudo 提示,调用即直接代填不再弹窗。屏幕上不是 sudo 提示会被拒绝(no_sudo_prompt);用户拒绝返回 sudo_denied。成功后用 wait_for 等命令继续", json!({ "session": sid, "reason": { "type": "string", "description": "必填:告诉用户为什么需要提权、要执行什么" } }), &["session", "reason"]),
         tool("send_key", "向被接管的终端发送一个按键:enter、tab、esc、up、down、left、right、home、end、pageup、pagedown、backspace、delete、space、ctrl+<字母>", json!({ "session": sid, "key": { "type": "string" } }), &["session", "key"]),
         tool("read_screen", "读取被接管终端当前屏幕的文本和光标位置", json!({ "session": sid }), &["session"]),
         tool("read_scrollback", "读取被接管终端最近的 N 行(含已滚出屏幕的),最多 500", json!({ "session": sid, "lines": { "type": "integer" } }), &["session"]),
@@ -177,7 +184,7 @@ pub fn run_mcp(args: &[String]) -> i32 {
     take_agent(args);
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
-    let mut client_name = String::from("mcp-client");
+    let mut client_name: Option<String> = None;
     let mut conn: Option<Conn> = None;
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -188,7 +195,7 @@ pub fn run_mcp(args: &[String]) -> i32 {
         let result = match method {
             "initialize" => {
                 if let Some(n) = params.pointer("/clientInfo/name").and_then(Value::as_str) {
-                    client_name = n.to_string();
+                    client_name = Some(n.to_string());
                 }
                 let ver = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("2024-11-05");
                 json!({ "protocolVersion": ver, "capabilities": { "tools": {} }, "serverInfo": { "name": "otter", "version": env!("CARGO_PKG_VERSION") } })
@@ -203,7 +210,7 @@ pub fn run_mcp(args: &[String]) -> i32 {
                     Err(CallError { kind: "bad_request".into(), message: format!("未知工具 {name}") })
                 } else {
                     if conn.is_none() {
-                        match Conn::open(&agent_name(&client_name)) {
+                        match open_conn(client_name.as_deref()) {
                             Ok(c) => conn = Some(c),
                             Err(e) => {
                                 reply(&mut out, id, tool_result(Err(e)));
@@ -255,6 +262,14 @@ fn tool_result(r: Result<Value, CallError>) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn with_sudo_prepends_only_when_missing() {
+        assert_eq!(super::with_sudo("systemctl restart nginx"), "sudo systemctl restart nginx");
+        assert_eq!(super::with_sudo("sudo ls /root"), "sudo ls /root");
+        assert_eq!(super::with_sudo("cd /x && sudo ls"), "cd /x && sudo ls");
+        assert_eq!(super::with_sudo("echo pseudo-sudoku"), "sudo echo pseudo-sudoku");
+    }
+
     use super::{CallError, tool_result, tools};
 
     #[test]
@@ -296,11 +311,12 @@ Usage:
   otter scroll [options] [lines]    print recent scrollback, 100 lines by default
 Options:
   --session <id>     session id; default is the session the user is looking at (see: otter sessions)
-  --reason <text>    why you want to take over; shown in the confirmation (takeover)
+  --reason <text>    required for takeover, run --once, run --sudo and sudo: what you are doing; shown to the user in the confirmation
   --wait <regex>     run: wait until the new output matches (default: wait until output goes quiet)
   --idle <ms>        run: how long output must stay quiet, default 1000
   --timeout <ms>     run: longest wait, default 10000
-  --agent <name>     tell the user which agent this is (shown in the confirmation, overlay, tab tooltip and log); or set OTTER_AGENT
+  --agent <name>     required (every command): which agent you are, shown in the confirmation, overlay, tab tooltip and log; or set OTTER_AGENT
+  --sudo             run: the command needs root; Otter prepends `sudo` if the command has none, and Otter asks the user once to approve typing the sudo password (you never see it)
   --once             no persistent takeover: take over, act and release within this one command (asks every time)
 A takeover ends after 30 minutes, or after 30 idle minutes; the user can stop it in Otter at any time.";
 
@@ -334,6 +350,18 @@ fn lease_clear(sid: u64) {
     }
 }
 
+/// `--sudo` 时命令里没有 sudo 就在最前面补一个;已经带了就原样用(用户/agent 自己写的位置优先)。
+fn with_sudo(cmd: &str) -> String {
+    let has = cmd.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-')).any(|w| w == "sudo");
+    if has { cmd.to_string() } else { format!("sudo {}", cmd.trim_start()) }
+}
+
+/// `wait_for` 返回的屏幕最后一行像不像密码提示(含 password / 密码,冒号结尾)。服务端收到 `request_sudo` 时还会再看一遍。
+fn at_password_prompt(v: &Value) -> bool {
+    let text = v.get("screen").and_then(Value::as_str).or_else(|| v.get("output").and_then(Value::as_str)).unwrap_or("");
+    text.lines().rev().find(|l| !l.trim().is_empty()).is_some_and(|l| { let l = l.trim().to_lowercase(); (l.ends_with(':') || l.ends_with('：')) && (l.contains("password") || l.contains("密码")) })
+}
+
 fn fail(e: &CallError) -> i32 {
     eprintln!("{}: {}", e.kind, e.message);
     match e.kind.as_str() {
@@ -345,7 +373,7 @@ fn fail(e: &CallError) -> i32 {
 
 /// `otter takeover|release|run|type|key|screen|scroll`。
 fn run_leased(cmd_name: &str, args: &[String]) -> i32 {
-    let (mut sid, mut reason, mut pattern, mut idle, mut timeout, mut once) = (None::<u64>, String::new(), None::<String>, 1000u64, 10_000u64, false);
+    let (mut sid, mut reason, mut pattern, mut idle, mut timeout, mut once, mut sudo) = (None::<u64>, String::new(), None::<String>, 1000u64, 10_000u64, false, false);
     let mut rest: Vec<&str> = vec![];
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -356,6 +384,7 @@ fn run_leased(cmd_name: &str, args: &[String]) -> i32 {
             "--idle" => idle = it.next().and_then(|v| v.parse().ok()).unwrap_or(idle),
             "--timeout" => timeout = it.next().and_then(|v| v.parse().ok()).unwrap_or(timeout),
             "--once" => once = true,
+            "--sudo" => sudo = true,
             "-h" | "--help" => {
                 println!("{ONCE_HELP}");
                 return 0;
@@ -368,7 +397,13 @@ fn run_leased(cmd_name: &str, args: &[String]) -> i32 {
         eprintln!("{ONCE_HELP}");
         return 2;
     }
-    let mut c = match Conn::open(&agent_name("otter-cli")) {
+    // 接管和提权都必须说明要做什么,这句话会显示在用户的确认框里
+    let needs_reason = cmd_name == "takeover" || cmd_name == "sudo" || (cmd_name == "run" && (once || sudo));
+    if needs_reason && reason.trim().is_empty() {
+        eprintln!("bad_request: 必须用 --reason <说明> 告诉用户你要做什么(显示在确认框里)");
+        return 2;
+    }
+    let mut c = match open_conn(None) {
         Ok(c) => c,
         Err(e) => return fail(&e),
     };
@@ -422,7 +457,7 @@ fn run_leased(cmd_name: &str, args: &[String]) -> i32 {
 
     // 其余命令:凭令牌操作;--once 时就地接管、结束时交还
     let token = if once {
-        let begin = json!({ "session": sid, "reason": if reason.is_empty() { text.clone() } else { reason.clone() } });
+        let begin = json!({ "session": sid, "reason": reason });
         if let Err(e) = c.call("takeover_begin", begin) {
             return fail(&e);
         }
@@ -448,18 +483,32 @@ fn run_leased(cmd_name: &str, args: &[String]) -> i32 {
         "scroll" => c.call("read_scrollback", with(json!({ "lines": rest.first().and_then(|n| n.parse::<u64>().ok()).unwrap_or(100) }))),
         "type" => c.call("send_input", with(json!({ "text": text, "execute": false }))),
         "key" => c.call("send_key", with(json!({ "key": text }))),
+        "sudo" => c.call("request_sudo", with(json!({ "reason": reason }))),
         _ => {
+            let text = if sudo { with_sudo(&text) } else { text.clone() };
             let sent = c.call("send_input", with(json!({ "text": text, "execute": true })))?;
-            let mut w = with(json!({ "timeout_ms": timeout }));
-            // 带上命令开始的位置,返回的 output 就只有这条命令之后的新内容
-            if let Some(m) = sent.get("mark") {
-                w["since"] = m.clone();
+            let wait = || {
+                let mut w = with(json!({ "timeout_ms": timeout }));
+                // 带上命令开始的位置,返回的 output 就只有这条命令之后的新内容
+                if let Some(m) = sent.get("mark") {
+                    w["since"] = m.clone();
+                }
+                match &pattern {
+                    Some(p) => w["pattern"] = json!(p),
+                    None => w["idle_ms"] = json!(idle),
+                }
+                w
+            };
+            let mut r = c.call("wait_for", wait())?;
+            // sudo 停在固定提示语上:请用户同意,Otter 代填密码,再接着等命令跑完
+            for _ in 0..3 {
+                if !sudo || !at_password_prompt(&r) {
+                    break;
+                }
+                c.call("request_sudo", with(json!({ "reason": reason })))?;
+                r = c.call("wait_for", wait())?;
             }
-            match &pattern {
-                Some(p) => w["pattern"] = json!(p),
-                None => w["idle_ms"] = json!(idle),
-            }
-            c.call("wait_for", w)
+            Ok(r)
         }
     })();
     if once {

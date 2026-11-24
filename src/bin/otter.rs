@@ -39,7 +39,7 @@ in Otter which agent is acting; without it MCP uses the client's own name and th
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let code = match args.get(1).map(String::as_str) {
-        Some("nodes" | "groups" | "sessions" | "current" | "takeover" | "release" | "run" | "type" | "key" | "screen" | "scroll") => ctl_cli::run_ctl(&args[1..]),
+        Some("nodes" | "groups" | "sessions" | "current" | "takeover" | "release" | "run" | "type" | "key" | "screen" | "scroll" | "sudo") => ctl_cli::run_ctl(&args[1..]),
         // 旧写法 `otter ctl <命令>` 继续能用
         Some("ctl") => ctl_cli::run_ctl(&args[2..]),
         Some("mcp") => ctl_cli::run_mcp(&args[2..]),

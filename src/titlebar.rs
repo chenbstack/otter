@@ -111,7 +111,7 @@ impl Home {
             };
             let taken = tab.takeover.is_some();
             // 有 agent 正在申请接管这个标签:警示色描边 + 闪烁的机器人徽标
-            let asking = self.takeover_prompts.front().is_some_and(|p| p.tab_id == tab.id);
+            let asking = self.takeover_prompts.front().is_some_and(|p| p.tab_id == tab.id) || self.sudo_prompt.as_ref().is_some_and(|p| p.tab_id == tab.id);
             let taken_by = tab.takeover.as_ref().map(|t| t.client_name.clone());
             let dim = spotlight && !asking;
             let busy = tab.busy_elapsed_ms();

@@ -113,9 +113,13 @@ async fn serve(stream: crate::ipc_server::Conn, id: u64, tx: mpsc::UnboundedSend
         let params = req.get("params").cloned().unwrap_or(Value::Null);
         let resp = if method == "hello" {
             let s = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or("").chars().take(200).collect::<String>();
-            let name = Some(s("client_name")).filter(|n| !n.is_empty()).unwrap_or_else(|| "未命名客户端".into());
-            client = Some(Arc::new(Client { id, name, parent_exe: s("parent_exe") }));
-            ok_response(rid, json!({ "protocol": PROTOCOL, "app": "otter" }))
+            let name = s("client_name").trim().to_string();
+            if name.is_empty() {
+                error_response(rid, &RpcError::new("bad_request", "hello 必须带 client_name:说明你是哪个 agent"))
+            } else {
+                client = Some(Arc::new(Client { id, name, parent_exe: s("parent_exe") }));
+                ok_response(rid, json!({ "protocol": PROTOCOL, "app": "otter" }))
+            }
         } else if let Some(c) = &client {
             let (rtx, rrx) = oneshot::channel();
             if tx.send(UiMsg::Call { client: c.clone(), method, params, reply: rtx }).is_err() {

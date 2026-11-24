@@ -5,9 +5,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::input::InputState;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Value, json};
+use zeroize::Zeroizing;
 
 use crate::ctl::{Client, Reply, RpcError};
 use crate::logs::{self, Level};
@@ -44,6 +46,59 @@ pub struct Takeover {
     pub waiting: bool,
     /// 持久接管的令牌:接管不随连接断开而结束,凭令牌可以从别的连接继续操作(命令行一条命令一个连接)
     pub lease: Option<String>,
+    /// 用户同意过的提权授权:到期前,屏幕上出现 sudo 密码提示时 agent 可以不再询问直接请 Otter 代填
+    pub sudo: Option<SudoGrant>,
+}
+
+/// 一次「N 分钟内同意」的提权授权。随接管结束而消失,不落盘。
+pub struct SudoGrant {
+    pub until: Instant,
+    /// 节点没保存密码时,用户在确认框里输入的密码(只在内存里)
+    password: Option<Zeroizing<String>>,
+}
+
+/// 提权授权的时长选项。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SudoScope {
+    Once,
+    Min10,
+    Min30,
+}
+
+impl SudoScope {
+    fn window(self) -> Option<Duration> {
+        match self {
+            Self::Once => None,
+            Self::Min10 => Some(Duration::from_secs(10 * 60)),
+            Self::Min30 => Some(Duration::from_secs(30 * 60)),
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Once => "once",
+            Self::Min10 => "10m",
+            Self::Min30 => "30m",
+        }
+    }
+}
+
+/// 等用户确认的提权请求(同一时间只有一个)。
+pub struct SudoPrompt {
+    pub(crate) tab_id: u64,
+    client: Arc<Client>,
+    reason: String,
+    /// 屏幕上的 sudo 提示行,给用户看
+    line: String,
+    /// 节点没保存密码时,让用户输入
+    input: Option<Entity<InputState>>,
+    reply: Reply,
+}
+
+/// 这一行像不像密码提示:含 password / 密码,以冒号结尾(`[sudo] password for chen:`、`[sudo: authenticate] Password:`、`[sudo] chen 的密码:`)。
+/// 不去枚举 sudo 各版本、各语言的写法;最终要不要填由用户在确认框里看着这一行决定。
+pub fn is_sudo_prompt(line: &str) -> bool {
+    let l = line.trim().to_lowercase();
+    (l.ends_with(':') || l.ends_with('：')) && (l.contains("password") || l.contains("密码")) && l.len() <= 200
 }
 
 impl Takeover {
@@ -199,6 +254,7 @@ impl Home {
                 }
             }
             "send_input" | "send_key" | "read_screen" | "read_scrollback" | "wait_for" => self.takeover_op(client, ix, method, params, reply, cx),
+            "request_sudo" => self.sudo_request(client, ix, params, reply, window, cx),
             _ => {
                 let _ = reply.send(Err(RpcError::new("bad_request", format!("未知方法 {method}"))));
             }
@@ -240,6 +296,10 @@ impl Home {
             return;
         }
         let reason = clip(params.get("reason").and_then(Value::as_str).unwrap_or("").trim(), 200);
+        if reason.is_empty() {
+            let _ = reply.send(Err(RpcError::new("bad_request", "必须提供 reason:告诉用户你要做什么")));
+            return;
+        }
         let lease = params.get("lease").and_then(Value::as_bool).unwrap_or(false);
         let granted = self.store.as_ref().is_some_and(|s| s.grant_has(&client.name, &client.parent_exe, node));
         if granted {
@@ -272,6 +332,7 @@ impl Home {
             last_action: if reason.is_empty() { "已开始接管".into() } else { clip(reason, 60) },
             waiting: false,
             lease: token.clone(),
+            sudo: None,
         });
         alog(format!("{} 开始接管 {}{}", client.name, self.node_name(node), if reason.is_empty() { String::new() } else { format!("(原因:{reason})") }));
         let fh = self.takeover_focus.get_or_insert_with(|| cx.focus_handle()).clone();
@@ -306,6 +367,7 @@ impl Home {
     pub(crate) fn end_takeover(&mut self, tab_id: u64, revoked: Option<&'static str>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.tab_ix_by_id(tab_id) else { return };
         let Some(t) = self.workspace.tabs[ix].takeover.take() else { return };
+        self.drop_sudo_prompt(tab_id);
         let node = self.node_name(self.workspace.tabs[ix].node());
         match revoked {
             Some(r) => {
@@ -332,6 +394,9 @@ impl Home {
     /// 客户端连接断开:释放它持有的接管(持久接管不释放,凭令牌可以继续),撤掉它排队的申请。
     pub(crate) fn takeover_client_closed(&mut self, client_id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.takeover_prompts.retain(|p| p.client.id != client_id);
+        if self.sudo_prompt.as_ref().is_some_and(|p| p.client.id == client_id) {
+            self.sudo_prompt = None;
+        }
         let ids: Vec<u64> = self.workspace.tabs.iter().filter(|t| t.takeover.as_ref().is_some_and(|k| k.client_id == client_id && k.lease.is_none())).map(|t| t.id).collect();
         for id in ids {
             // 客户端已经断开,不需要记「被中止」
@@ -356,6 +421,7 @@ impl Home {
             self.record_revoked(&t, id, "tab_closed");
         }
         self.takeover_prompts.retain(|p| p.tab_id != id);
+        self.drop_sudo_prompt(id);
     }
 
     /// 用户对确认框的选择。
@@ -588,6 +654,12 @@ impl Home {
         for (id, why) in ending {
             self.end_takeover(id, Some(why), window, cx);
         }
+        let now = Instant::now();
+        for k in self.workspace.tabs.iter_mut().filter_map(|t| t.takeover.as_mut()) {
+            if k.sudo.as_ref().is_some_and(|g| g.until <= now) {
+                k.sudo = None;
+            }
+        }
     }
 
     /// ⌘. :停止当前标签上的接管。返回是否处理了这次按键。
@@ -607,7 +679,13 @@ impl Home {
     pub(crate) fn debug_takeover(&mut self, mode: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(a) = self.workspace.active else { return };
         let client = Arc::new(Client { id: 0, name: "Claude Code".into(), parent_exe: "/usr/local/bin/claude".into() });
-        if mode == "prompt" {
+        if mode == "sudo" || mode == "sudo-saved" {
+            self.start_takeover(a, &client, "", false, window, cx);
+            let (reply, _rx) = tokio::sync::oneshot::channel();
+            let tab_id = self.workspace.tabs[a].id;
+            let input = (mode == "sudo").then(|| cx.new(|cx| InputState::new(window, cx).placeholder("sudo 密码").masked(true)));
+            self.sudo_prompt = Some(SudoPrompt { tab_id, client, reason: "清理 /var/log 下的旧日志".into(), line: "[sudo] password for chen:".into(), input, reply });
+        } else if mode == "prompt" {
             let (reply, _rx) = tokio::sync::oneshot::channel();
             let tab_id = self.workspace.tabs[a].id;
             self.takeover_prompts.push_back(Prompt { tab_id, client, reason: "排查磁盘占用,执行 df -h 和 du".into(), lease: false, reply });
@@ -701,6 +779,21 @@ impl Home {
                         .child(div().mt(px(10.0)).text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).text_color(c::text()).child("Agent 接管中"))
                         .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(k.client_name.clone()))
                         .child(div().max_w(px(360.0)).truncate().text_size(px(t::TYPE_MICRO)).font_family(crate::MONO).text_color(c::ghost()).child(k.last_action.clone()))
+                        .children(k.sudo.as_ref().map(|g| {
+                            let mins = g.until.saturating_duration_since(Instant::now()).as_secs().div_ceil(60);
+                            div()
+                                .id("takeover-sudo")
+                                .mt(px(10.0))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .text_size(px(t::TYPE_MICRO))
+                                .text_color(c::warn())
+                                .child(icon(IconName::KeyRound, 12.0, c::warn()))
+                                .child(format!("已授权提权,剩余约 {mins} 分钟"))
+                                .child(div().id("takeover-sudo-revoke").cursor_pointer().text_color(c::muted()).hover(|s| s.text_color(c::text())).child("撤销").on_click(cx.listener(move |this, _, _, cx| this.revoke_sudo(id, cx))))
+                        }))
                         .child(div().mt(px(14.0)).child(stop))
                         .child(div().mt(px(8.0)).text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(format!("{}. 也可以停止 · 停止不会中断正在运行的命令", crate::platform::accel_name()))),
                 )
@@ -763,6 +856,229 @@ impl Home {
     }
 }
 
+impl Home {
+    /// 屏幕上(光标所在的最后一行)现在是不是 sudo 密码提示;是就返回这一行。
+    fn sudo_prompt_line(&self, ix: usize, cx: &App) -> Option<String> {
+        let term = self.workspace.tabs[ix].term.as_ref()?;
+        let snap = term.view.read(cx).text_snapshot(0);
+        let lines = trim_trailing_blank(snap.lines[snap.screen_start..].to_vec());
+        lines.last().filter(|l| is_sudo_prompt(l)).map(|l| l.trim().to_string())
+    }
+
+    /// `request_sudo`:agent 看到 sudo 的密码提示后,请 Otter 代为输入密码。agent 始终拿不到密码。
+    fn sudo_request(&mut self, client: &Arc<Client>, ix: usize, params: &Value, reply: Reply, window: &mut Window, cx: &mut Context<Self>) {
+        let sid = self.workspace.tabs[ix].id;
+        match self.workspace.tabs[ix].takeover.as_mut() {
+            Some(t) if t.owned_by(client, params) => {
+                t.last_call = Instant::now();
+                t.client_id = client.id;
+            }
+            Some(_) => {
+                let _ = reply.send(Err(RpcError::new("busy", "这个会话已经被另一个 agent 接管")));
+                return;
+            }
+            None => {
+                let _ = reply.send(Err(RpcError::new("takeover_required", "先调用 takeover_begin 接管这个会话")));
+                return;
+            }
+        }
+        if params.get("reason").and_then(Value::as_str).is_none_or(|r| r.trim().is_empty()) {
+            let _ = reply.send(Err(RpcError::new("bad_request", "必须提供 reason:告诉用户为什么需要提权、要执行什么")));
+            return;
+        }
+        let Some(line) = self.sudo_prompt_line(ix, cx) else {
+            let _ = reply.send(Err(RpcError::new("no_sudo_prompt", "屏幕上没有 sudo 密码提示。先 send_input 执行带 sudo 的命令,等屏幕出现「[sudo] password for …」再调用")));
+            return;
+        };
+        if self.sudo_prompt.is_some() {
+            let _ = reply.send(Err(RpcError::new("busy", "正在等用户确认另一个提权请求")));
+            return;
+        }
+        let Some(node) = self.workspace.tabs[ix].node() else {
+            let _ = reply.send(Err(RpcError::new("bad_request", "只能给节点的终端提权")));
+            return;
+        };
+        // 授权窗口内:屏幕确实是 sudo 提示,直接代填
+        let remaining = self.workspace.tabs[ix].takeover.as_ref().and_then(|t| t.sudo.as_ref()).map(|g| g.until.saturating_duration_since(Instant::now()));
+        if remaining.is_some_and(|r| !r.is_zero()) {
+            let typed = self.workspace.tabs[ix].takeover.as_ref().and_then(|t| t.sudo.as_ref()).and_then(|g| g.password.clone());
+            match self.sudo_fill(ix, typed, cx) {
+                Ok(()) => {
+                    let _ = reply.send(Ok(json!({ "filled": true, "granted": "window", "remaining_s": remaining.map_or(0, |r| r.as_secs()) })));
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(RpcError::new("sudo_failed", e)));
+                }
+            }
+            cx.notify();
+            return;
+        }
+        // 节点没保存密码:确认框里让用户输入
+        let saved = self.conn_for(node).auth.password.is_some();
+        let input = (!saved).then(|| cx.new(|cx| InputState::new(window, cx).placeholder("sudo 密码").masked(true)));
+        if let Some(i) = &input {
+            let fh = i.focus_handle(cx);
+            window.focus(&fh, cx);
+        }
+        let reason = clip(params.get("reason").and_then(Value::as_str).unwrap_or("").trim(), 200);
+        alog(format!("{} 申请在 {} 提权(sudo)", client.name, self.node_name(Some(node))));
+        self.sudo_prompt = Some(SudoPrompt { tab_id: sid, client: client.clone(), reason, line, input, reply });
+        cx.activate(true);
+        self.activate(ix);
+        cx.notify();
+    }
+
+    /// 把密码写进终端并回车。优先级:用户刚输入的 > 授权里记着的(同样是用户输入的) > 节点保存的。
+    /// 写之前再确认一次屏幕还是 sudo 提示,免得用户等确认的这段时间里屏幕变了,密码被敲进别处。
+    fn sudo_fill(&mut self, ix: usize, typed: Option<Zeroizing<String>>, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.sudo_prompt_line(ix, cx).is_none() {
+            return Err("屏幕上的 sudo 密码提示已经消失".into());
+        }
+        let node = self.workspace.tabs[ix].node().ok_or("只能给节点的终端提权")?;
+        let pw = match typed {
+            Some(p) => p,
+            None => self.conn_for(node).auth.password.ok_or("这个节点没有保存密码")?,
+        };
+        let term = self.workspace.tabs[ix].term.as_ref().ok_or("终端还没有连上")?;
+        if term.handle.status() != Status::Connected {
+            return Err("终端已断开".into());
+        }
+        let mut bytes = Zeroizing::new(pw.as_bytes().to_vec());
+        bytes.push(b'\r');
+        let _ = term.handle.inputter().send(bytes.to_vec());
+        let name = self.node_name(Some(node));
+        if let Some(t) = self.workspace.tabs[ix].takeover.as_mut() {
+            t.last_action = "提权:已代为输入 sudo 密码".into();
+        }
+        alog(format!("→ {name} 已代为输入 sudo 密码"));
+        Ok(())
+    }
+
+    /// 用户对提权请求的选择;`None` 表示拒绝。
+    pub(crate) fn resolve_sudo_prompt(&mut self, scope: Option<SudoScope>, cx: &mut Context<Self>) {
+        let Some(p) = self.sudo_prompt.as_ref() else { return };
+        // 要输入密码却没输:不处理,等用户输入
+        let typed = p.input.as_ref().map(|i| Zeroizing::new(i.read(cx).value().to_string()));
+        if scope.is_some() && typed.as_ref().is_some_and(|t| t.is_empty()) {
+            return;
+        }
+        let Some(p) = self.sudo_prompt.take() else { return };
+        let ix = self.tab_ix_by_id(p.tab_id);
+        let node_name = self.node_name(ix.and_then(|i| self.workspace.tabs[i].node()));
+        let Some(scope) = scope else {
+            alog(format!("用户拒绝了 {} 在 {} 提权", p.client.name, node_name));
+            let _ = p.reply.send(Err(RpcError::new("sudo_denied", "用户拒绝了提权")));
+            cx.notify();
+            return;
+        };
+        let still_mine = ix.is_some_and(|i| self.workspace.tabs[i].takeover.as_ref().is_some_and(|t| t.client_id == p.client.id));
+        let (Some(ix), true) = (ix, still_mine) else {
+            let _ = p.reply.send(Err(RpcError::new("takeover_required", "接管已经结束")));
+            cx.notify();
+            return;
+        };
+        match self.sudo_fill(ix, typed.clone(), cx) {
+            Ok(()) => {
+                if let Some(d) = scope.window() {
+                    if let Some(t) = self.workspace.tabs[ix].takeover.as_mut() {
+                        t.sudo = Some(SudoGrant { until: Instant::now() + d, password: typed });
+                    }
+                }
+                alog(format!("用户允许 {} 在 {} 提权({})", p.client.name, node_name, scope.label()));
+                let _ = p.reply.send(Ok(json!({ "filled": true, "granted": scope.label() })));
+            }
+            Err(e) => {
+                let _ = p.reply.send(Err(RpcError::new("sudo_failed", e)));
+            }
+        }
+        cx.notify();
+    }
+
+    /// 撤销这个标签上的提权授权。
+    pub(crate) fn revoke_sudo(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tab_ix_by_id(tab_id) {
+            if let Some(t) = self.workspace.tabs[ix].takeover.as_mut() {
+                if t.sudo.take().is_some() {
+                    alog(format!("用户撤销了 {} 的提权授权", t.client_name));
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// 接管结束、标签关闭时,这个标签上等确认的提权请求一并作废。
+    fn drop_sudo_prompt(&mut self, tab_id: u64) {
+        if self.sudo_prompt.as_ref().is_some_and(|p| p.tab_id == tab_id) {
+            if let Some(p) = self.sudo_prompt.take() {
+                let _ = p.reply.send(Err(RpcError::new("takeover_required", "接管已经结束")));
+            }
+        }
+    }
+
+    /// 提权请求的确认框:拒绝 / 仅这一次(默认) / 10 分钟 / 30 分钟。节点没保存密码时多一个密码输入框。
+    pub(crate) fn sudo_prompt_dialog(&self, window: &Window, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let p = self.sudo_prompt.as_ref()?;
+        let ix = self.tab_ix_by_id(p.tab_id)?;
+        let node_id = self.workspace.tabs[ix].node()?;
+        let node = self.all_nodes().find(|n| n.id == node_id)?;
+        let hero = crate::ui::alert_hero(IconName::KeyRound, c::warn(), format!("允许 {} 提权？", p.client.name), "由 Otter 代为输入 sudo 密码,agent 看不到密码");
+        let target = Self::node_target_card(node);
+        let mut rows: Vec<(IconName, Rgba, String)> = vec![];
+        if !p.reason.is_empty() {
+            rows.push((IconName::Sparkles, c::accent(), format!("原因:{}", p.reason)));
+        }
+        rows.push((IconName::Terminal, c::muted(), p.line.clone()));
+        rows.push((IconName::KeyRound, c::warn(), if p.input.is_some() { "这个节点没有保存密码,请在下面输入".into() } else { "将使用节点里保存的密码".into() }));
+        rows.push((IconName::OctagonX, c::online(), "随时可以在遮罩上撤销授权或停止接管".into()));
+        let points = crate::ui::alert_rows(rows);
+        let needs_pw = p.input.is_some();
+        let empty = p.input.as_ref().is_some_and(|i| i.read(cx).value().is_empty());
+        let off = needs_pw && empty;
+        let pw_field = p.input.as_ref().map(|i| {
+            let focused = i.focus_handle(cx).is_focused(window);
+            div().w_full().child(crate::ui::field(IconName::Lock, focused, false, crate::node_form::input_cell(i, false)))
+        });
+        let btn_w = crate::ui::alert_btn_w(3);
+        let choice = |id: &'static str, label: &'static str, s: SudoScope, cx: &mut Context<Self>| {
+            crate::node_form::ctl_btn(id, None, label, 38.0)
+                .w(px(btn_w))
+                .flex_none()
+                .justify_center()
+                .when(off, |d| d.opacity(0.4))
+                .on_click(cx.listener(move |this, _, _, cx| this.resolve_sudo_prompt(Some(s), cx)))
+        };
+        let m30 = choice("sp-30", "30 分钟", SudoScope::Min30, cx);
+        let m10 = choice("sp-10", "10 分钟", SudoScope::Min10, cx);
+        let once = crate::ui::alert_primary_btn("sp-once", None, "仅这一次", Some(btn_w)).when(off, |d| d.opacity(0.4)).on_click(cx.listener(|this, _, _, cx| this.resolve_sudo_prompt(Some(SudoScope::Once), cx)));
+        let deny = crate::node_form::ctl_btn("sp-deny", None, "拒绝", 38.0).w_full().flex_none().justify_center().on_click(cx.listener(|this, _, _, cx| this.resolve_sudo_prompt(None, cx)));
+        let hint = div().w_full().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).text_center().child("授权只对当前这次接管有效,接管结束即失效;密码不会保存");
+        let buttons = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .children(pw_field)
+            .child(div().w_full().flex().flex_row().gap(px(10.0)).child(m30).child(m10).child(once))
+            .child(deny)
+            .child(hint);
+        let body = crate::ui::alert_body(hero, Some(target), points, buttons);
+        Some(crate::ui::modal_bg(
+            "sudo-prompt",
+            crate::confirm::CONFIRM_W,
+            c::dialog_glass(),
+            cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                match e.keystroke.key.as_str() {
+                    "escape" => this.resolve_sudo_prompt(None, cx),
+                    "enter" => this.resolve_sudo_prompt(Some(SudoScope::Once), cx),
+                    _ => return,
+                }
+                cx.stop_propagation();
+            }),
+            [body.into_any_element()],
+        ))
+    }
+}
+
 fn revoke_label(r: &str) -> &'static str {
     match r {
         "user_stopped" => "用户停止",
@@ -775,7 +1091,7 @@ fn revoke_label(r: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{INPUT_MAX, OUTPUT_MAX, Takeover, key_bytes, limit_output, new_lease, trim_trailing_blank};
+    use super::{INPUT_MAX, is_sudo_prompt, OUTPUT_MAX, Takeover, key_bytes, limit_output, new_lease, trim_trailing_blank};
     use crate::ctl::Client;
     use serde_json::json;
     use std::time::Instant;
@@ -786,7 +1102,7 @@ mod tests {
 
     fn takeover(client_id: u64, lease: Option<&str>) -> Takeover {
         let now = Instant::now();
-        Takeover { client_id, client_name: "c".into(), started: now, last_call: now, last_action: String::new(), waiting: false, lease: lease.map(String::from) }
+        Takeover { client_id, client_name: "c".into(), started: now, last_call: now, last_action: String::new(), waiting: false, lease: lease.map(String::from), sudo: None }
     }
 
     fn snap(lines: &[&str], screen_start: usize, cursor_line: usize, history_total: usize) -> gpui_xterm::TextSnapshot {
@@ -855,5 +1171,17 @@ mod tests {
     fn trailing_blank_lines_are_trimmed() {
         let v = trim_trailing_blank(vec!["a".into(), "".into(), "b".into(), "".into(), "".into()]);
         assert_eq!(v, vec!["a".to_string(), "".into(), "b".into()]);
+    }
+
+    #[test]
+    fn password_prompts_are_recognised() {
+        assert!(is_sudo_prompt("[sudo] password for chen:"));
+        assert!(is_sudo_prompt("  [sudo] password for chen: "));
+        assert!(is_sudo_prompt("[sudo] chen 的密码:"));
+        assert!(is_sudo_prompt("[sudo: authenticate] Password:"));
+        assert!(is_sudo_prompt("Password:"));
+        assert!(!is_sudo_prompt("$ sudo ls"));
+        assert!(!is_sudo_prompt("Last password change: Mon"));
+        assert!(!is_sudo_prompt("password policy updated"));
     }
 }
