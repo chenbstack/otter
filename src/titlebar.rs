@@ -228,25 +228,21 @@ impl Home {
         let cur = tab.mode;
         let items = NodeMode::ALL.iter().enumerate().map(|(i, &m)| {
             let on = m == cur;
+            // 和抽屉里的切换(`syspages::chip`)同一个样式:选中是玻璃底,没选中只有文字
             div()
                 .id(("node-mode", i))
-                .h(px(TAB_H - 6.0))
+                .h(px(30.0))
                 .px(px(12.0))
                 .flex()
-                .flex_row()
                 .items_center()
-                .gap(px(6.0))
-                .rounded(px(t::RADIUS_SM))
-                .text_size(px(t::TYPE_CONTROL))
                 .cursor_pointer()
-                .when(on, |d| d.bg(c::accent_soft()).text_color(c::text()).font_weight(FontWeight::MEDIUM))
-                .when(!on, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
-                .child(icon(m.icon(), 14.0, if on { c::accent() } else { c::ghost() }))
+                .text_size(px(t::TYPE_CONTROL))
+                .when(on, |d| d.glass(t::RADIUS_MD, GlassStyle::CONTROL).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
+                .when(!on, |d| d.rounded(px(t::RADIUS_MD)).border_1().border_color(gpui_kit::transparent_black()).text_color(c::muted()).hover(|s| s.bg(c::field_hover()).text_color(c::secondary())))
                 .child(m.label())
                 .on_click(cx.listener(move |this, _, window, cx| this.set_mode(m, window, cx)))
         });
-        // 分段控件:底色略深的凹槽里放三个等高的选项,选中项用强调色淡底
-        Some(div().flex_shrink_0().h(px(TAB_H)).p(px(3.0)).flex().flex_row().items_center().gap(px(2.0)).rounded(px(t::RADIUS_MD)).bg(c::sunken()).border_1().border_color(c::border()).children(items))
+        Some(div().flex_shrink_0().h(px(TAB_H)).flex().flex_row().items_center().gap(px(4.0)).children(items))
     }
 
     /// 标签右键菜单:铺满窗口的透明遮罩 + 菜单面板。
