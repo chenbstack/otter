@@ -954,6 +954,26 @@ async fn ct_load(r: &Runner, sh: &Shared, kind: crate::ctfiles::CtKind, tag: Str
     sh.bump();
 }
 
+/// 把 docker 报的错换成人看得懂的话(容器文件管理用)
+fn ct_friendly(msg: &str) -> String {
+    let m = msg.to_lowercase();
+    if m.contains("executable file not found") || m.contains("no such file or directory: unknown") {
+        "这个容器的镜像里没有 ls、sh 这类基础命令(常见于只装了一个程序的精简镜像),所以不能浏览和修改里面的目录。上传和下载仍然可以用。".into()
+    } else if m.contains("is not running") || m.contains("not running") {
+        "容器没有运行,请先启动容器".into()
+    } else if m.contains("no such container") {
+        "找不到这个容器,可能已经被删除".into()
+    } else if m.contains("permission denied") {
+        "没有权限访问这个位置".into()
+    } else if m.contains("no such file or directory") {
+        "这个路径不存在".into()
+    } else if m.contains("not a directory") {
+        "这不是一个文件夹".into()
+    } else {
+        msg.to_string()
+    }
+}
+
 fn raw_last_line(o: &RawOutput) -> String {
     let t = if o.err.is_empty() { &o.out } else { &o.err };
     String::from_utf8_lossy(t).trim().lines().last().unwrap_or("未知错误").trim().to_string()
@@ -971,7 +991,7 @@ async fn ctfs_run(r: &Runner, name: &str, sh: &crate::sftp::Shared, cmd: crate::
             } else {
                 match r.docker_raw(&arg(&["mkdir", "-p", "--", &path]), None, false, Duration::from_secs(30)).await {
                     Ok(o) if o.code == 0 => {}
-                    Ok(o) => sftp::notice(sh, format!("新建文件夹失败:{}", raw_last_line(&o))),
+                    Ok(o) => sftp::notice(sh, format!("新建文件夹失败:{}", ct_friendly(&raw_last_line(&o)))),
                     Err(e) => sftp::notice(sh, format!("新建文件夹失败:{e}")),
                 }
             }
@@ -984,7 +1004,7 @@ async fn ctfs_run(r: &Runner, name: &str, sh: &crate::sftp::Shared, cmd: crate::
             } else {
                 match r.docker_raw(&arg(&["rm", "-rf", "--", &path]), None, false, Duration::from_secs(120)).await {
                     Ok(o) if o.code == 0 => sftp::notice(sh, format!("已删除 {short}")),
-                    Ok(o) => sftp::notice(sh, format!("删除 {short} 失败:{}", raw_last_line(&o))),
+                    Ok(o) => sftp::notice(sh, format!("删除 {short} 失败:{}", ct_friendly(&raw_last_line(&o)))),
                     Err(e) => sftp::notice(sh, format!("删除 {short} 失败:{e}")),
                 }
             }
@@ -1006,7 +1026,7 @@ async fn ctfs_run(r: &Runner, name: &str, sh: &crate::sftp::Shared, cmd: crate::
                 let args: Vec<String> = ["cp".to_string(), "-".to_string(), format!("{name}:{remote_dir}")].into();
                 let o = r.docker_raw(&args, Some(&tar), false, Duration::from_secs(600)).await?;
                 if o.code != 0 {
-                    return Err(raw_last_line(&o));
+                    return Err(ct_friendly(&raw_last_line(&o)));
                 }
                 Ok(())
             }
@@ -1024,7 +1044,7 @@ async fn ctfs_run(r: &Runner, name: &str, sh: &crate::sftp::Shared, cmd: crate::
                 let args: Vec<String> = ["cp".to_string(), format!("{name}:{remote}"), "-".to_string()].into();
                 let o = r.docker_raw(&args, None, false, Duration::from_secs(600)).await?;
                 if o.code != 0 {
-                    return Err(raw_last_line(&o));
+                    return Err(ct_friendly(&raw_last_line(&o)));
                 }
                 if o.out.len() as u64 > crate::ctfiles::XFER_MAX {
                     return Err(format!("内容太大(上限 {} MB)", crate::ctfiles::XFER_MAX / 1024 / 1024));
@@ -1064,10 +1084,10 @@ async fn ctfs_list(r: &Runner, name: &str, sh: &crate::sftp::Shared, path: &str)
         let args: Vec<String> = ["exec", name, "ls", "-la", &dir].iter().map(|x| x.to_string()).collect();
         let o = match r.docker_raw(&args, None, false, Duration::from_secs(30)).await {
             Ok(o) => o,
-            Err(e) => return fail(e),
+            Err(e) => return fail(ct_friendly(&e)),
         };
         if o.code != 0 {
-            return fail(raw_last_line(&o));
+            return fail(ct_friendly(&raw_last_line(&o)));
         }
         let list = match crate::ctfiles::parse_ls(&String::from_utf8_lossy(&o.out)) {
             Ok(l) => l,

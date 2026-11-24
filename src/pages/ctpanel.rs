@@ -5,10 +5,11 @@
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::Sizable as _;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_kit::component::input::{Input, InputState};
 
 use super::super::*;
-use super::dockerpages::{icon_btn, loading};
+use super::dockerpages::{icon_btn, loading, small};
 use super::syspages::{chip, tip};
 use crate::ctfiles::{self, CtKind, Level, LogLine};
 use crate::files::Target;
@@ -102,7 +103,7 @@ impl Home {
         }
         if self.demo {
             if self.dock.ct.lines.is_none() {
-                self.dock.ct.lines = Some(Ok(ctfiles::parse_logs(DEMO_LOGS)));
+                self.dock.ct.lines = Some(Ok(ctfiles::parse_logs(&demo_logs())));
             }
             return;
         }
@@ -164,45 +165,20 @@ impl Home {
             CtTab::Logs => self.ct_logs(cx),
             CtTab::Files => self.files_embedded(window, cx, w),
         };
-        Some(
-            div()
-                .id("ct-scrim")
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .bottom_0()
-                .flex()
-                .flex_row()
-                .justify_end()
-                .bg(c::scrim_dialog())
-                .occlude()
-                .on_click(cx.listener(|this, _, _, cx| this.ct_close(cx)))
-                .child(
-                    div()
-                        .id("ct-drawer")
-                        .occlude()
-                        .h_full()
-                        .w(px(w))
-                        .flex()
-                        .flex_col()
-                        // 和应用窗口同一个底色
-                        .bg(c::bg())
-                        .border_l_1()
-                        .border_color(c::dialog_border())
-                        .shadow_lg()
-                        .on_click(|_, _, cx| cx.stop_propagation())
-                        .child(header)
-                        .child(body),
-                )
-                .into_any_element(),
-        )
+        Some(crate::ui::drawer("ct-drawer", w, cx.listener(|this, _, _, cx| this.ct_close(cx)), [header.into_any_element(), body]).into_any_element())
     }
 
     fn ct_logs(&self, cx: &mut Context<Self>) -> AnyElement {
         let ct = &self.dock.ct;
         let q = ct.search.as_ref().map(|s| s.read(cx).value().trim().to_lowercase()).unwrap_or_default();
         let follow = !ct.paused;
+        // 行数:只读最近 500 行;搜索时显示 匹配 / 总数
+        let count = match &ct.lines {
+            Some(Ok(l)) if !q.is_empty() => format!("{} / {} 行", l.iter().filter(|x| x.msg.to_lowercase().contains(&q)).count(), l.len()),
+            Some(Ok(l)) if l.len() >= 500 => "最近 500 行".to_string(),
+            Some(Ok(l)) => format!("{} 行", l.len()),
+            _ => String::new(),
+        };
         let toolbar = div()
             .h(px(46.0))
             .flex_shrink_0()
@@ -227,6 +203,7 @@ impl Home {
                     .child(icon(IconName::Search, 13.0, c::ghost()))
                     .child(div().flex_1().min_w_0().ml(px(-4.0)).child(Input::new(&s).appearance(false).with_size(px(12.0 / 0.875))))
             }))
+            .child(small(count, c::ghost()))
             .child(chip(("ct-follow", 0), "跟随最新", follow).on_click(cx.listener(|this, _, _, cx| {
                 this.dock.ct.paused = !this.dock.ct.paused;
                 cx.notify();
@@ -249,12 +226,17 @@ impl Home {
                     if follow {
                         ct.scroll.scroll_to_bottom();
                     }
-                    div()
+                    let list = div()
                         .id("ct-log-scroll")
-                        .flex_1()
-                        .min_h_0()
+                        .absolute()
+                        .inset_0()
                         .overflow_y_scroll()
                         .track_scroll(&ct.scroll)
+                        // 用户自己滚动就停止跟随,否则每次重绘都会被拉回底部
+                        .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                            this.dock.ct.paused = true;
+                            cx.notify();
+                        }))
                         .px(px(16.0))
                         .py(px(6.0))
                         .flex()
@@ -274,7 +256,14 @@ impl Home {
                                 .font_family(MONO)
                                 .child(div().w(px(100.0)).flex_shrink_0().text_color(c::ghost()).child(l.ts.clone()))
                                 .child(div().flex_1().min_w_0().text_color(color).child(l.msg.clone()))
-                        }))
+                        }));
+                    // 滚动条叠在列表上面,和列表一样大(放在列表里面会跟着内容一起滚走)
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .child(list)
+                        .child(div().absolute().inset_0().child(Scrollbar::new(&ct.scroll).id("ct-log-bar").axis(ScrollbarAxis::Vertical).viewport_from_layout()))
                         .into_any_element()
                 }
             }
@@ -302,16 +291,26 @@ fn ct_note_view(ic: IconName, title: impl Into<SharedString>, text: impl Into<Sh
 
 // ---- 演示数据 ----
 
-const DEMO_LOGS: &str = "\
-2026-11-24T09:12:01.120Z /docker-entrypoint.sh: Launching /docker-entrypoint.d/30-tune-worker-processes.sh
-2026-11-24T09:12:01.340Z /docker-entrypoint.sh: Configuration complete; ready for start up
-2026-11-24T09:12:01.402Z 2026/11/24 09:12:01 [notice] 1#1: nginx/1.27.2
-2026-11-24T09:12:01.402Z 2026/11/24 09:12:01 [notice] 1#1: start worker processes
-2026-11-24T09:12:18.771Z 172.18.0.1 - - [24/Nov/2026:09:12:18 +0000] \"GET / HTTP/1.1\" 200 615 \"-\" \"curl/8.4.0\"
-2026-11-24T09:12:19.002Z 172.18.0.1 - - [24/Nov/2026:09:12:19 +0000] \"GET /favicon.ico HTTP/1.1\" 404 153 \"-\" \"Mozilla/5.0\"
-2026-11-24T09:13:02.550Z 2026/11/24 09:13:02 [warn] 29#29: *14 upstream server temporarily disabled while connecting to upstream
-2026-11-24T09:13:02.551Z 2026/11/24 09:13:02 [error] 29#29: *14 connect() failed (111: Connection refused) while connecting to upstream, client: 172.18.0.1, server: _, request: \"GET /api/health HTTP/1.1\"
-2026-11-24T09:13:30.090Z 172.18.0.1 - - [24/Nov/2026:09:13:30 +0000] \"GET /api/health HTTP/1.1\" 502 157 \"-\" \"curl/8.4.0\"
-2026-11-24T09:14:11.832Z 172.18.0.1 - - [24/Nov/2026:09:14:11 +0000] \"GET /api/health HTTP/1.1\" 200 17 \"-\" \"curl/8.4.0\"
-";
+/// 演示日志:几百行,有访问记录、警告和错误,用来看滚动和行数
+fn demo_logs() -> String {
+    let paths = ["/", "/api/health", "/static/app.js", "/favicon.ico", "/api/users?page=2", "/login", "/metrics"];
+    let mut out = String::new();
+    let mut sec = 9 * 3600 + 12 * 60;
+    for i in 0..420u32 {
+        sec += 1 + (i * 7 % 5);
+        let (h, m, s) = (sec / 3600 % 24, sec / 60 % 60, sec % 60);
+        let ts = format!("2026-11-24T{h:02}:{m:02}:{s:02}.{:03}Z", i * 37 % 1000);
+        let path = paths[(i as usize * 3) % paths.len()];
+        let line = match i % 23 {
+            7 => format!("2026/11/24 {h:02}:{m:02}:{s:02} [warn] 29#29: *{i} upstream server temporarily disabled while connecting to upstream"),
+            15 => format!("2026/11/24 {h:02}:{m:02}:{s:02} [error] 29#29: *{i} connect() failed (111: Connection refused) while connecting to upstream, request: \"GET {path} HTTP/1.1\""),
+            _ => {
+                let code = if i % 23 == 16 { 502 } else if path == "/favicon.ico" { 404 } else { 200 };
+                format!("172.18.0.1 - - [24/Nov/2026:{h:02}:{m:02}:{s:02} +0000] \"GET {path} HTTP/1.1\" {code} {} \"-\" \"curl/8.4.0\"", 100 + i * 13 % 900)
+            }
+        };
+        out.push_str(&format!("{ts} {line}\n"));
+    }
+    out
+}
 

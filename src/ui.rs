@@ -377,6 +377,50 @@ fn modal_panel(
         .child(panel)
 }
 
+/// 抽屉组件:铺满整个窗口(含标题栏)的遮罩 + 靠右的整高面板。
+/// - 面板底色是应用底色 `bg`,并铺一层和窗口一样的光团 `backdrop`,看起来和应用本身是同一块;左边一条描边加阴影和遮罩区分;
+/// - 点遮罩调用 `on_close`,点面板本身不会关闭;
+/// - 面板宽 `width`,内容用 flex 纵向排(`content` 里自己的区域用 `flex_1().min_h_0()` 撑满、自己滚动)。
+/// 必须作为根元素靠后的子元素渲染,盖在最上层。
+pub fn drawer(
+    id: &'static str,
+    width: f32,
+    on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    content: impl IntoIterator<Item = AnyElement>,
+) -> Stateful<Div> {
+    div()
+        .id((id, 0usize))
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .flex()
+        .flex_row()
+        .justify_end()
+        .bg(c::scrim_dialog())
+        .occlude()
+        .on_click(on_close)
+        .child(
+            div()
+                .id((id, 1usize))
+                .occlude()
+                .relative()
+                .overflow_hidden()
+                .h_full()
+                .w(px(width))
+                .flex()
+                .flex_col()
+                .bg(c::bg())
+                .border_l_1()
+                .border_color(c::dialog_border())
+                .shadow_lg()
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(backdrop())
+                .children(content),
+        )
+}
+
 // ---- 表单输入框与下拉选择 ------------------------------------------------------
 
 /// 独立的描边输入框:左侧图标 + 内容(只靠占位符说明字段,不写标签);聚焦描边变强调色,出错变红。
