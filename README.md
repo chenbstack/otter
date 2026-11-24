@@ -37,6 +37,7 @@ All your servers live in one window, organized in groups. Each one opens as a ta
 - **SSH terminal**: password, private key or SSH agent auth.
 - **Files (SFTP)**: browse, preview, drag-and-drop upload, create folders, delete; also inside containers.
 - **Docker** (in development): stacks, containers, images and volumes; start, stop, restart, delete.
+- **Auto update**: checks GitHub Releases and updates in place from the header.
 - **Agent interface**: let an AI agent read your nodes and, with your approval, take over a terminal session.
 
 ## Install

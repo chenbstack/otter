@@ -30,6 +30,8 @@ mod pages;
 mod terminal;
 mod titlebar;
 mod ui;
+mod update;
+mod update_ui;
 mod workspace;
 
 use std::rc::Rc;
@@ -139,6 +141,8 @@ struct Home {
     dock: pages::dockerpages::DockUi,
     /// 已经(或正在)探测过系统的节点,同一次运行里不重复探测
     os_probed: std::collections::HashSet<NodeId>,
+    /// 自动更新状态(标题栏右侧的下载图标)
+    update: update::State,
     /// 各文件视图共享的 mock 上传/新建/删除状态
     fstore: files::Store,
     /// 等用户确认的 agent 接管申请(队首正在弹窗)
@@ -220,6 +224,7 @@ impl Home {
             demo,
             dock: pages::dockerpages::DockUi::new(),
             os_probed: Default::default(),
+            update: update::State::Idle,
             fstore: files::Store::default(),
             takeover_prompts: Default::default(),
             takeover_revoked: Default::default(),
@@ -486,11 +491,16 @@ fn main() {
                     h.page = Page::ALL[p.min(Page::ALL.len() - 1)];
                 }
                 h.shot = shot.clone().map(|p| (p, 0));
+                // 截图/调试:假装发现了新版本(OTTER_FAKE_UPDATE=<版本号>)
+                if let Ok(v) = std::env::var("OTTER_FAKE_UPDATE") {
+                    h.update = update::State::Available(update::Update { version: v, page: "https://github.com/".into(), asset: None });
+                }
                 if let Ok(m) = std::env::var("OTTER_TAKEOVER") {
                     h.debug_takeover(&m, window, cx);
                 }
                 if !demo && shot.is_none() {
                     h.start_activity_watch(window, cx);
+                    h.start_update_check(cx);
                     h.start_ctl(window, cx);
                     if let Some(msg) = platform::install_cli_link() {
                         logs::push(logs::Level::Info, "Otter", msg);

@@ -4,6 +4,8 @@
 //! (`--features payload`,CI 先构建两个二进制再构建它)。安装时把自己复制成 `uninstall.exe`,
 //! 卸载入口写在「应用和功能」里,指向 `uninstall.exe --uninstall`。
 //!
+//! 应用内自动更新会以 `--silent --dir <安装目录>` 调用它做无界面覆盖安装。
+//!
 //! 调试:`otter-setup --shot out.png [--stage welcome|installing|done|error|uninstall]` 离屏截图;
 //! 非 Windows 上只把文件写到临时目录,不碰系统(快捷方式、PATH、注册表只在 Windows 做)。
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -614,6 +616,15 @@ fn main() {
         }
     }
     let dir = arg("--dir").map(PathBuf::from).unwrap_or(dir);
+
+    // 应用内自动更新用:不弹界面,直接覆盖安装到 --dir(不动 PATH 和桌面快捷方式),装完启动新版
+    if !uninstall && args.iter().any(|a| a == "--silent") {
+        let opts = Options { dir: dir.clone(), add_path: false, desktop: false };
+        if install(&opts, &|_| {}).is_ok() {
+            let _ = std::process::Command::new(dir.join(if cfg!(windows) { "otter-gui.exe" } else { "otter-gui" })).spawn();
+        }
+        return;
+    }
 
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_kit::init(cx);

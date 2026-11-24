@@ -150,6 +150,39 @@ impl Home {
             .child(div().id("tabs").flex().flex_row().items_center().gap(px(4.0)).min_w_0().overflow_x_scroll().children(rest))
             .child(div().flex_1().min_w(px(12.0)))
             .children(self.mode_switch(cx))
+            .children(self.update_button(cx))
+    }
+
+    /// 标题栏最右侧的更新按钮:发现新版本时出现一个小的下载图标,点一下直接更新。
+    fn update_button(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        use crate::update::State;
+        let (ic, color, bg, tip, clickable) = match &self.update {
+            State::Idle => return None,
+            State::Available(u) => (
+                IconName::Download,
+                c::accent(),
+                c::accent_soft(),
+                if u.asset.is_some() { format!("发现新版本 {},点击更新", u.version) } else { format!("发现新版本 {},点击前往下载", u.version) },
+                true,
+            ),
+            State::Downloading(u) => (IconName::LoaderCircle, c::muted(), c::hover(), format!("正在下载 {}…", u.version), false),
+            State::Failed(u, e) => (IconName::Download, c::warn(), c::warn_soft(), format!("更新到 {} 失败:{e}。点击重试", u.version), true),
+        };
+        Some(
+            div()
+                .id("update-btn")
+                .ml(px(8.0))
+                .flex_shrink_0()
+                .size(px(TAB_H))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(t::RADIUS_MD))
+                .bg(bg)
+                .child(icon(ic, 15.0, color))
+                .tooltip(move |_, cx| cx.new(|_| crate::files::Tip(tip.clone())).into())
+                .when(clickable, |d| d.cursor_pointer().hover(|s| s.opacity(0.8)).on_click(cx.listener(|this, _, _, cx| this.start_update(cx)))),
+        )
     }
 
     /// 标题栏右侧的模式切换:只在活动标签是节点标签时出现。
@@ -164,8 +197,8 @@ impl Home {
             let on = m == cur;
             div()
                 .id(("node-mode", i))
-                .h(px(TAB_H - 4.0))
-                .px(px(10.0))
+                .h(px(TAB_H - 6.0))
+                .px(px(12.0))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -173,28 +206,14 @@ impl Home {
                 .rounded(px(t::RADIUS_SM))
                 .text_size(px(t::TYPE_CONTROL))
                 .cursor_pointer()
-                .when(on, |d| d.glass(t::RADIUS_SM, GlassStyle::CONTROL).text_color(c::text()).font_weight(FontWeight::MEDIUM))
-                .when(!on, |d| {
-                    d.border_1().border_color(gpui_kit::transparent_black()).text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary()))
-                })
+                .when(on, |d| d.bg(c::accent_soft()).text_color(c::text()).font_weight(FontWeight::MEDIUM))
+                .when(!on, |d| d.text_color(c::muted()).hover(|s| s.bg(c::hover()).text_color(c::secondary())))
                 .child(icon(m.icon(), 14.0, if on { c::accent() } else { c::ghost() }))
                 .child(m.label())
                 .on_click(cx.listener(move |this, _, window, cx| this.set_mode(m, window, cx)))
         });
-        Some(
-            div()
-                .flex_shrink_0()
-                .h(px(TAB_H))
-                .p(px(2.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(2.0))
-                .rounded(px(t::RADIUS_MD))
-                .border_1()
-                .border_color(c::border())
-                .children(items),
-        )
+        // 分段控件:底色略深的凹槽里放三个等高的选项,选中项用强调色淡底
+        Some(div().flex_shrink_0().h(px(TAB_H)).p(px(3.0)).flex().flex_row().items_center().gap(px(2.0)).rounded(px(t::RADIUS_MD)).bg(c::sunken()).border_1().border_color(c::border()).children(items))
     }
 
     /// 标签右键菜单:铺满窗口的透明遮罩 + 菜单面板。
