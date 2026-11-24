@@ -11,7 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{Home, MONO, c, icon, t};
-use crate::ui::{Glass as _, GlassHover as _, GlassStyle, MenuItem, MenuSide, dropdown_menu, field, select};
+use crate::ui::{Glass as _, GlassHover as _, GlassStyle, MenuItem, MenuSide, dropdown_menu, field, select, select_with};
 use crate::mock::{Node, NodeId};
 
 #[derive(Clone, PartialEq)]
@@ -281,6 +281,8 @@ impl Home {
             f.use_key = true;
             f.key_id = first;
             f.key_path_mode = first.is_none();
+            // OTTER_FORM_MENU=1:同时展开「添加 SSH Agent」下拉,截图用
+            f.add_menu = std::env::var("OTTER_FORM_MENU").is_ok();
         }
     }
 
@@ -398,7 +400,7 @@ impl Home {
                 crate::logs::push(crate::logs::Level::Error, "本地库", &format!("保存认证信息失败: {e}"));
                 // 新增时节点已经写进库了:先放进列表,避免重试产生重复
                 if editing.is_none() {
-                    self.groups[g].nodes.push(Node { id, name: name.clone(), user_host: user_host.clone(), note: note.clone(), tags: tags.clone(), stacks: vec![] });
+                    self.groups[g].nodes.push(Node { id, name: name.clone(), user_host: user_host.clone(), note: note.clone(), tags: tags.clone(), stacks: vec![], os: crate::osinfo::OsKind::Unknown });
                     self.form.as_mut().map(|f| f.editing = Some(id));
                 }
                 self.form_error(format!("节点已保存,但认证信息没存上:{e}"), cx);
@@ -421,7 +423,7 @@ impl Home {
                 }
             }
         } else {
-            self.groups[g].nodes.push(Node { id, name, user_host, note, tags, stacks: vec![] });
+            self.groups[g].nodes.push(Node { id, name, user_host, note, tags, stacks: vec![], os: crate::osinfo::OsKind::Unknown });
             self.sel = id;
             self.scroll = gpui_kit::component::VirtualListScrollHandle::new();
         }
@@ -602,14 +604,23 @@ impl Home {
             ),
         ];
         if f.use_key && !f.key_path_mode {
-            // 从钥匙串选一把密钥;最后一项切到「本机文件」的旧方式
+            // 只从钥匙串里选;钥匙串为空时给一个提示项,选它什么也不做
             let mut items: Vec<MenuItem> = self.keys.iter().map(|k| MenuItem::new(k.name.clone()).sub(k.algo.trim_start_matches("ssh-").to_string()).icon(IconName::KeyRound)).collect();
-            items.push(MenuItem::new("使用密钥文件…").sub("直接读取本机的私钥文件").icon(IconName::FileKey));
+            if items.is_empty() {
+                items.push(MenuItem::new("钥匙串里还没有密钥").sub("先到节点页的「钥匙串」导入或生成").icon(IconName::KeyRound));
+            }
             let n_keys = self.keys.len();
             let ids: Vec<i64> = self.keys.iter().map(|k| k.id).collect();
-            let sel = f.key_id.and_then(|id| ids.iter().position(|&x| x == id)).unwrap_or(n_keys);
+            let sel = f.key_id.and_then(|id| ids.iter().position(|&x| x == id)).unwrap_or(0);
             let (k1, k2, k3) = (cx.entity(), cx.entity(), cx.entity());
-            let sel_el = select(
+            let rm = x_btn("rm-key").on_click(cx.listener(|this, _, _, cx| {
+                if let Some(f) = &mut this.form {
+                    f.use_key = false;
+                    f.key_id = None;
+                    cx.notify();
+                }
+            }));
+            let sel_el = select_with(
                 "key-select",
                 IconName::KeyRound,
                 items,
@@ -619,21 +630,16 @@ impl Home {
                 move |i, _, cx| {
                     k2.update(cx, |h, cx| {
                         if let Some(f) = &mut h.form {
-                            if i < n_keys { f.key_id = Some(ids[i]) } else { f.key_id = None; f.key_path_mode = true }
+                            if i < n_keys { f.key_id = Some(ids[i]) }
                             f.key_menu = false;
                             cx.notify();
                         }
                     })
                 },
                 move |_, cx| k3.update(cx, |h, cx| h.close_menus(cx)),
+                Some(rm.into_any_element()),
             );
-            cred_rows.push(div().flex().flex_row().items_center().gap(px(6.0)).child(div().flex_1().min_w_0().child(sel_el)).child(x_btn("rm-key").on_click(cx.listener(|this, _, _, cx| {
-                if let Some(f) = &mut this.form {
-                    f.use_key = false;
-                    f.key_id = None;
-                    cx.notify();
-                }
-            }))));
+            cred_rows.push(sel_el);
         } else if f.use_key {
             cred_rows.push(field(
                 IconName::KeyRound,
@@ -692,7 +698,7 @@ impl Home {
                 let mut items = vec![];
                 let mut kinds = vec![];
                 if !f.use_key {
-                    items.push(MenuItem::new("私钥").sub("使用钥匙串里的密钥或本机的私钥文件").icon(IconName::KeyRound));
+                    items.push(MenuItem::new("私钥").sub("从钥匙串里选一把密钥").icon(IconName::KeyRound));
                     kinds.push(true);
                 }
                 if !f.use_agent {
@@ -712,8 +718,8 @@ impl Home {
                             if let Some(f) = &mut h.form {
                                 if key {
                                     f.use_key = true;
-                                    // 钥匙串里有密钥就默认选第一把,没有就退回填文件路径
-                                    f.key_path_mode = h.keys.is_empty();
+                                    // 默认选钥匙串里的第一把;为空时下拉里提示先去钥匙串添加
+                                    f.key_path_mode = false;
                                     f.key_id = h.keys.first().map(|k| k.id);
                                 } else {
                                     f.use_agent = true

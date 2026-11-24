@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- 背景沿用程序窗口底(ui::backdrop):墨黑底 + 左上玫红、右上紫、下方蓝三团光晕 -->
+    <radialGradient id="rose" cx="0.06" cy="0" r="0.75" gradientUnits="objectBoundingBox">
+      <stop offset="0" stop-color="#FF5C93" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#FF5C93" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="violet" cx="1" cy="0.08" r="0.7" gradientUnits="objectBoundingBox">
+      <stop offset="0" stop-color="#8B80FF" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#8B80FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="blue" cx="0.72" cy="1.05" r="0.8" gradientUnits="objectBoundingBox">
+      <stop offset="0" stop-color="#3F7BFF" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#3F7BFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#fff" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="line" gradientUnits="userSpaceOnUse" x1="0" y1="290" x2="0" y2="810">
+      <stop offset="0" stop-color="#C4BEFF"/>
+      <stop offset="1" stop-color="#8B80FF"/>
+    </linearGradient>
+  <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5A56B8"/>
+      <stop offset="1" stop-color="#2E2B66"/>
+    </linearGradient>
+    <linearGradient id="prompt" gradientUnits="userSpaceOnUse" x1="0" y1="520" x2="0" y2="720">
+      <stop offset="0" stop-color="#D2CDFF"/>
+      <stop offset="1" stop-color="#8B80FF"/>
+    </linearGradient>
+    <filter id="blur" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="46"/></filter>
+  </defs>
+  <rect width="1024" height="1024" rx="230" fill="#0B0A0F"/>
+  <rect width="1024" height="1024" rx="230" fill="url(#rose)"/>
+  <rect width="1024" height="1024" rx="230" fill="url(#violet)"/>
+  <rect width="1024" height="1024" rx="230" fill="url(#blue)"/>
+  <rect x="1" y="1" width="1022" height="1022" rx="229" fill="none" stroke="#9A94E0" stroke-opacity="0.22" stroke-width="2"/>
+  <rect x="150" y="2" width="724" height="3" fill="url(#sheen)"/>
+  <!-- 叠层卡片,材质用我们自己的磨砂玻璃(card_shell):靛紫底、淡描边、顶边亮线。小尺寸下要看得清,所以只保留粗的形状:后面两层节点卡片(图标块加一条线),前面终端卡(红黄绿三点、粗提示符和三个点),不画细线 -->
+  <ellipse cx="512" cy="660" rx="300" ry="170" fill="#8B80FF" fill-opacity="0.6" filter="url(#blur)"/>
+  <rect x="270" y="150" width="484" height="220" rx="66" fill="#3C3A80" stroke="#B4AEFF" stroke-opacity="0.45" stroke-width="4"/>
+  <rect x="222" y="236" width="580" height="230" rx="74" fill="#4A47A0" stroke="#B4AEFF" stroke-opacity="0.5" stroke-width="4"/>
+  <rect x="318" y="180" width="54" height="54" rx="15" fill="#8B80FF" stroke="#C4BEFF" stroke-opacity="0.8" stroke-width="4"/>
+  <rect x="396" y="196" width="190" height="22" rx="11" fill="#F5F4F7" fill-opacity="0.8"/>
+  <rect x="274" y="272" width="62" height="62" rx="17" fill="#46D9A0" stroke="#A8F3D6" stroke-opacity="0.8" stroke-width="4"/>
+  <rect x="362" y="290" width="230" height="24" rx="12" fill="#F5F4F7" fill-opacity="0.9"/>
+  <rect x="172" y="368" width="680" height="480" rx="88" fill="url(#glass)"/>
+  <rect x="174" y="370" width="676" height="476" rx="86" fill="none" stroke="#C4BEFF" stroke-opacity="0.7" stroke-width="5"/>
+  <rect x="250" y="373" width="524" height="4" rx="2" fill="url(#sheen)"/>
+  <g>
+    <circle cx="268" cy="444" r="22" fill="#FF5C6C"/>
+    <circle cx="332" cy="444" r="22" fill="#FFB24A"/>
+    <circle cx="396" cy="444" r="22" fill="#46D9A0"/>
+  </g>
+  <path d="M272 556 L420 650 L272 744" fill="none" stroke="url(#prompt)" stroke-width="58" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#E4E1FF">
+    <circle cx="552" cy="716" r="32"/><circle cx="650" cy="716" r="32"/><circle cx="748" cy="716" r="32"/>
+  </g>
+</svg>

@@ -41,6 +41,8 @@ pub mod c {
     pub fn disk() -> Rgba { rgb(0xe8964c) }
     // 弹窗、抽屉:要盖住下层内容,所以不透明
     pub fn dialog() -> Rgba { rgb(0x15141F) }
+    /// 半透明的弹窗底(确认框用):和节点卡片同一色系的靛紫,约 93% 不透明,隐约透出下层
+    pub fn dialog_glass() -> Rgba { rgba(0x1C1B32EE) }
     pub fn dialog_border() -> Rgba { rgba(0x9A94E02A) }
     pub fn line() -> Rgba { rgba(0x9A94E016) }
     pub fn field() -> Rgba { rgba(0x9A94E00A) }
@@ -168,7 +170,28 @@ pub fn modal(
     key: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
     content: impl IntoIterator<Item = AnyElement>,
 ) -> Stateful<Div> {
-    modal_panel(id, width, None, None, key, content)
+    modal_panel(id, width, None, None, c::dialog(), key, content)
+}
+
+/// 指定面板底色的弹窗(钥匙串弹窗里,删除确认用半透明底,其余用不透明底)。
+pub fn modal_bg(
+    id: &'static str,
+    width: f32,
+    bg: Rgba,
+    key: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
+    content: impl IntoIterator<Item = AnyElement>,
+) -> Stateful<Div> {
+    modal_panel(id, width, None, None, bg, key, content)
+}
+
+/// 半透明版弹窗(用于确认框):底色和节点卡片同一色系,带一点透明,其余和 `modal` 一样。
+pub fn modal_glass(
+    id: &'static str,
+    width: f32,
+    key: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
+    content: impl IntoIterator<Item = AnyElement>,
+) -> Stateful<Div> {
+    modal_panel(id, width, None, None, c::dialog_glass(), key, content)
 }
 
 /// 分步窗口:尺寸 `(宽, 高)` 从 `from` 过渡到 `to`(切换步骤时用);相同则不播动画。高度固定,内容多的步骤自己滚动。
@@ -179,7 +202,7 @@ pub fn modal_anim(
     key: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
     content: impl IntoIterator<Item = AnyElement>,
 ) -> Stateful<Div> {
-    modal_panel(id, to.0, Some(to.1), (from != to).then_some(from), key, content)
+    modal_panel(id, to.0, Some(to.1), (from != to).then_some(from), c::dialog(), key, content)
 }
 
 fn modal_panel(
@@ -187,6 +210,7 @@ fn modal_panel(
     width: f32,
     height: Option<f32>,
     from: Option<(f32, f32)>,
+    bg: Rgba,
     key: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
     content: impl IntoIterator<Item = AnyElement>,
 ) -> Stateful<Div> {
@@ -200,7 +224,7 @@ fn modal_panel(
         .rounded(px(t::RADIUS_2XL))
         .border_1()
         .border_color(c::dialog_border())
-        .bg(c::dialog())
+        .bg(bg)
         .shadow_2xl()
         .overflow_hidden()
         .relative()
@@ -356,7 +380,7 @@ fn dropdown_menu_impl(
             let pick = on_pick.clone();
             div()
                 .id((id, i + 1))
-                .min_h(px(if compact { 30.0 } else if it.sub.is_some() { 52.0 } else { 36.0 }))
+                .min_h(px(if compact { 30.0 } else if it.sub.is_some() { 46.0 } else { 36.0 }))
                 .px(px(if compact { 9.0 } else { 12.0 }))
                 .flex()
                 .flex_row()
@@ -373,7 +397,7 @@ fn dropdown_menu_impl(
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .gap(px(2.0))
+                        .gap(px(1.0))
                         .child(div().text_size(px(if compact { t::TYPE_CONTROL } else { t::TYPE_BODY })).text_color(c::text()).child(it.label))
                         .when_some(it.sub, |d, sub| d.child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(sub))),
                 )
@@ -395,6 +419,21 @@ pub fn select(
     on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
     on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Div {
+    select_with(id, ic, items, selected, open, on_toggle, on_pick, on_dismiss, None)
+}
+
+/// 同 `select`,`trailing` 放在触发框内部最右边(比如清除按钮),不额外占框外的宽度。
+pub fn select_with(
+    id: &'static str,
+    ic: IconName,
+    items: Vec<MenuItem>,
+    selected: usize,
+    open: bool,
+    on_toggle: impl Fn(&mut Window, &mut App) + 'static,
+    on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
+    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
+    trailing: Option<AnyElement>,
+) -> Div {
     let cur = items.get(selected).cloned().unwrap_or_else(|| MenuItem::new(""));
     let trigger = div()
         .id((id, 0usize))
@@ -413,7 +452,7 @@ pub fn select(
         .on_click(move |_, window, cx| on_toggle(window, cx));
     div()
         .relative()
-        .child(field(ic, open, false, trigger))
+        .child(field(ic, open, false, div().flex_1().min_w_0().flex().flex_row().items_center().gap(px(6.0)).child(trigger).children(trailing)))
         .when(open, |d| d.child(dropdown_menu(id, items, Some(selected), MenuSide::Below, 46.0, on_pick, on_dismiss)))
 }
 
@@ -475,6 +514,8 @@ pub const NODE_CARD_MIN_W: f32 = 232.0;
 pub const NODE_CARD_H: f32 = 56.0;
 /// 节点页:卡片里的图标块边长、顶部搜索条和主按钮高度
 pub const NODE_ICON: f32 = 32.0;
+/// 新建分组时可选的颜色(`group.*` token),第一个是蓝、第二个是玫红、第三个是石板灰,和 mock 分组一致
+pub const GROUP_COLORS: [u32; 8] = [0x5DBBFF, 0xFF5C93, 0x7D8EA6, 0x46D9A0, 0xFFB24A, 0xB07CE0, 0xFF8A5B, 0x8B80FF];
 pub const NODE_BAR_H: f32 = 34.0;
 /// 终端字号、终端画布内边距
 pub const TERM_FONT: f32 = 13.0;

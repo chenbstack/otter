@@ -58,7 +58,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::node_form::{ctl_btn, input_cell};
-use crate::ui::{Glass as _, GlassStyle, empty_state, field, modal, tag};
+use crate::ui::{Glass as _, GlassStyle, empty_state, field, tag};
 use crate::{Home, MONO, c, icon, store, t};
 
 /// 钥匙串密钥的加密绑定:密文搬到别的密钥或节点上解不开
@@ -421,17 +421,6 @@ impl Home {
                 .child(div().text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).child(text))
                 .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(sub))
         };
-        let title_s = |text: &'static str, sub: SharedString| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(3.0))
-                .px(px(24.0))
-                .pt(px(24.0))
-                .pb(px(14.0))
-                .child(div().text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).child(text))
-                .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(sub))
-        };
         let footer = |status: Option<SharedString>, buttons: Vec<AnyElement>| {
             div()
                 .flex()
@@ -548,30 +537,28 @@ impl Home {
                 let k = self.keys.iter().find(|k| k.id == *id);
                 let name = k.map(|k| k.name.clone()).unwrap_or_default();
                 let used = k.map_or(0, |k| k.used_by);
-                let msg = if used > 0 { format!("{used} 个节点正在使用这把密钥,删除后它们会回到「未配置私钥」,需要重新选择密钥才能连接。私钥会从本机删除,无法恢复。") } else { "私钥会从本机删除,无法恢复。".to_string() };
-                let body = div().px(px(24.0)).pb(px(20.0)).text_size(px(t::TYPE_BODY)).text_color(c::secondary()).child(msg);
-                let del = div()
-                    .id("key-del-ok")
-                    .flex()
-                    .items_center()
-                    .h(px(34.0))
-                    .px(px(16.0))
-                    .rounded(px(t::RADIUS_MD))
-                    .bg(c::danger())
-                    .text_color(c::on_accent())
-                    .text_size(px(t::TYPE_CONTROL))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .cursor_pointer()
-                    .hover(|s| s.opacity(0.88))
-                    .child("删除")
-                    .on_click(cx.listener(|this, _, _, cx| this.confirm_delete_key(cx)));
-                let sub: SharedString = format!("确定删除「{name}」?").into();
-                ("key-del-dialog", vec![title_s("删除密钥", sub).into_any_element(), body.into_any_element(), footer(None, vec![cancel.into_any_element(), del.into_any_element()]).into_any_element()])
+                let mut points: Vec<(IconName, Rgba, SharedString)> = Vec::new();
+                if used > 0 {
+                    points.push((IconName::Server, c::warn(), format!("{used} 个节点正在使用,删除后需要重新选择密钥才能连接").into()));
+                }
+                points.push((IconName::KeyRound, c::danger(), "私钥会从本机删除".into()));
+                let spec = crate::nodes::Confirm {
+                    ids: ["key-del-cancel", "key-del-ok"],
+                    title: "删除密钥",
+                    tile: Self::icon_tile(IconName::KeyRound, c::accent(), c::accent_soft()).into_any_element(),
+                    name: name.clone().into(),
+                    detail: k.map(|k| k.fingerprint.clone()).unwrap_or_default().into(),
+                    points,
+                    ok_label: "删除密钥",
+                };
+                ("key-del-dialog", self.confirm_parts(spec, |this| this.key_modal = None, |this, cx| this.confirm_delete_key(cx), cx))
             }
         };
-        Some(modal(
+        let confirm = key_id == "key-del-dialog";
+        Some(crate::ui::modal_bg(
             key_id,
-            440.0,
+            if confirm { crate::nodes::CONFIRM_W } else { 440.0 },
+            if confirm { c::dialog_glass() } else { c::dialog() },
             cx.listener(|this, e: &KeyDownEvent, _, cx| match e.keystroke.key.as_str() {
                 "escape" => {
                     this.key_modal = None;

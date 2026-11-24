@@ -50,6 +50,8 @@ pub struct Node {
     pub note: String,
     pub tags: Vec<String>,
     pub stacks: Vec<Stack>,
+    /// 连接过之后探测到的系统,没探测过是 `Unknown`
+    pub os: crate::osinfo::OsKind,
 }
 
 impl Node {
@@ -187,24 +189,24 @@ pub fn groups() -> Vec<Group> {
             id: 0,
             name: "开发分组".into(),
             color: 0x5DBBFF,
-            nodes: vec![Node { id: NodeId(0), name: "test".into(), user_host: "dev@192.0.2.30".into(), note: String::new(), tags: vec![], stacks: test }],
+            nodes: vec![Node { id: NodeId(0), name: "test".into(), user_host: "dev@192.0.2.30".into(), note: String::new(), tags: vec![], stacks: test, os: crate::osinfo::OsKind::MacOs }],
         },
         Group {
             id: 0,
             name: "生产分组".into(),
             color: 0xFF5C93,
             nodes: vec![
-                Node { id: NodeId(0), name: "emby".into(), user_host: "deploy@192.0.2.22".into(), note: String::new(), tags: vec![], stacks: emby_stacks },
-                Node { id: NodeId(0), name: "docker-host".into(), user_host: "deploy@192.0.2.21".into(), note: String::new(), tags: vec![], stacks: docker_host },
-                Node { id: NodeId(0), name: "big-cluster".into(), user_host: "ops@198.51.100.21".into(), note: String::new(), tags: vec![], stacks: cluster },
-                Node { id: NodeId(0), name: "hk-edge-01".into(), user_host: "root@198.51.100.8".into(), note: String::new(), tags: vec![], stacks: vec![] },
+                Node { id: NodeId(0), name: "emby".into(), user_host: "deploy@192.0.2.22".into(), note: String::new(), tags: vec![], stacks: emby_stacks, os: crate::osinfo::OsKind::Debian },
+                Node { id: NodeId(0), name: "docker-host".into(), user_host: "deploy@192.0.2.21".into(), note: String::new(), tags: vec![], stacks: docker_host, os: crate::osinfo::OsKind::Ubuntu },
+                Node { id: NodeId(0), name: "big-cluster".into(), user_host: "ops@198.51.100.21".into(), note: String::new(), tags: vec![], stacks: cluster, os: crate::osinfo::OsKind::Rocky },
+                Node { id: NodeId(0), name: "hk-edge-01".into(), user_host: "root@198.51.100.8".into(), note: String::new(), tags: vec![], stacks: vec![], os: crate::osinfo::OsKind::Alpine },
             ],
         },
         Group {
             id: 0,
             name: "未分组".into(),
             color: 0x7d8ea6,
-            nodes: vec![Node { id: NodeId(0), name: "sg-gateway".into(), user_host: "ubuntu@203.0.113.2".into(), note: String::new(), tags: vec![], stacks: sg }],
+            nodes: vec![Node { id: NodeId(0), name: "sg-gateway".into(), user_host: "ubuntu@203.0.113.2".into(), note: String::new(), tags: vec![], stacks: sg, os: crate::osinfo::OsKind::Ubuntu }],
         },
     ];
     // 按出现顺序分配 id,从 1 开始

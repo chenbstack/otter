@@ -126,6 +126,8 @@ const MIGRATIONS: &[&str] = &[
          PRIMARY KEY (key_id, slot)
      );
      ALTER TABLE node_auth ADD COLUMN key_id INTEGER REFERENCES keys(id) ON DELETE SET NULL;",
+    // v5:连接后探测到的服务器系统(osinfo::OsKind 的 key),空串 = 还没探测
+    "ALTER TABLE nodes ADD COLUMN os TEXT NOT NULL DEFAULT '';",
 ];
 
 /// 秘密槽位
@@ -252,14 +254,14 @@ impl Store {
             tags.entry(id).or_default().push(tag);
         }
 
-        let mut st = self.conn.prepare("SELECT id, group_id, name, user, host, port, note FROM nodes ORDER BY position, id").map_err(e)?;
+        let mut st = self.conn.prepare("SELECT id, group_id, name, user, host, port, note, os FROM nodes ORDER BY position, id").map_err(e)?;
         let rows = st
             .query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, u16>(5)?, r.get::<_, String>(6)?))
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, u16>(5)?, r.get::<_, String>(6)?, r.get::<_, String>(7)?))
             })
             .map_err(e)?;
         for row in rows {
-            let (id, gid, name, user, host, port, note) = row.map_err(e)?;
+            let (id, gid, name, user, host, port, note, os) = row.map_err(e)?;
             if let Some(g) = groups.iter_mut().find(|g| g.id == gid) {
                 g.nodes.push(Node {
                     id: NodeId(id as u32),
@@ -268,6 +270,7 @@ impl Store {
                     note,
                     tags: tags.remove(&id).unwrap_or_default(),
                     stacks: vec![],
+                    os: crate::osinfo::OsKind::from_key(&os),
                 });
             }
         }
@@ -380,7 +383,7 @@ impl Store {
 
     /// 把节点移到另一个分组(拖拽用),不动其他字段。
     pub fn move_node(&self, id: NodeId, group_id: i64) -> Result<(), String> {
-        let n = self.conn.execute("UPDATE nodes SET group_id=?1 WHERE id=?2", params![group_id, id.0]).map_err(|e| e.to_string())?;
+        let n = self.conn.execute("UPDATE nodes SET group_id=?1, position=(SELECT COALESCE(MAX(position), 0) + 1 FROM nodes) WHERE id=?2", params![group_id, id.0]).map_err(|e| e.to_string())?;
         if n == 0 {
             return Err("节点不存在".into());
         }
@@ -401,6 +404,32 @@ impl Store {
         let n = self.conn.execute("DELETE FROM groups WHERE id=?1", params![id]).map_err(|e| e.to_string())?;
         if n == 0 {
             return Err("分组不存在".into());
+        }
+        Ok(())
+    }
+
+    /// 新建分组,排在最后;返回分组 id。
+    pub fn add_group(&mut self, name: &str, color: u32) -> Result<i64, String> {
+        self.conn
+            .execute("INSERT INTO groups (name, color, position) VALUES (?1, ?2, (SELECT COALESCE(MAX(position), 0) + 1 FROM groups))", params![name, color])
+            .map_err(|e| e.to_string())?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// 记下探测到的系统(osinfo 的 key);节点不存在返回错误。
+    pub fn set_node_os(&mut self, id: NodeId, os: &str) -> Result<(), String> {
+        let n = self.conn.execute("UPDATE nodes SET os=?1 WHERE id=?2", params![os, id.0]).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err(format!("节点 {} 不存在", id.0));
+        }
+        Ok(())
+    }
+
+    /// 改分组的名称和颜色;分组不存在返回错误。
+    pub fn update_group(&mut self, id: i64, name: &str, color: u32) -> Result<(), String> {
+        let n = self.conn.execute("UPDATE groups SET name=?1, color=?2 WHERE id=?3", params![name, color, id]).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err(format!("分组 {id} 不存在"));
         }
         Ok(())
     }
@@ -546,6 +575,40 @@ mod tests {
         let left: i64 = s.conn.query_row("SELECT COUNT(*) FROM node_tags", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 0);
         assert!(s.delete_group(g2).is_err());
+    }
+
+    #[test]
+    fn update_group_changes_name_and_color() {
+        let mut s = Store::open_memory().unwrap();
+        let id = s.add_group("a", 1).unwrap();
+        s.update_group(id, "b", 2).unwrap();
+        let g = s.load_groups().unwrap().into_iter().find(|g| g.id == id).unwrap();
+        assert_eq!((g.name.as_str(), g.color), ("b", 2));
+        assert!(s.update_group(9999, "x", 1).is_err());
+    }
+
+    #[test]
+    fn add_group_appends_in_order() {
+        let mut s = Store::open_memory().unwrap();
+        let a = s.add_group("a", 0x112233).unwrap();
+        let b = s.add_group("b", 0x445566).unwrap();
+        assert!(b > a);
+        let g = s.load_groups().unwrap();
+        let names: Vec<_> = g.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["未分组", "a", "b"]);
+        assert_eq!(g[1].color, 0x112233);
+        assert!(g[1].nodes.is_empty());
+    }
+
+    #[test]
+    fn node_os_is_saved_and_loaded() {
+        let mut s = Store::open_memory().unwrap();
+        let g = s.load_groups().unwrap()[0].id;
+        let id = s.add_node(&NewNode { group_id: g, name: "x", user: "u", host: "h", port: 22, note: "", tags: &[] }).unwrap();
+        assert_eq!(s.load_groups().unwrap()[0].nodes[0].os, crate::osinfo::OsKind::Unknown);
+        s.set_node_os(id, "ubuntu").unwrap();
+        assert_eq!(s.load_groups().unwrap()[0].nodes[0].os, crate::osinfo::OsKind::Ubuntu);
+        assert!(s.set_node_os(NodeId(9999), "debian").is_err());
     }
 
     #[test]

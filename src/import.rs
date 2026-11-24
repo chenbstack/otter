@@ -538,7 +538,7 @@ impl Home {
             Ok(done) => {
                 let n = done.len();
                 for (it, got) in items.iter().zip(&done) {
-                    let node = Node { id: got.id, name: it.name.clone(), user_host: store::user_host(&it.user, &it.host, it.port), note: it.note.clone(), tags: it.tags.clone(), stacks: vec![] };
+                    let node = Node { id: got.id, name: it.name.clone(), user_host: store::user_host(&it.user, &it.host, it.port), note: it.note.clone(), tags: it.tags.clone(), stacks: vec![], os: crate::osinfo::OsKind::Unknown };
                     match self.groups.iter_mut().find(|g| g.id == got.group_id) {
                         Some(g) => g.nodes.push(node),
                         None => self.groups.push(Group { id: got.group_id, name: got.group_name.clone(), color: got.color, nodes: vec![node] }),

@@ -630,13 +630,13 @@ impl Docker {
 }
 
 /// 一次 exec 的结果
-struct Output {
-    code: u32,
-    stdout: String,
-    stderr: String,
+pub(crate) struct Output {
+    pub(crate) code: u32,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
-async fn exec(session: &SshHandle<Client>, cmd: &str, stdin: Option<&[u8]>, timeout: Duration) -> Result<Output, String> {
+pub(crate) async fn exec(session: &SshHandle<Client>, cmd: &str, stdin: Option<&[u8]>, timeout: Duration) -> Result<Output, String> {
     let fut = async {
         let mut ch = session.channel_open_session().await.map_err(|e| format!("打开通道失败:{e}"))?;
         ch.exec(true, cmd).await.map_err(|e| format!("执行失败:{e}"))?;

@@ -2,7 +2,7 @@
 //! 没有卡片:整页居中排版,大图标 + 标题 + 横向步骤条 + 失败原因 + 操作。
 //! 首次连接的主机指纹确认以卡片形式显示在本页(信任并继续 / 取消);密码、口令仍在终端里输入,进入等待时自动切到终端画布。
 
-use ::gpui::{Animation, AnimationExt as _, bounce, ease_in_out, ease_out_quint, linear};
+use ::gpui::{Animation, AnimationExt as _, ease_in_out, ease_out_quint, linear};
 use std::time::Duration;
 use gpui_kit::prelude::FluentBuilder as _;
 
@@ -61,16 +61,46 @@ impl Home {
 
         // 横向步骤条:每列上面是「线 图标 线」,下面是名称;已完成的步骤后面那段线是绿色
         let n = STEP_LABELS.len();
+        // 进行中的步骤到下一步之间的连线由两段拼成(本列右段 + 下一列左段),亮条要连续地流过这两段:
+        // 亮条在「两段合起来」的坐标里从 -W 走到 2L,每段只取自己那一部分(第 k 段整体左移 k·L),靠 overflow 裁剪。
+        // `OTTER_LINE_T=0..1` 调试时固定亮条位置(截图用)。
+        const BAR_W: f32 = 36.0;
+        // 每段连线长度:页面内容宽 520 / 3 列,扣掉 20 的图标位后左右各一半
+        let seg_len = (520.0 / 3.0 - 20.0) / 2.0;
+        let fixed_t: Option<f32> = std::env::var("OTTER_LINE_T").ok().and_then(|v| v.parse().ok());
+        let flow = move |id: (&'static str, usize), k: f32| -> AnyElement {
+            let pos = move |t: f32| -BAR_W + t * (2.0 * seg_len + BAR_W) - k * seg_len;
+            let bar = div().absolute().top_0().h_full().w(px(BAR_W)).rounded_full().bg(c::accent());
+            let bar = match fixed_t {
+                Some(t) => bar.left(px(pos(t))).into_any_element(),
+                None => bar
+                    .with_animation(id, Animation::new(Duration::from_millis(1600)).repeat().with_easing(ease_in_out), move |d, t| d.left(px(pos(t))))
+                    .into_any_element(),
+            };
+            div().flex_1().h(px(2.0)).relative().overflow_hidden().rounded_full().bg(c::border()).child(bar).into_any_element()
+        };
         let col = |i: usize| {
             let state = steps.get(i).map(|s| s.state.clone());
             let mark: AnyElement = match &state {
                 Some(StepState::Done) => icon(IconName::CircleCheck, 20.0, c::online()).into_any_element(),
                 Some(StepState::Failed(_)) => icon(IconName::CircleX, 20.0, c::danger()).into_any_element(),
+                // 进行中:实心圆点 + 一圈向外扩散的涟漪,点本身不闪,一眼能看出是当前步骤
                 Some(StepState::Running) => div()
-                    .size(px(10.0))
-                    .rounded_full()
-                    .bg(c::accent())
-                    .with_animation(("conn-pulse", i), Animation::new(std::time::Duration::from_millis(900)).repeat().with_easing(bounce(ease_in_out)), |d, t| d.opacity(0.3 + 0.7 * t))
+                    .size(px(20.0))
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div().absolute().inset_0().flex().items_center().justify_center().child(
+                            div()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(c::accent())
+                                .with_animation(("conn-ripple", i), Animation::new(Duration::from_millis(1500)).repeat().with_easing(ease_out_quint()), |d, t| d.size(px(10.0 + 10.0 * t)).opacity(0.8 * (1.0 - t))),
+                        ),
+                    )
+                    .child(div().size(px(10.0)).rounded_full().bg(c::accent()))
                     .into_any_element(),
                 None => div().size(px(8.0)).rounded_full().border_1().border_color(c::ghost()).into_any_element(),
             };
@@ -88,18 +118,13 @@ impl Home {
                 Some(StepState::Done) => c::secondary(),
                 None => c::ghost(),
             };
-            let line = |on: bool, show: bool| div().flex_1().h(px(1.0)).when(show, |d| d.bg(if on { c::online().opacity(0.6) } else { c::border() }));
+            let line = |on: bool, show: bool| div().flex_1().h(px(2.0)).rounded_full().when(show, |d| d.bg(if on { c::online().opacity(0.6) } else { c::border() }));
             let left_on = i > 0 && matches!(steps.get(i - 1).map(|s| &s.state), Some(StepState::Done));
             let right_on = matches!(state, Some(StepState::Done));
             // 正在进行的步骤后面那段线呼吸,表示在往下一步走
             // 最后一步右侧没有下一步,线只占位不显示(否则会多出一截)
             let right: AnyElement = if matches!(state, Some(StepState::Running)) && i + 1 < n {
-                div()
-                    .flex_1()
-                    .h(px(1.0))
-                    .bg(c::accent())
-                    .with_animation(("conn-line", i), Animation::new(Duration::from_millis(1200)).repeat().with_easing(bounce(ease_in_out)), |d, t| d.opacity(0.12 + 0.6 * t))
-                    .into_any_element()
+                flow(("conn-line-r", i), 0.0)
             } else {
                 line(right_on, i + 1 < n).into_any_element()
             };
@@ -116,11 +141,11 @@ impl Home {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .child(line(left_on, i > 0))
+                        .child(if i > 0 && matches!(steps.get(i - 1).map(|s| &s.state), Some(StepState::Running)) { flow(("conn-line-l", i), 1.0) } else { line(left_on, i > 0).into_any_element() })
                         .child(div().w(px(20.0)).flex_shrink_0().flex().items_center().justify_center().child(mark))
                         .child(right),
                 )
-                .child(div().text_size(px(t::TYPE_CONTROL)).text_color(tone).child(labels[i]))
+                .child(div().text_size(px(t::TYPE_CONTROL)).text_color(tone).when(matches!(state, Some(StepState::Running)), |d| d.font_weight(FontWeight::SEMIBOLD)).child(labels[i]))
         };
 
         // 本次连接的日志:只看这台主机、从最近一次「开始连接」起,旧的在上,始终滚到最下面
@@ -216,6 +241,16 @@ impl Home {
                             }
                         })),
                 )
+                .child(button("conn-edit", IconName::Pencil, "编辑节点").on_click(cx.listener(move |this, _, window, cx| {
+                    let id = match target {
+                        ConnTarget::Terminal(a) => this.workspace.tabs.get(a).and_then(|t| t.node()),
+                        ConnTarget::Docker => Some(this.sel),
+                        ConnTarget::Sftp(_) => Some(this.files.node()),
+                    };
+                    if let Some(id) = id {
+                        this.open_edit_node(id, window, cx);
+                    }
+                })))
                 .child(button("conn-logs", IconName::ScrollText, "查看日志").on_click(cx.listener(|this, _, _, cx| {
                     this.activate(0);
                     this.set_nodes_view(crate::nodes::NodesView::Logs, cx);

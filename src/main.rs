@@ -4,6 +4,7 @@
 #![recursion_limit = "512"]
 
 mod docker;
+mod group_form;
 mod import;
 mod files;
 mod keychain;
@@ -16,6 +17,8 @@ mod mock;
 mod node_form;
 mod nodes;
 mod nodes_side;
+mod assets;
+mod osinfo;
 mod pages;
 mod terminal;
 mod titlebar;
@@ -85,6 +88,10 @@ struct Home {
     node_menu: Option<(nodes::NodeMenuTarget, Point<Pixels>)>,
     /// 待确认删除的分组 id(非空分组)
     group_delete: Option<i64>,
+    /// 待确认删除的节点 id
+    node_delete: Option<NodeId>,
+    /// 新建分组弹窗
+    group_form: Option<group_form::GroupForm>,
     /// 标签右键菜单:(标签下标, 鼠标位置)
     tab_menu: Option<(usize, Point<Pixels>)>,
     /// 节点页侧栏当前视图
@@ -121,6 +128,8 @@ struct Home {
     demo: bool,
     /// 容器模式各页的界面状态和当前快照
     dock: pages::dockerpages::DockUi,
+    /// 已经(或正在)探测过系统的节点,同一次运行里不重复探测
+    os_probed: std::collections::HashSet<NodeId>,
     /// 各文件视图共享的 mock 上传/新建/删除状态
     fstore: files::Store,
 }
@@ -165,6 +174,8 @@ impl Home {
             node_group: None,
             node_menu: None,
             group_delete: None,
+            node_delete: None,
+            group_form: None,
             tab_menu: None,
             nodes_view: nodes::NodesView::Hosts,
             known_hosts: Vec::new(),
@@ -183,6 +194,7 @@ impl Home {
             files: files::Files::new(),
             demo,
             dock: pages::dockerpages::DockUi::new(),
+            os_probed: Default::default(),
             fstore: files::Store::default(),
         }
     }
@@ -241,6 +253,7 @@ impl Render for Home {
             }
         }
         self.sync_docker(window, cx);
+        self.sync_os(cx);
         let titlebar = self.titlebar(cx);
         let active_kind = self.workspace.active.map(|a| &self.workspace.tabs[a].kind);
         let mode = self.workspace.active.map(|a| self.workspace.tabs[a].mode);
@@ -272,7 +285,7 @@ impl Render for Home {
         let overlay = self.reconnect_overlay(cx);
         let body = div().relative().flex_1().min_h_0().flex().flex_col().child(body).children(overlay);
         let drawer = if is_files_tab { None } else { self.files_drawer(window, cx) };
-        let dialog = self.node_dialog(window, cx).or_else(|| self.key_modal_view(window, cx)).or_else(|| self.import_dialog(cx)).or_else(|| self.group_delete_dialog(cx));
+        let dialog = self.node_dialog(window, cx).or_else(|| self.key_modal_view(window, cx)).or_else(|| self.import_dialog(cx)).or_else(|| self.group_delete_dialog(cx)).or_else(|| self.node_delete_dialog(cx)).or_else(|| self.group_form_dialog(window, cx));
         div()
             .size_full()
             .relative()
@@ -319,7 +332,7 @@ fn main() {
     // --nview 0..3  节点页侧栏视图:主机、钥匙串、已知主机、日志(配合 --active 0)
     let nview: Option<usize> = arg("--nview").and_then(|v| v.parse().ok());
 
-    gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx| {
+    gpui_kit::application().with_assets(assets::AppAssets).run(move |cx| {
         gpui_kit::init(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         let options = WindowOptions {
@@ -411,6 +424,14 @@ fn main() {
                     }
                 }
                 h.add_menu = std::env::var("OTTER_ADD_MENU").is_ok();
+                // 调试:OTTER_GROUP_FORM=1 截图时直接打开新建分组弹窗
+                if std::env::var("OTTER_GROUP_FORM").is_ok() {
+                    h.open_add_group(window, cx);
+                }
+                // 调试:OTTER_NODE_DELETE=1 截图时弹出第一个节点的删除确认框
+                if std::env::var("OTTER_NODE_DELETE").is_ok() {
+                    h.node_delete = h.groups.iter().flat_map(|g| g.nodes.iter()).map(|n| n.id).next();
+                }
                 if std::env::var("OTTER_IMPORT_OPEN").is_ok() {
                     h.open_import(window, cx);
                 }
