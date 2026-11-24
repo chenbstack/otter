@@ -1,1 +1,4 @@
 target
+# 内部文档和协作说明,不提交到 GitHub
+/docs/
+/CLAUDE.md

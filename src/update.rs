@@ -3,10 +3,13 @@
 //! HTTP 用 `ureq`(同步、rustls,不依赖系统的 curl 或 OpenSSL);都在后台线程里调用。
 //! 只读公开仓库的最新正式版(`/releases/latest` 不含草稿和预发布)。
 //!
-//! - macOS:下载 dmg,退出后由一段 shell 脚本挂载、替换 `Otter.app`、重新打开。
+//! 解压、替换、重启都在进程内完成,不调用 `sh`/`hdiutil`/`ditto`/`xattr`/`open` 等系统命令:
+//! - macOS:下载 `.zip`(里面是 `Otter.app`),解压到旁边的 `Otter.app.new`,换掉旧包后直接启动新版。
+//! - Linux:下载 `.tar.gz`,取出 `otter-gui`/`otter` 覆盖当前所在目录里的同名文件,再启动新版。
 //! - Windows:下载 `-setup.exe`,以 `--silent` 静默安装(安装程序会结束旧进程、覆盖文件、再启动新版)。
-//! - Linux:没有安装器,点击后打开发布页。
-//! - 没找到当前平台的安装包、或不是从安装位置运行(如 `cargo run`)时,同样退回到打开发布页。
+//! - 没找到当前平台的安装包、或不是从安装位置运行(如 `cargo run`)时,退回到打开发布页(浏览器只能交给系统打开)。
+//!
+//! 新进程带 `--after-update <旧pid>` 启动,先等旧进程退出再继续,避免抢控制 socket。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -72,8 +75,9 @@ fn pick_asset(assets: &[Value], os: &str, arch: &str) -> Option<Asset> {
     let want = |name: &str| -> bool {
         let n = name.to_ascii_lowercase();
         match os {
-            "macos" => n.ends_with(".dmg") && (if arch == "aarch64" { n.contains("arm64") || n.contains("aarch64") } else { n.contains("x86_64") || n.contains("x64") || n.contains("intel") }),
+            "macos" => n.ends_with(".zip") && (if arch == "aarch64" { n.contains("arm64") || n.contains("aarch64") } else { n.contains("x86_64") || n.contains("x64") || n.contains("intel") }),
             "windows" => n.ends_with("-setup.exe"),
+            "linux" => n.ends_with(".tar.gz") && n.contains("linux") && (arch != "aarch64" || n.contains("aarch64") || n.contains("arm64")) && (arch != "x86_64" || n.contains("x86_64")),
             _ => false,
         }
     };
@@ -176,45 +180,113 @@ fn current_app() -> Option<PathBuf> {
     (app.extension().is_some_and(|e| e == "app")).then_some(app)
 }
 
+/// 新版启动参数:`--after-update <旧pid>`。main 一开始调用,等旧进程退出。
+pub fn wait_for_old_process() {
+    let mut args = std::env::args().skip_while(|a| a != "--after-update");
+    let Some(pid) = args.nth(1).and_then(|p| p.parse::<u32>().ok()) else { return };
+    #[cfg(unix)]
+    for _ in 0..100 {
+        // kill(pid, 0):只探测进程是否还在
+        if unsafe { libc::kill(pid as i32, 0) } != 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+#[cfg(unix)]
+fn relaunch(exe: &Path) -> Result<(), String> {
+    Command::new(exe)
+        .arg("--after-update")
+        .arg(std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("启动新版失败: {e}"))
+}
+
+/// macOS:解压 zip → 替换 `.app` → 启动新版。
 #[cfg(target_os = "macos")]
-const APPLY_SH: &str = r#"#!/bin/sh
-# 等 Otter 退出 → 挂载 dmg → 替换 .app → 重新打开。失败时把 dmg 打开,让用户手动拖。
-PID="$1"; APP="$2"; DMG="$3"
-while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
-MNT="$(mktemp -d /tmp/otter-mnt.XXXXXX)"
-if hdiutil attach -nobrowse -readonly -mountpoint "$MNT" "$DMG" >/dev/null 2>&1 && [ -d "$MNT/Otter.app" ]; then
-  rm -rf "$APP.new"
-  if ditto "$MNT/Otter.app" "$APP.new" && rm -rf "$APP" && mv "$APP.new" "$APP"; then
-    hdiutil detach "$MNT" -quiet >/dev/null 2>&1
-    rm -f "$DMG"
-    xattr -cr "$APP" 2>/dev/null
-    open "$APP"
-    exit 0
-  fi
-  rm -rf "$APP.new"
-fi
-hdiutil detach "$MNT" -quiet >/dev/null 2>&1
-open "$DMG"
-"#;
+fn install_macos(pkg: &Path) -> Result<(), String> {
+    let app = current_app().ok_or("当前不是从应用包里运行,请手动安装下载的包")?;
+    let parent = app.parent().ok_or("找不到应用所在目录")?;
+    let name = app.file_name().ok_or("应用名无效")?.to_string_lossy().into_owned();
+    // 解压到应用旁边,保证和旧包在同一个卷上,后面的 rename 才是原子的
+    let new = parent.join(format!("{name}.new"));
+    let old = parent.join(format!("{name}.old"));
+    let _ = std::fs::remove_dir_all(&new);
+    let _ = std::fs::remove_dir_all(&old);
+    let file = std::fs::File::open(pkg).map_err(|e| format!("打开安装包失败: {e}"))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("安装包损坏: {e}"))?;
+    let tmp = parent.join(format!("{name}.unzip"));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let res = zip.extract(&tmp).map_err(|e| format!("解压失败(应用目录不可写?): {e}"));
+    if let Err(e) = res {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    // 包内是 Otter.app/...;名字固定,不信任别的
+    let unpacked = tmp.join("Otter.app");
+    if !unpacked.join("Contents/MacOS/otter-gui").is_file() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err("安装包里没有 Otter.app".into());
+    }
+    std::fs::rename(&unpacked, &new).map_err(|e| format!("准备新版失败: {e}"))?;
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::rename(&app, &old).map_err(|e| format!("替换旧版失败: {e}"))?;
+    if let Err(e) = std::fs::rename(&new, &app) {
+        let _ = std::fs::rename(&old, &app); // 回滚
+        return Err(format!("替换旧版失败: {e}"));
+    }
+    let _ = std::fs::remove_dir_all(&old);
+    let _ = std::fs::remove_file(pkg);
+    relaunch(&app.join("Contents/MacOS/otter-gui"))
+}
+
+/// Linux:从 tar.gz 里取出 `otter-gui` / `otter`,覆盖当前目录里的同名文件 → 启动新版。
+#[cfg(all(unix, not(target_os = "macos")))]
+fn install_linux(pkg: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let exe = std::env::current_exe().map_err(|e| format!("找不到当前程序: {e}"))?;
+    let dir = exe.parent().ok_or("找不到安装目录")?.to_path_buf();
+    let file = std::fs::File::open(pkg).map_err(|e| format!("打开安装包失败: {e}"))?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut staged = Vec::new();
+    for entry in tar.entries().map_err(|e| format!("安装包损坏: {e}"))? {
+        let mut entry = entry.map_err(|e| format!("安装包损坏: {e}"))?;
+        // 只认这两个文件名,取 basename,不信任包内路径
+        let Some(base) = entry.path().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())) else { continue };
+        if !matches!(base.as_str(), "otter-gui" | "otter") || !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let tmp = dir.join(format!(".{base}.new"));
+        let mut f = std::fs::File::create(&tmp).map_err(|e| format!("安装目录不可写: {e}"))?;
+        std::io::copy(&mut entry, &mut f).map_err(|e| format!("解压失败: {e}"))?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).map_err(|e| format!("设置权限失败: {e}"))?;
+        staged.push((tmp, dir.join(&base)));
+    }
+    if !staged.iter().any(|(_, dst)| dst.file_name().is_some_and(|n| n == "otter-gui")) {
+        for (tmp, _) in &staged {
+            let _ = std::fs::remove_file(tmp);
+        }
+        return Err("安装包里没有 otter-gui".into());
+    }
+    for (tmp, dst) in &staged {
+        std::fs::rename(tmp, dst).map_err(|e| format!("替换 {} 失败: {e}", dst.display()))?; // 覆盖运行中的可执行文件在 Linux 上是允许的
+    }
+    let _ = std::fs::remove_file(pkg);
+    relaunch(&exe)
+}
 
 /// 把下载好的安装包交给平台的安装流程。成功返回 Ok 后调用方应立即退出程序。
 pub fn install(pkg: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let app = current_app().ok_or("当前不是从应用包里运行,请手动安装下载的 dmg")?;
-        let script = work_dir().join("apply.sh");
-        std::fs::write(&script, APPLY_SH).map_err(|e| format!("写更新脚本失败: {e}"))?;
-        Command::new("sh")
-            .arg(&script)
-            .arg(std::process::id().to_string())
-            .arg(&app)
-            .arg(pkg)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("启动更新脚本失败: {e}"))?;
-        Ok(())
+        install_macos(pkg)
     }
     #[cfg(windows)]
     {
@@ -232,10 +304,9 @@ pub fn install(pkg: &Path) -> Result<(), String> {
             .map_err(|e| format!("启动安装程序失败: {e}"))?;
         Ok(())
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let _ = (pkg, Stdio::null());
-        Err("这个平台暂不支持自动安装".into())
+        install_linux(pkg)
     }
 }
 
@@ -261,6 +332,7 @@ mod tests {
 
     const BODY: &str = r#"{"tag_name":"v0.3.0","html_url":"https://github.com/x/y/releases/tag/v0.3.0","draft":false,"prerelease":false,"assets":[
         {"name":"Otter-0.3.0-arm64.dmg","browser_download_url":"https://example.com/a.dmg"},
+        {"name":"Otter-0.3.0-arm64.zip","browser_download_url":"https://example.com/a.zip"},
         {"name":"Otter-0.3.0-windows-x86_64-setup.exe","browser_download_url":"https://example.com/b.exe"},
         {"name":"Otter-0.3.0-linux-x86_64.tar.gz","browser_download_url":"https://example.com/c.tgz"}]}"#;
 
@@ -268,12 +340,12 @@ mod tests {
     fn release_picks_platform_asset() {
         let u = parse_release(BODY, "0.1.0", "macos", "aarch64").unwrap();
         assert_eq!(u.version, "0.3.0");
-        assert_eq!(u.asset.unwrap().url, "https://example.com/a.dmg");
+        assert_eq!(u.asset.unwrap().url, "https://example.com/a.zip");
         let u = parse_release(BODY, "0.1.0", "windows", "x86_64").unwrap();
         assert!(u.asset.unwrap().name.ends_with("-setup.exe"));
-        // Linux 没有安装器:有更新但没有 asset,界面退回打开发布页
-        assert!(parse_release(BODY, "0.1.0", "linux", "x86_64").unwrap().asset.is_none());
-        // Intel Mac 没有对应的 dmg
+        assert_eq!(parse_release(BODY, "0.1.0", "linux", "x86_64").unwrap().asset.unwrap().url, "https://example.com/c.tgz");
+        // 没有对应架构的包:有更新但没有 asset,界面退回打开发布页
+        assert!(parse_release(BODY, "0.1.0", "linux", "aarch64").unwrap().asset.is_none());
         assert!(parse_release(BODY, "0.1.0", "macos", "x86_64").unwrap().asset.is_none());
     }
 

@@ -3,6 +3,9 @@
 //! 一把 32 字节随机主密钥放在系统凭据库(macOS 钥匙串 / Windows 凭据管理器 / Linux Secret Service),
 //! 秘密用 XChaCha20-Poly1305 加密后存进 SQLite。每条密文绑定 AAD(`节点id:槽位`),
 //! 拷到别的行就解不开。调试可用 `OTTER_MASTER_KEY_FILE` 改读本地文件。
+//!
+//! Linux 上没有 Secret Service(无桌面环境、没装 gnome-keyring/KWallet)时,回退到数据目录下的
+//! `master.key`(只有所有者可读写)。这比系统凭据库弱——拿到你的用户权限就能读到——但仍然不是明文存密码。
 
 use chacha20poly1305::aead::{Aead, Generate, Key, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -47,6 +50,23 @@ impl Vault {
         if let Some(path) = std::env::var_os("OTTER_MASTER_KEY_FILE") {
             return Self::open_file(std::path::Path::new(&path));
         }
+        match Self::open_keyring() {
+            Ok(v) => Ok(v),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            Err(e) => {
+                let path = crate::store::data_dir().ok_or("找不到数据目录")?.join("master.key");
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                crate::logs::push(crate::logs::Level::Warn, "密钥", format!("{e};改用密钥文件 {}", path.display()));
+                Self::open_file(&path)
+            }
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            Err(e) => Err(e),
+        }
+    }
+
+    fn open_keyring() -> Result<Self, String> {
         let unavailable = |e: &dyn std::fmt::Display| format!("系统凭据库不可用:{e}。无法保存或读取密码、私钥");
         let entry = keyring::Entry::new(SERVICE, ACCOUNT).map_err(|e| unavailable(&e))?;
         match entry.get_password() {
