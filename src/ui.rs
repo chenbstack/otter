@@ -684,7 +684,7 @@ pub const NODE_CARD_H: f32 = 56.0;
 pub const NODE_ICON: f32 = 32.0;
 /// 新建分组时可选的颜色(`group.*` token),第一个是蓝、第二个是玫红、第三个是石板灰,和 mock 分组一致
 pub const GROUP_COLORS: [u32; 8] = [0x5DBBFF, 0xFF5C93, 0x7D8EA6, 0x46D9A0, 0xFFB24A, 0xB07CE0, 0xFF8A5B, 0x8B80FF];
-pub const NODE_BAR_H: f32 = 34.0;
+pub const NODE_BAR_H: f32 = 30.0;
 /// 终端字号、终端画布内边距
 pub const TERM_FONT: f32 = 13.0;
 pub const TERM_PAD: f32 = 8.0;

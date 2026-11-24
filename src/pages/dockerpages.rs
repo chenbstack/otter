@@ -74,12 +74,12 @@ pub(super) fn small(s: impl Into<SharedString>, color: Rgba) -> Div {
     div().text_size(px(t::TYPE_CAPTION)).text_color(color).child(s.into())
 }
 
-pub(super) fn head(label: &'static str) -> Div {
+pub(crate) fn head(label: &'static str) -> Div {
     div().text_size(px(t::TYPE_CAPTION)).font_weight(FontWeight::SEMIBOLD).text_color(c::ghost()).child(label)
 }
 
 /// 表格容器:表头 + 可滚动的行
-pub(super) fn table(id: &'static str, header: Div, rows: Vec<Stateful<Div>>) -> Div {
+pub(crate) fn table(id: &'static str, header: Div, rows: Vec<Stateful<Div>>) -> Div {
     div()
         .flex_1()
         .min_h_0()
@@ -93,11 +93,11 @@ pub(super) fn table(id: &'static str, header: Div, rows: Vec<Stateful<Div>>) -> 
         .child(div().id(id).flex_1().min_h_0().overflow_y_scroll().children(rows))
 }
 
-pub(super) fn row(id: (&'static str, usize)) -> Stateful<Div> {
+pub(crate) fn row(id: (&'static str, usize)) -> Stateful<Div> {
     div().id(id).h(px(44.0)).flex_shrink_0().flex().flex_row().items_center().gap(px(12.0)).px(px(16.0)).border_b_1().border_color(c::border()).hover(|s| s.bg(c::field_hover()))
 }
 
-pub(super) fn icon_btn(id: (&'static str, usize), ic: IconName, color: Rgba) -> Stateful<Div> {
+pub(crate) fn icon_btn(id: (&'static str, usize), ic: IconName, color: Rgba) -> Stateful<Div> {
     div().id(id).size(px(26.0)).flex().items_center().justify_center().rounded(px(t::RADIUS_XS)).cursor_pointer().hover(|s| s.bg(c::raised())).child(icon(ic, 14.0, color))
 }
 

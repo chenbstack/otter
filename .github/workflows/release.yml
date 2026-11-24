@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+# 发布包不需要调试信息:去掉能少做一部分编译和链接的工作(本地 Cargo.toml 里的 debug = 1 不动,开发时回溯要用)
+env:
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+
 jobs:
   macos:
     timeout-minutes: 40

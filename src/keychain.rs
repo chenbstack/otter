@@ -330,7 +330,8 @@ impl Home {
                             .child(icon(ic, 14.0, color))
                             .tooltip(move |_, cx| cx.new(|_| crate::files::Tip(tip.into())).into())
                     };
-                    Self::glass_row(("key", i))
+                    crate::pages::dockerpages::row(("key", i))
+                        .h(px(52.0))
                         .group(format!("key-{i}"))
                         .child(
                             div()
@@ -355,11 +356,10 @@ impl Home {
                                 .child(div().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(k.name.clone()))
                                 .child(div().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(k.fingerprint.clone())),
                         )
-                        .child(tag(k.algo.trim_start_matches("ssh-").to_string()))
-                        .child(div().w(px(14.0)).flex_shrink_0().when(k.has_passphrase, |d| d.child(icon(IconName::Lock, 13.0, c::muted()))))
+                        .child(div().w(px(110.0)).flex_shrink_0().flex().flex_row().items_center().gap(px(8.0)).child(tag(k.algo.trim_start_matches("ssh-").to_string())).when(k.has_passphrase, |d| d.child(icon(IconName::Lock, 13.0, c::muted()))))
                         .child(
                             div()
-                                .w(px(72.0))
+                                .w(px(84.0))
                                 .flex_shrink_0()
                                 .text_size(px(t::TYPE_CAPTION))
                                 .text_color(c::muted())
@@ -367,8 +367,10 @@ impl Home {
                         )
                         .child(
                             div()
+                                .w(px(84.0))
                                 .flex()
                                 .flex_row()
+                                .justify_end()
                                 .flex_shrink_0()
                                 .when(!copied, |d| d.opacity(0.0).group_hover(format!("key-{i}"), |s| s.opacity(1.0)))
                                 .child(
@@ -385,7 +387,9 @@ impl Home {
                         )
                 })
                 .collect();
-            Self::rows_scroll("keychain-scroll", rows).into_any_element()
+            use crate::pages::dockerpages::head;
+            let header = div().child(div().w(px(32.0)).flex_shrink_0()).child(head("名称 / 指纹").flex_1()).child(head("类型").w(px(110.0)).flex_shrink_0()).child(head("使用").w(px(84.0)).flex_shrink_0()).child(div().w(px(84.0)).flex_shrink_0());
+            Self::list_table("keychain-scroll", header, rows).into_any_element()
         };
         Self::side_view("钥匙串", "管理 SSH 密钥对。私钥加密后保存在本机,节点可以直接选用", Some(add), body)
     }

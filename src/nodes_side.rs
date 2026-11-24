@@ -121,6 +121,18 @@ impl Home {
         div().id(id).glass(t::RADIUS_LG, GlassStyle::CARD).flex().flex_row().items_center().gap(px(12.0)).px(px(14.0)).min_h(px(46.0))
     }
 
+    /// 列表卡片(和容器页同一套):圆角描边的外框,表头 + 行;自己撑满并滚动
+    pub(crate) fn list_table(id: &'static str, header: Div, rows: Vec<Stateful<Div>>) -> Div {
+        div().flex_1().min_h_0().flex().flex_col().px(px(CONTENT_PAD)).pb(px(CONTENT_PAD)).child(crate::pages::dockerpages::table(id, header, rows))
+    }
+
+    /// 同上,但不滚动、高度随内容(信任页里要叠两张)
+    fn list_block(header: Div, rows: Vec<Stateful<Div>>) -> Div {
+        div().mx(px(CONTENT_PAD)).flex().flex_col().flex_shrink_0().rounded(px(t::RADIUS_XL)).border_1().border_color(c::dialog_border()).overflow_hidden().child(
+            header.h(px(34.0)).flex_shrink_0().flex().flex_row().items_center().gap(px(12.0)).px(px(16.0)).border_b_1().border_color(c::border()),
+        ).children(rows)
+    }
+
     pub(crate) fn rows_scroll(id: &'static str, rows: Vec<Stateful<Div>>) -> Stateful<Div> {
         div().id(id).flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap(px(6.0)).px(px(CONTENT_PAD)).pb(px(CONTENT_PAD)).children(rows)
     }
@@ -174,68 +186,86 @@ impl Home {
     }
 
     fn known_hosts_view(&self, cx: &mut Context<Self>) -> Div {
-        let mut hosts = div().flex().flex_col().gap(px(6.0)).px(px(CONTENT_PAD));
-        for (i, h) in self.known_hosts.iter().enumerate() {
-            hosts = hosts.child(
-                Self::glass_row(("kh", i))
+        use crate::pages::dockerpages::{head, row};
+        let host_rows: Vec<Stateful<Div>> = self
+            .known_hosts
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                row(("kh", i))
                     .group(format!("kh-{i}"))
-                    .child(icon(IconName::ShieldCheck, 16.0, c::online()))
-                    .child(div().w(px(200.0)).flex_shrink_0().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(h.host.clone()))
-                    .child(tag(h.algo.clone()))
+                    .child(
+                        div()
+                            .w(px(220.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(icon(IconName::ShieldCheck, 15.0, c::online()))
+                            .child(div().min_w_0().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(h.host.clone())),
+                    )
+                    .child(div().w(px(120.0)).flex_shrink_0().child(tag(h.algo.clone())))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(h.fingerprint.clone()))
                     .child(
-                        div()
-                            .id(("kh-del", i))
-                            .size(px(26.0))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(t::RADIUS_SM))
-                            .opacity(0.0)
-                            .group_hover(format!("kh-{i}"), |s| s.opacity(1.0))
-                            .hover(|s| s.bg(c::hover()))
-                            .child(icon(IconName::Trash, 14.0, c::danger()))
-                            .tooltip(|_, cx| cx.new(|_| crate::files::Tip("删除记录".into())).into())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(h) = this.known_hosts.get(i) {
-                                    if crate::known_hosts::remove(h) {
-                                        crate::logs::push(crate::logs::Level::Info, &h.host, "已删除已知主机记录");
+                        div().w(px(40.0)).flex_shrink_0().flex().justify_end().child(
+                            crate::pages::dockerpages::icon_btn(("kh-del", i), IconName::Trash, c::danger())
+                                .opacity(0.0)
+                                .group_hover(format!("kh-{i}"), |s| s.opacity(1.0))
+                                .tooltip(|_, cx| cx.new(|_| crate::files::Tip("删除记录".into())).into())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(h) = this.known_hosts.get(i) {
+                                        if crate::known_hosts::remove(h) {
+                                            crate::logs::push(crate::logs::Level::Info, &h.host, "已删除已知主机记录");
+                                        }
                                     }
-                                }
-                                this.known_hosts = crate::known_hosts::load();
-                                cx.notify();
-                            })),
-                    ),
-            );
-        }
-        let mut grants = div().flex().flex_col().gap(px(6.0)).px(px(CONTENT_PAD));
-        for (i, g) in self.grants.iter().enumerate() {
-            let when = chrono::DateTime::from_timestamp(g.created_at, 0)
-                .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_default();
-            grants = grants.child(
-                Self::glass_row(("grant", i))
-                    .child(icon(IconName::Bot, 16.0, c::accent()))
+                                    this.known_hosts = crate::known_hosts::load();
+                                    cx.notify();
+                                })),
+                        ),
+                    )
+            })
+            .collect();
+        let hosts = Self::list_block(div().child(head("主机").w(px(220.0)).flex_shrink_0()).child(head("算法").w(px(120.0)).flex_shrink_0()).child(head("指纹").flex_1()).child(div().w(px(40.0)).flex_shrink_0()), host_rows);
+        let grant_rows: Vec<Stateful<Div>> = self
+            .grants
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let when = chrono::DateTime::from_timestamp(g.created_at, 0)
+                    .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default();
+                row(("grant", i))
+                    .h(px(52.0))
                     .child(
                         div()
-                            .w(px(200.0))
+                            .w(px(220.0))
                             .flex_shrink_0()
                             .flex()
-                            .flex_col()
-                            .child(div().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(g.client_name.clone()))
-                            .child(div().truncate().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(self.node_name(Some(g.node_id)))),
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(icon(IconName::Bot, 15.0, c::accent()))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(g.client_name.clone()))
+                                    .child(div().truncate().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(self.node_name(Some(g.node_id)))),
+                            ),
                     )
                     .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(g.parent_exe.clone()))
-                    .child(div().flex_shrink_0().text_size(px(t::TYPE_MICRO)).text_color(c::muted()).child(if g.expires_at > 0 {
+                    .child(div().w(px(130.0)).flex_shrink_0().text_size(px(t::TYPE_MICRO)).text_color(c::muted()).child(if g.expires_at > 0 {
                         let left = (g.expires_at - crate::store::now_secs()).max(0);
                         format!("剩余 {} 小时 {} 分", left / 3600, left % 3600 / 60)
                     } else {
                         when
                     }))
-                    .child(button("grant-revoke", IconName::Trash, "撤销").id(("grant-revoke", i)).on_click(cx.listener(move |this, _, window, cx| this.revoke_grant(i, window, cx)))),
-            );
-        }
+                    .child(div().w(px(84.0)).flex_shrink_0().flex().justify_end().child(button("grant-revoke", IconName::Trash, "撤销").id(("grant-revoke", i)).on_click(cx.listener(move |this, _, window, cx| this.revoke_grant(i, window, cx)))))
+            })
+            .collect();
+        let grants = Self::list_block(div().child(head("Agent").w(px(220.0)).flex_shrink_0()).child(head("调用程序").flex_1()).child(head("有效期 / 授权时间").w(px(130.0)).flex_shrink_0()).child(div().w(px(84.0)).flex_shrink_0()), grant_rows);
         let body = div()
             .id("trust-scroll")
             .flex_1()
@@ -263,6 +293,7 @@ impl Home {
         let body = if entries.is_empty() {
             empty_state(IconName::ScrollText, "暂无日志", "连接、认证、主机密钥等事件会记录在这里,重启后清空").into_any_element()
         } else {
+            use crate::pages::dockerpages::{head, row};
             let rows: Vec<_> = entries
                 .into_iter()
                 .enumerate()
@@ -272,15 +303,16 @@ impl Home {
                         crate::logs::Level::Warn => (IconName::TriangleAlert, c::warn()),
                         crate::logs::Level::Error => (IconName::CircleX, c::danger()),
                     };
-                    Self::glass_row(("log", i))
-                        .min_h(px(36.0))
-                        .child(icon(ic, 14.0, col))
+                    row(("log", i))
+                        .h(px(36.0))
+                        .child(div().w(px(14.0)).flex_shrink_0().child(icon(ic, 14.0, col)))
                         .child(div().w(px(64.0)).flex_shrink_0().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(e.time))
                         .child(div().w(px(200.0)).flex_shrink_0().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::muted()).child(e.host))
                         .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CONTROL)).text_color(c::secondary()).child(e.msg))
                 })
                 .collect();
-            Self::rows_scroll("logs-scroll", rows).into_any_element()
+            let header = div().child(div().w(px(14.0)).flex_shrink_0()).child(head("时间").w(px(64.0)).flex_shrink_0()).child(head("主机").w(px(200.0)).flex_shrink_0()).child(head("事件").flex_1());
+            Self::list_table("logs-scroll", header, rows).into_any_element()
         };
         Self::side_view("日志", "连接、认证和主机密钥事件,最新的在上面", Some(clear), body)
     }
