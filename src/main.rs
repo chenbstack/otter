@@ -2,6 +2,8 @@
 //!
 //! 标题栏(含标签)+ 内容区:节点页 / 节点标签(二级导航 + 页面)等。只为看外观和交互手感,没有任何真实连接。
 #![recursion_limit = "512"]
+// release 版在 Windows 上不弹控制台窗口(CLI 是另一个二进制 otter.exe)
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod ctl;
 mod ipc;
