@@ -4,10 +4,6 @@
 
 A native SSH client: terminal and files (SFTP) in one window. Built in Rust on [GPUI](https://www.gpui.rs) and [russh](https://github.com/Eugeny/russh).
 
-Otter is a native desktop client for people who look after several Linux machines: VPS, NAS, home servers. You add a machine once, and everything runs through the SSH connection you already have, so a fresh machine is ready to manage as soon as you can `ssh` into it.
-
-All your servers live in one window, organized in groups. Each one opens as a tab with its terminal and its files side by side, and you can keep as many sessions open as you like. Otter also has a local interface that lets an AI agent work in the terminal you already have open: it can read your server list freely, but taking over a session always needs your approval.
-
 ## Screenshots
 
 ![Nodes](assets/screenshots/nodes.png)
