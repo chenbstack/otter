@@ -203,7 +203,7 @@ impl Home {
         // 调试:OTTER_FAKE_RECONNECT=1 / =lost 在没有真实终端时也画出遮罩(截图用)
         let fake = std::env::var("OTTER_FAKE_RECONNECT").ok();
         let (status, ever) = match (tab.term.as_ref(), fake.as_deref()) {
-            (_, Some("lost")) => (Status::Closed(Some("已自动重试 6 次,仍然连不上:连接超时".into())), true),
+            (_, Some("lost")) => (Status::Closed(Some("已自动重试 5 次,仍然连不上:连接超时".into())), true),
             (_, Some(_)) => (Status::Reconnecting(2), true),
             (Some(t), None) => (t.handle.status(), t.handle.ever_connected()),
             (None, None) => return None,

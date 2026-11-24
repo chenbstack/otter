@@ -119,7 +119,7 @@ enum End {
 }
 
 /// 自动重连的最多次数和每次之前等待的秒数
-const RECONNECT_DELAYS: [u64; 6] = [1, 2, 4, 8, 15, 30];
+const RECONNECT_DELAYS: [u64; 5] = [1, 2, 4, 8, 15];
 
 /// 待确认的主机密钥 + 回复通道。
 pub(crate) type PendingHost = Arc<Mutex<Option<(HostKeyPrompt, Option<tokio::sync::oneshot::Sender<bool>>)>>>;
@@ -284,9 +284,13 @@ pub fn connect(conn: Conn, cols: usize, rows: usize, activity: Arc<super::Activi
             let retry = io.ever.load(Ordering::Relaxed) && conn.has_saved_auth() && !io.failed_at_auth() && !is_fatal(&lost) && attempt < RECONNECT_DELAYS.len();
             if !retry {
                 // 重试用完了:写明次数,界面浮层据此告诉用户「不是没试」
-                let lost = if attempt >= RECONNECT_DELAYS.len() { format!("已自动重试 {attempt} 次,仍然连不上:{lost}") } else { lost };
+                let exhausted = attempt >= RECONNECT_DELAYS.len();
+                let lost = if exhausted { format!("已自动重试 {attempt} 次,仍然连不上:{lost}") } else { lost };
                 logs::push(logs::Level::Error, &label, lost.clone());
-                io.say(&format!("\r\n\x1b[31m{lost}\x1b[0m\r\n"));
+                // 重试用完时界面会弹「连接已断开」浮层,已经写明原因,终端里不再重复打印
+                if !exhausted {
+                    io.say(&format!("\r\n\x1b[31m{lost}\x1b[0m\r\n"));
+                }
                 io.fail_step(&lost);
                 break Some(lost);
             }
