@@ -1,78 +1,70 @@
-<div align="center">
-
-<img src="assets/logo/otter-1024.png" width="112" alt="Otter logo">
-
 # Otter
 
-**Manage your servers over plain SSH: terminal and files in one native window. Nothing to install on the server.**
+中文 · [English](README.en.md)
 
-Rust · [GPUI](https://www.gpui.rs) · [russh](https://github.com/Eugeny/russh) · tokio
+只靠 SSH 管理服务器:终端和文件放在一个原生窗口里,服务器上什么都不用装。基于 [GPUI](https://www.gpui.rs) 和 [russh](https://github.com/Eugeny/russh),Rust 编写。
 
-English · [简体中文](README.zh-CN.md)
+Otter 是一个原生桌面客户端,给手上有几台 Linux 机器(VPS、NAS、家里的服务器)的人用。机器只需要添加一次,之后所有操作都走你已有的 SSH 连接:服务器上不用装面板或 agent,也不用多开端口,新机器只要能 `ssh` 上去就能管。
 
-</div>
+所有服务器放在一个窗口里,按分组整理;每台机器开成一个标签,终端和文件放在一起,可以同时开任意多个会话。Otter 还提供一个本地接口,让 AI agent 直接在你已经打开的终端里干活:读取服务器列表不需要确认,接管会话则每次都要你同意。
 
-Otter is a native desktop client for people who look after several Linux machines: VPS, NAS, home servers. You add a machine once, and everything runs through the SSH connection you already have. There is no panel or agent to install on the server and no extra port to open, so a fresh machine is ready to manage as soon as you can `ssh` into it.
+## 截图
 
-All your servers live in one window, organized in groups. Each one opens as a tab with its terminal and its files side by side, and you can keep as many sessions open as you like. Otter also has a local interface that lets an AI agent work in the terminal you already have open: it can read your server list freely, but taking over a session always needs your approval.
+![节点页](assets/screenshots/nodes.png)
 
-## Screenshots
+![文件管理](assets/screenshots/files.png)
 
-![Nodes](assets/screenshots/nodes.png)
+![Agent 接管确认](assets/screenshots/takeover.png)
 
-![Files](assets/screenshots/files.png)
+## 特点
 
-![Agent takeover approval](assets/screenshots/takeover.png)
+- **原生、体积小**:Rust 编写,直接用 GPU 渲染,没有打包 Electron 或浏览器内核。macOS 安装包约 16 MB。
+- **启动快**:启动约 0.25 秒(MacBook Pro,Apple M5 Pro),长列表滚动也流畅。
+- **服务器零安装**:不装面板、不装 agent、不开端口,一切走 SSH。
+- **默认安全**:密码和私钥口令加密存储,主密钥放在系统钥匙串;agent 没有你的同意绝不能接管终端。
 
-## Highlights
+## 功能
 
-- **Native and small**: a Rust app drawing straight on the GPU, with no Electron or browser engine bundled. The macOS download is about 16 MB.
-- **Fast**: launches in about 0.25 s (MacBook Pro, Apple M5 Pro), and long scrolling lists stay smooth.
-- **Nothing on the server**: no panel, no agent, no open port. Everything goes over SSH.
-- **Safe by default**: passwords and key passphrases are encrypted on disk, with the master key in the system keychain. An agent can never take over a terminal without your approval.
+- **节点与分组**:服务器分组、搜索,支持从 CSV 或 `~/.ssh/config` 导入。
+- **SSH 终端**:密码、私钥、SSH Agent 认证。
+- **文件(SFTP)**:浏览、预览、拖入上传、新建文件夹、删除;容器内的文件也能看。
+- **Docker**(开发中):堆栈、容器、镜像、存储卷;启动、停止、重启、删除。
+- **自动更新**:通过 GitHub Release 检查新版本,在标题栏一键更新。
+- **Agent 接口**:让 AI agent 读取节点信息,并在你同意后接管终端会话。
 
-## Features
+## 安装
 
-- **Nodes & groups**: organize servers, search, import from CSV or `~/.ssh/config`.
-- **SSH terminal**: password, private key or SSH agent auth.
-- **Files (SFTP)**: browse, preview, drag-and-drop upload, create folders, delete; also inside containers.
-- **Docker** (in development): stacks, containers, images and volumes; start, stop, restart, delete.
-- **Auto update**: checks GitHub Releases and updates in place from the header.
-- **Agent interface**: let an AI agent read your nodes and, with your approval, take over a terminal session.
+在 [Releases](../../releases) 页面下载:
 
-## Install
+- **macOS**:`.dmg`。应用没有公证,macOS 可能提示"已损坏,无法打开,您应该将它移到废纸篓"。其实没有损坏:拖进「应用程序」后执行一次 `xattr -cr /Applications/Otter.app`,再打开即可。
+- **Windows**:`-setup.exe`。装到当前用户目录,不需要管理员权限。
+- **Linux**:`.tar.gz`,内含 `otter-gui` 和 `otter`。
 
-Download from the [Releases](../../releases) page:
+## 使用
 
-- **macOS**: `.dmg`. The app is not notarized, so macOS may say it "is damaged and can't be opened. You should move it to the Trash". It is not damaged: after dragging it to Applications, run `xattr -cr /Applications/Otter.app` once, then open it.
-- **Windows**: `-setup.exe`. Installs per user, no admin rights needed.
-- **Linux**: `.tar.gz` containing `otter-gui` and `otter`.
+打开 Otter,添加节点(或导入),点节点卡片即可打开它的终端、文件和 Docker 标签。
 
-## Usage
+### Agent
 
-Open Otter, add a node (or import), and click it to open its terminal, files and Docker tabs.
+读取节点和会话不需要确认。接管终端每次都会先问你,接管期间界面有遮罩提示,随时可以一键停止。已授权的 agent 在「信任」页里,可以撤销。
 
-### Agents
-
-Reading nodes and sessions needs no approval. Taking over a terminal always asks you first, shows an overlay while the agent types, and can be stopped with one click. Granted agents are listed on the **Trust** page, where you can revoke them.
-
-Command line:
+命令行:
 
 ```bash
-otter nodes                          # server nodes (JSON)
-otter sessions                       # open terminal sessions
-otter takeover --reason "check disk" --agent my-agent
-otter run "df -h"                    # prints only the new output
-otter release                        # hand the session back
-otter --help                         # all commands
+otter nodes                          # 服务器节点(JSON)
+otter sessions                       # 已打开的终端会话
+otter takeover --reason "查看磁盘" --agent my-agent
+otter run "df -h"                    # 只返回这条命令的新输出
+otter release                        # 把会话还给用户
+otter --help                         # 全部命令
 ```
 
-MCP (stdio), e.g. Claude Code:
+MCP(stdio),例如 Claude Code:
 
 ```bash
 claude mcp add otter -- otter mcp
 ```
 
-## License
+## 许可证
 
 MIT
