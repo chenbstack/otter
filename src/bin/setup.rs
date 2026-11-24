@@ -262,11 +262,37 @@ impl Setup {
         .detach();
     }
 
+    /// 选一个父目录,程序装到它下面的 Otter 文件夹(选的本来就叫 Otter 就直接用)。
+    fn pick_dir(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("选择安装位置".into()) });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(picked) = paths.into_iter().next() else { return };
+            let dir = if picked.file_name().is_some_and(|n| n.eq_ignore_ascii_case("otter")) { picked } else { picked.join("Otter") };
+            let _ = this.update(cx, |this, cx| {
+                this.opts.dir = dir;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn launch(&self, cx: &mut Context<Self>) {
         let exe = self.opts.dir.join(if cfg!(windows) { "otter-gui.exe" } else { "otter-gui" });
         let _ = std::process::Command::new(exe).spawn();
         cx.quit();
     }
+}
+
+/// 路径太长时中间省略,保留头尾(盘符和最后的目录名最有用)。
+fn shorten(p: &str, max: usize) -> String {
+    let chars: Vec<char> = p.chars().collect();
+    if chars.len() <= max {
+        return p.to_string();
+    }
+    let head = max / 3;
+    let tail = max - head - 1;
+    format!("{}…{}", chars[..head].iter().collect::<String>(), chars[chars.len() - tail..].iter().collect::<String>())
 }
 
 fn primary(id: &'static str, label: impl Into<SharedString>) -> Stateful<Div> {
@@ -354,7 +380,7 @@ impl Render for Setup {
                     let opt = |id: &'static str, on: bool, label: &'static str, f: fn(&mut Setup)| {
                         div()
                             .id(id)
-                            .h(px(34.0))
+                            .h(px(40.0))
                             .px(px(12.0))
                             .flex()
                             .flex_row()
@@ -386,16 +412,56 @@ impl Render for Setup {
                                 .w_full()
                                 .flex()
                                 .flex_col()
-                                .rounded(px(10.0))
-                                .border_1()
-                                .border_color(field_border())
-                                .bg(field())
-                                .py(px(6.0))
-                                .child(div().px(px(12.0)).pt(px(4.0)).text_size(px(11.5)).text_color(muted()).child("安装到"))
-                                .child(div().px(px(12.0)).pb(px(6.0)).truncate().text_size(px(12.5)).font_family("Consolas").text_color(secondary()).child(dir))
-                                .child(div().h(px(1.0)).mx(px(12.0)).bg(rgba(0x9A94E016)))
-                                .child(opt("o-path", self.opts.add_path, "把 otter 命令加入 PATH(给 agent / 终端用)", |s| s.opts.add_path = !s.opts.add_path))
-                                .child(opt("o-desk", self.opts.desktop, "创建桌面快捷方式", |s| s.opts.desktop = !s.opts.desktop)),
+                                .gap(px(18.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(8.0))
+                                        .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(muted()).child("安装位置"))
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .h(px(42.0))
+                                                .pl(px(14.0))
+                                                .pr(px(5.0))
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap(px(8.0))
+                                                .rounded(px(10.0))
+                                                .bg(rgba(0x00000066))
+                                                .border_1()
+                                                .border_color(field_border())
+                                                .child(div().flex_1().min_w_0().truncate().text_size(px(13.0)).text_color(text()).child(shorten(&dir, 42)))
+                                                .child(
+                                                    div()
+                                                        .id("pick")
+                                                        .size(px(32.0))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .rounded(px(7.0))
+                                                        .cursor_pointer()
+                                                        .hover(|s| s.bg(rgba(0x9A94E022)))
+                                                        .child(Icon::new(IconName::FolderOpen).size(px(17.0)).text_color(accent()))
+                                                        .on_click(cx.listener(|this, _, window, cx| this.pick_dir(window, cx))),
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .rounded(px(10.0))
+                                        .border_1()
+                                        .border_color(field_border())
+                                        .bg(field())
+                                        .py(px(4.0))
+                                        .child(opt("o-path", self.opts.add_path, "把 otter 命令加入 PATH(给 agent / 终端用)", |s| s.opts.add_path = !s.opts.add_path))
+                                        .child(div().h(px(1.0)).mx(px(12.0)).bg(rgba(0x9A94E016)))
+                                        .child(opt("o-desk", self.opts.desktop, "创建桌面快捷方式", |s| s.opts.desktop = !s.opts.desktop)),
+                                ),
                         )
                         .child(primary("go", "安装").on_click(cx.listener(|this, _, window, cx| this.start(window, cx))));
                 }
@@ -559,7 +625,7 @@ fn main() {
         })
         .detach();
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(460.0), px(500.0)), cx))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(480.0), px(580.0)), cx))),
             // 不用系统标题栏:顶部自绘一条拖动区 + 关闭按钮(macOS 上保留红绿灯)
             titlebar: Some(TitlebarOptions {
                 title: Some(if uninstall { "卸载 Otter" } else { "安装 Otter" }.into()),
