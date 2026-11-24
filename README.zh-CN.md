@@ -18,6 +18,10 @@
 - **Docker**(开发中):堆栈、容器、镜像、存储卷;启动、停止、重启、删除。
 - **Agent 接口**:让 AI agent 读取节点信息,并在你同意后接管终端会话。
 
+## 技术栈
+
+Rust、[GPUI](https://www.gpui.rs)(GPU 渲染的原生界面)、[russh](https://github.com/Eugeny/russh)(SSH / SFTP)、tokio、SQLite。
+
 ## 安装
 
 在 [Releases](../../releases) 页面下载:

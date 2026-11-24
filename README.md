@@ -18,6 +18,10 @@ English · [简体中文](README.zh-CN.md)
 - **Docker** (in development): stacks, containers, images and volumes; start, stop, restart, delete.
 - **Agent interface**: let an AI agent read your nodes and, with your approval, take over a terminal session.
 
+## Tech stack
+
+Rust, [GPUI](https://www.gpui.rs) (GPU-rendered native UI), [russh](https://github.com/Eugeny/russh) (SSH / SFTP), tokio, SQLite.
+
 ## Install
 
 Download from the [Releases](../../releases) page:
