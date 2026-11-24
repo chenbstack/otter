@@ -72,3 +72,7 @@ MCP (stdio), e.g. Claude Code:
 ```bash
 claude mcp add otter -- otter mcp
 ```
+
+## License
+
+MIT
