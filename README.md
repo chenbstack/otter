@@ -24,7 +24,7 @@ English · [简体中文](README.zh-CN.md)
 
 Download from the [Releases](../../releases) page:
 
-- **macOS**: `.dmg`. Not notarized: right-click → Open on first launch.
+- **macOS**: `.dmg`. The app is not notarized, so macOS may say it "is damaged and can't be opened. You should move it to the Trash". It is not damaged: after dragging it to Applications, run `xattr -cr /Applications/Otter.app` once, then open it.
 - **Windows**: `-setup.exe`. Installs per user, no admin rights needed.
 - **Linux**: `.tar.gz` containing `otter-gui` and `otter`.
 

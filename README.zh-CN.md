@@ -24,7 +24,7 @@ Rust · [GPUI](https://www.gpui.rs) · [russh](https://github.com/Eugeny/russh) 
 
 在 [Releases](../../releases) 页面下载:
 
-- **macOS**:`.dmg`。未公证,首次打开请右键 → 打开。
+- **macOS**:`.dmg`。应用没有公证,macOS 可能提示"已损坏,无法打开,您应该将它移到废纸篓"。其实没有损坏:拖进「应用程序」后执行一次 `xattr -cr /Applications/Otter.app`,再打开即可。
 - **Windows**:`-setup.exe`。装到当前用户目录,不需要管理员权限。
 - **Linux**:`.tar.gz`,内含 `otter-gui` 和 `otter`。
 
