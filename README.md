@@ -6,6 +6,8 @@
 
 **Manage your servers over plain SSH: terminal and files in one native window. Nothing to install on the server.**
 
+Rust · [GPUI](https://www.gpui.rs) · [russh](https://github.com/Eugeny/russh) · tokio · SQLite
+
 English · [简体中文](README.zh-CN.md)
 
 </div>
@@ -17,10 +19,6 @@ English · [简体中文](README.zh-CN.md)
 - **Files (SFTP)**: browse, preview, drag-and-drop upload, create folders, delete; also inside containers.
 - **Docker** (in development): stacks, containers, images and volumes; start, stop, restart, delete.
 - **Agent interface**: let an AI agent read your nodes and, with your approval, take over a terminal session.
-
-## Tech stack
-
-Rust, [GPUI](https://www.gpui.rs) (GPU-rendered native UI), [russh](https://github.com/Eugeny/russh) (SSH / SFTP), tokio, SQLite.
 
 ## Install
 

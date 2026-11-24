@@ -6,6 +6,8 @@
 
 **只靠 SSH 管理服务器:终端和文件放在一个原生窗口里,服务器上什么都不用装。**
 
+Rust · [GPUI](https://www.gpui.rs) · [russh](https://github.com/Eugeny/russh) · tokio · SQLite
+
 [English](README.md) · 简体中文
 
 </div>
@@ -17,10 +19,6 @@
 - **文件(SFTP)**:浏览、预览、拖入上传、新建文件夹、删除;容器内的文件也能看。
 - **Docker**(开发中):堆栈、容器、镜像、存储卷;启动、停止、重启、删除。
 - **Agent 接口**:让 AI agent 读取节点信息,并在你同意后接管终端会话。
-
-## 技术栈
-
-Rust、[GPUI](https://www.gpui.rs)(GPU 渲染的原生界面)、[russh](https://github.com/Eugeny/russh)(SSH / SFTP)、tokio、SQLite。
 
 ## 安装
 
