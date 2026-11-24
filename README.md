@@ -6,7 +6,7 @@
 
 **Manage your servers over plain SSH: terminal and files in one native window. Nothing to install on the server.**
 
-Rust · [GPUI](https://www.gpui.rs) · [russh](https://github.com/Eugeny/russh) · tokio · SQLite
+Rust · [GPUI](https://www.gpui.rs) · [russh](https://github.com/Eugeny/russh) · tokio
 
 English · [简体中文](README.zh-CN.md)
 

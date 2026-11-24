@@ -6,7 +6,7 @@
 
 **只靠 SSH 管理服务器:终端和文件放在一个原生窗口里,服务器上什么都不用装。**
 
-Rust · [GPUI](https://www.gpui.rs) · [russh](https://github.com/Eugeny/russh) · tokio · SQLite
+Rust · [GPUI](https://www.gpui.rs) · [russh](https://github.com/Eugeny/russh) · tokio
 
 [English](README.md) · 简体中文
 
