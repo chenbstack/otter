@@ -474,6 +474,7 @@ fn main() {
                     h.debug_takeover(&m, window, cx);
                 }
                 if !demo && shot.is_none() {
+                    h.start_activity_watch(window, cx);
                     h.start_ctl(window, cx);
                 }
                 if add {

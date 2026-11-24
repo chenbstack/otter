@@ -518,7 +518,10 @@ impl Home {
             self.takeover_prompts.push_back(Prompt { tab_id, client, reason: "排查磁盘占用,执行 df -h 和 du".into(), reply });
         } else {
             self.start_takeover(a, &client, "", window, cx);
-            self.workspace.tabs[a].takeover.as_mut().map(|t| t.last_action = "输入:df -h".into());
+            self.workspace.tabs[a].takeover.as_mut().map(|t| {
+                t.last_action = "输入:df -h".into();
+                t.waiting = mode == "wait";
+            });
         }
     }
 
@@ -585,7 +588,6 @@ impl Home {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(6.0))
                 .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
                     this.takeover_hotkey(e, window, cx);
                     cx.stop_propagation();
@@ -594,12 +596,19 @@ impl Home {
                     let fh = fh.clone();
                     move |_, window, cx| window.focus(&fh, cx)
                 })
-                .child(glyph)
-                .child(div().mt(px(10.0)).text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).text_color(c::text()).child("Agent 接管中"))
-                .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(k.client_name.clone()))
-                .child(div().max_w(px(360.0)).truncate().text_size(px(t::TYPE_MICRO)).font_family(crate::MONO).text_color(c::ghost()).child(k.last_action.clone()))
-                .child(div().mt(px(14.0)).child(stop))
-                .child(div().mt(px(8.0)).text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child("⌘. 也可以停止 · 停止不会中断正在运行的命令"))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(glyph)
+                        .child(div().mt(px(10.0)).text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).text_color(c::text()).child("Agent 接管中"))
+                        .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(k.client_name.clone()))
+                        .child(div().max_w(px(360.0)).truncate().text_size(px(t::TYPE_MICRO)).font_family(crate::MONO).text_color(c::ghost()).child(k.last_action.clone()))
+                        .child(div().mt(px(14.0)).child(stop))
+                        .child(div().mt(px(8.0)).text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child("⌘. 也可以停止 · 停止不会中断正在运行的命令")),
+                )
                 .into_any_element(),
         )
     }

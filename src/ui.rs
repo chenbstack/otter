@@ -51,7 +51,7 @@ pub mod c {
     pub fn on_accent() -> Rgba { rgb(0xFFFFFF) }
     // 遮罩
     pub fn scrim_dialog() -> Rgba { rgba(0x0000008C) }
-    pub fn scrim_takeover() -> Rgba { rgba(0x0B0A0FDB) }
+    pub fn scrim_takeover() -> Rgba { rgba(0x0B0A0F66) }
     pub fn scrim_drop() -> Rgba { rgba(0x0B0A0FE6) }
     // 文件类型
     pub fn folder() -> Rgba { rgb(0x7fa8f0) }

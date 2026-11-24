@@ -26,12 +26,55 @@ pub struct TermSession {
     pub conn: Conn,
     /// 服务器是否开了括号粘贴模式(`ESC[?2004h`),粘贴时据此决定要不要包标记
     pub bracketed_paste: Arc<AtomicBool>,
+    /// 终端输出活跃度,标签栏据此显示「正在执行」
+    pub activity: Arc<Activity>,
+}
+
+/// 终端输出的活跃度:一阵持续的输出(≥ `BUSY_BYTES`)才算「正在执行」,
+/// 敲键盘时的回显只有几个字节,不会触发。`sleep 100` 这类没有输出的命令检测不到。
+#[derive(Default)]
+pub struct Activity {
+    last_ms: std::sync::atomic::AtomicU64,
+    burst_start_ms: std::sync::atomic::AtomicU64,
+    burst_bytes: std::sync::atomic::AtomicU64,
+}
+
+/// 输出停多久就算这一阵结束
+pub const BUSY_GAP_MS: u64 = 1200;
+/// 一阵输出累计多少字节才算在执行
+pub const BUSY_BYTES: u64 = 512;
+
+fn now_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + BUSY_GAP_MS + 1
+}
+
+impl Activity {
+    pub fn note(&self, n: usize) {
+        self.note_at(now_ms(), n);
+    }
+    pub fn busy(&self) -> bool {
+        self.busy_at(now_ms())
+    }
+    fn note_at(&self, now: u64, n: usize) {
+        let last = self.last_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) > BUSY_GAP_MS {
+            self.burst_start_ms.store(now, Ordering::Relaxed);
+            self.burst_bytes.store(0, Ordering::Relaxed);
+        }
+        self.burst_bytes.fetch_add(n as u64, Ordering::Relaxed);
+        self.last_ms.store(now, Ordering::Relaxed);
+    }
+    fn busy_at(&self, now: u64) -> bool {
+        now.saturating_sub(self.last_ms.load(Ordering::Relaxed)) <= BUSY_GAP_MS && self.burst_bytes.load(Ordering::Relaxed) >= BUSY_BYTES
+    }
 }
 
 /// 透传 SSH 输出给终端模拟器,同时盯着 `ESC[?2004h/l`,记下括号粘贴模式的开关。
 struct PasteModeScan<R> {
     inner: R,
     flag: Arc<AtomicBool>,
+    activity: Arc<Activity>,
     /// 上一块的尾部,防止转义序列被拆在两次读取之间
     tail: Vec<u8>,
 }
@@ -39,6 +82,7 @@ struct PasteModeScan<R> {
 impl<R: std::io::Read> std::io::Read for PasteModeScan<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
+        self.activity.note(n);
         let mut hay = std::mem::take(&mut self.tail);
         hay.extend_from_slice(&buf[..n]);
         let find = |pat: &[u8]| hay.windows(pat.len()).rposition(|w| w == pat);
@@ -184,7 +228,8 @@ impl Home {
     pub(crate) fn start_session(&mut self, conn: Conn, window: &mut Window, cx: &mut Context<Self>) -> TermSession {
         let (inp, out, handle) = ssh::connect(conn.clone(), 80, 24);
         let bracketed_paste = Arc::new(AtomicBool::new(false));
-        let out = PasteModeScan { inner: out, flag: bracketed_paste.clone(), tail: Vec::new() };
+        let activity = Arc::new(Activity::default());
+        let out = PasteModeScan { inner: out, flag: bracketed_paste.clone(), activity: activity.clone(), tail: Vec::new() };
         let resizer = handle.resizer();
         let inputter = handle.inputter();
         let cfg = TerminalConfig {
@@ -243,7 +288,7 @@ impl Home {
             }
         })
         .detach();
-        TermSession { view, handle, conn, bracketed_paste }
+        TermSession { view, handle, conn, bracketed_paste, activity }
     }
 
     /// 重新连接:丢弃旧会话,用同样的连接信息开新会话。
@@ -385,7 +430,7 @@ mod paste_tests {
             }
         }
         let leaked: Vec<&'static [u8]> = chunks.into_iter().map(|c| &*Box::leak(c.to_vec().into_boxed_slice())).collect();
-        let mut s = PasteModeScan { inner: Seq(leaked.into_iter()), flag: flag.clone(), tail: Vec::new() };
+        let mut s = PasteModeScan { inner: Seq(leaked.into_iter()), flag: flag.clone(), activity: Default::default(), tail: Vec::new() };
         let mut buf = [0u8; 64];
         s.read(&mut buf).unwrap();
         assert!(!flag.load(Ordering::Relaxed));
@@ -393,5 +438,27 @@ mod paste_tests {
         assert!(flag.load(Ordering::Relaxed));
         s.read(&mut buf).unwrap();
         assert!(!flag.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::{Activity, BUSY_GAP_MS};
+
+    #[test]
+    fn typing_echo_is_not_busy_but_a_burst_is() {
+        let a = Activity::default();
+        let t0 = 10_000;
+        for i in 0..20 {
+            a.note_at(t0 + i * 100, 3); // 敲键盘的回显
+        }
+        assert!(!a.busy_at(t0 + 2000));
+        let b = Activity::default();
+        b.note_at(t0, 400);
+        b.note_at(t0 + 300, 400); // 命令输出
+        assert!(b.busy_at(t0 + 600));
+        assert!(!b.busy_at(t0 + 300 + BUSY_GAP_MS + 1), "停了就不忙");
+        b.note_at(t0 + 5000, 10); // 隔了很久的零星输出重新计数
+        assert!(!b.busy_at(t0 + 5100));
     }
 }

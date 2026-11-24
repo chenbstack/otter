@@ -1,5 +1,7 @@
 //! 标题栏:红绿灯 + 标签(固定的“节点”页标签在最左)。标签是垂直居中的胶囊。
 
+use std::time::Duration;
+
 use super::*;
 use workspace::{NodeMode, TabKind};
 
@@ -44,6 +46,8 @@ impl Home {
                 Some(_) => c::warn(),
                 None => if on { c::accent() } else { c::ghost() },
             };
+            let taken = tab.takeover.is_some();
+            let busy = tab.busy();
             let group: SharedString = format!("tab-{ix}").into();
             div()
                 .id(("tab", ix))
@@ -68,8 +72,49 @@ impl Home {
                         .text_color(c::muted())
                         .hover(|s| s.bg(c::hover()).text_color(c::secondary()))
                 })
+                // 被 agent 接管:整个标签描一圈强调色边,标题后面放一个呼吸的机器人徽标(后台标签也看得见)
+                .when(taken, |d| d.border_color(c::accent().opacity(0.55)).bg(c::accent().opacity(0.08)))
                 .child(icon(kind_icon, 14.0, icon_color))
                 .child(div().flex_1().min_w_0().truncate().child(title))
+                // 正在执行任务:标签底边一道轻微的流光来回扫过,后台标签也看得见
+                .when(busy, |d| {
+                    d.child(
+                        div().absolute().left(px(10.0)).right(px(10.0)).bottom(px(1.0)).h(px(2.0)).overflow_hidden().rounded(px(1.0)).child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .h_full()
+                                .w(relative(0.4))
+                                .flex()
+                                .flex_row()
+                                .child(div().flex_1().h_full().bg(gpui::linear_gradient(90.0, gpui::linear_color_stop(c::accent().opacity(0.0), 0.0), gpui::linear_color_stop(c::accent().opacity(0.85), 1.0))))
+                                .child(div().flex_1().h_full().bg(gpui::linear_gradient(90.0, gpui::linear_color_stop(c::accent().opacity(0.85), 0.0), gpui::linear_color_stop(c::accent().opacity(0.0), 1.0))))
+                                .with_animation(
+                                    ("tab-busy", ix),
+                                    Animation::new(Duration::from_millis(1400)).repeat().with_easing(ease_in_out),
+                                    |d, t| d.left(relative(-0.4 + 1.4 * t)),
+                                ),
+                        ),
+                    )
+                })
+                .when(taken, |d| {
+                    d.child(
+                        div()
+                            .flex_shrink_0()
+                            .size(px(18.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(t::RADIUS_XS))
+                            .bg(c::accent().opacity(0.2))
+                            .child(icon(IconName::Bot, 12.0, c::accent()))
+                            .with_animation(
+                                ("tab-takeover", ix),
+                                Animation::new(Duration::from_millis(2200)).repeat().with_easing(ease_in_out),
+                                |d, t| d.opacity(0.6 + 0.4 * (1.0 - (2.0 * t - 1.0).abs())),
+                            ),
+                    )
+                })
                 .when(!pinned, |d| {
                     d.child(
                         div()

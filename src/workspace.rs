@@ -99,6 +99,11 @@ impl Tab {
     }
 
     /// 标签所属的节点;节点页不属于任何节点。
+    /// 标签里正在执行任务:终端有持续输出,或 agent 正在 `wait_for` 等命令跑完。
+    pub fn busy(&self) -> bool {
+        self.term.as_ref().is_some_and(|t| t.activity.busy()) || self.takeover.as_ref().is_some_and(|k| k.waiting)
+    }
+
     pub fn node(&self) -> Option<NodeId> {
         match &self.kind {
             TabKind::Nodes => None,

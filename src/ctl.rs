@@ -297,6 +297,27 @@ impl Home {
         }
     }
 
+    /// 每 400ms 看一次各标签是不是在忙,变了才重绘(后台标签的输出不会触发 `Home` 重绘)。
+    pub(crate) fn start_activity_watch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let mut last: Vec<u64> = vec![];
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+                let ok = this.update_in(cx, |this, _, cx| {
+                    let now: Vec<u64> = this.workspace.tabs.iter().filter(|t| t.busy()).map(|t| t.id).collect();
+                    if now != last {
+                        last = now;
+                        cx.notify();
+                    }
+                });
+                if ok.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// 启动本地接口并开始处理消息。演示模式和截图不启用,免得抢走真实 App 的 socket。
     pub(crate) fn start_ctl(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut rx) = start() else { return };
