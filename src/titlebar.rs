@@ -18,8 +18,10 @@ impl Home {
     /// Windows(自绘标题栏,系统不画按钮)和 Linux 客户端装饰的窗口:右上角自己画 最小化 / 最大化 / 关闭。
     /// macOS 的红绿灯由系统画在左侧;Linux 服务端装饰时窗口管理器自己有标题栏,这里不画。
     fn window_buttons(&self, window: &Window) -> Option<Div> {
+        // 调试:OTTER_FAKE_WINBTN=1 在其他系统上也画出这组按钮(截图预览用)
+        let fake = std::env::var_os("OTTER_FAKE_WINBTN").is_some();
         let win = cfg!(target_os = "windows");
-        let csd = cfg!(target_os = "linux") && matches!(window.window_decorations(), Decorations::Client { .. });
+        let csd = fake || (cfg!(target_os = "linux") && matches!(window.window_decorations(), Decorations::Client { .. }));
         if !win && !csd {
             return None;
         }
@@ -132,10 +134,12 @@ impl Home {
                 .cursor_pointer()
                 .relative()
                 .when(on, |d| d.glass(t::RADIUS_MD, GlassStyle::CONTROL).text_color(c::text()).font_weight(FontWeight::MEDIUM))
+                // 没选中的标签也是胶囊,只是底色和描边更暗,选中的是玻璃质感
                 .when(!on, |d| {
-                    d.border_color(gpui_kit::transparent_black())
+                    d.bg(c::field())
+                        .border_color(c::field_border())
                         .text_color(c::muted())
-                        .hover(|s| s.bg(c::hover()).text_color(c::secondary()))
+                        .hover(|s| s.bg(c::field_hover()).text_color(c::secondary()))
                 })
                 // 被 agent 接管:整个标签描一圈强调色边,标题后面放一个呼吸的机器人徽标(后台标签也看得见)
                 .when(taken, |d| d.border_color(c::accent().opacity(0.55)).bg(c::accent().opacity(0.08)))
@@ -238,7 +242,7 @@ impl Home {
         let buttons = self.window_buttons(window);
         let has_buttons = buttons.is_some();
         // 左边:macOS 给红绿灯留位置;其他系统和内容区对齐
-        let pad_l = if cfg!(target_os = "macos") { TITLEBAR_PAD_L } else { CONTENT_PAD };
+        let pad_l = if cfg!(target_os = "macos") && std::env::var_os("OTTER_FAKE_WINBTN").is_none() { TITLEBAR_PAD_L } else { CONTENT_PAD };
         // 标题栏的空白处可以拖动窗口:Windows 用命中区域(不能罩住标签,否则标签点不了),Linux 调 start_window_move
         let drag = div()
             .id("titlebar-drag")
