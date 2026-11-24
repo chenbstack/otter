@@ -22,20 +22,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 // ---- 安装内容 -----------------------------------------------------------------------------------
-#[cfg(feature = "payload")]
-macro_rules! payload {
-    ($f:literal) => {
-        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $f)) as &[u8]
-    };
-}
-#[cfg(not(feature = "payload"))]
-macro_rules! payload {
-    ($f:literal) => {
-        &[] as &[u8]
-    };
-}
-const GUI_EXE: &[u8] = payload!("target/release/otter-gui.exe");
-const CLI_EXE: &[u8] = payload!("target/release/otter.exe");
+// build.rs 把 otter-gui / otter 压缩成 gzip 放进 OUT_DIR(没有 payload 特性时为空)
+const GUI_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gui.gz"));
+const CLI_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cli.gz"));
 const ICON: &[u8] = include_bytes!("../../assets/logo/otter.ico");
 const LOGO: &[u8] = include_bytes!("../../assets/logo/otter-1024.png");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -148,10 +137,16 @@ fn install(o: &Options, step: &dyn Fn(usize)) -> Result<(), String> {
     step(1);
     std::fs::create_dir_all(&o.dir).map_err(|e| format!("创建目录 {} 失败:{e}", o.dir.display()))?;
     let (gui, cli) = if cfg!(windows) { ("otter-gui.exe", "otter.exe") } else { ("otter-gui", "otter") };
-    for (name, bytes) in [(gui, GUI_EXE), (cli, CLI_EXE), ("otter.ico", ICON)] {
+    for (name, gz) in [(gui, GUI_GZ), (cli, CLI_GZ)] {
         let p = o.dir.join(name);
+        let mut bytes = Vec::new();
+        if !gz.is_empty() {
+            std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(gz), &mut bytes).map_err(|e| format!("解压 {name} 失败:{e}"))?;
+        }
         std::fs::write(&p, bytes).map_err(|e| format!("写入 {} 失败:{e}", p.display()))?;
     }
+    let p = o.dir.join("otter.ico");
+    std::fs::write(&p, ICON).map_err(|e| format!("写入 {} 失败:{e}", p.display()))?;
     if let Ok(me) = std::env::current_exe() {
         let _ = std::fs::copy(me, o.dir.join(if cfg!(windows) { "uninstall.exe" } else { "uninstall" }));
     }
