@@ -3,8 +3,8 @@
 //! HTTP 用 `ureq`(同步、rustls,不依赖系统的 curl 或 OpenSSL);都在后台线程里调用。
 //! 只读公开仓库的最新正式版(`/releases/latest` 不含草稿和预发布)。
 //!
-//! 解压、替换、重启都在进程内完成,不调用 `sh`/`hdiutil`/`ditto`/`xattr`/`open` 等系统命令:
-//! - macOS:下载 `.zip`(里面是 `Otter.app`),解压到旁边的 `Otter.app.new`,换掉旧包后直接启动新版。
+//! 复制、替换、重启都在进程内完成,不再用 `sh`/`ditto`/`xattr`/`open`;唯一的系统命令是 macOS 自带的 `hdiutil`(挂载 dmg):
+//! - macOS:下载 `.dmg`,用 `hdiutil` 挂载后把 `Otter.app` 复制到旁边的 `Otter.app.new`,换掉旧包后直接启动新版。
 //! - Linux:下载 `.tar.gz`,取出 `otter-gui`/`otter` 覆盖当前所在目录里的同名文件,再启动新版。
 //! - Windows:下载 `-setup.exe`,以 `--silent` 静默安装(安装程序会结束旧进程、覆盖文件、再启动新版)。
 //! - 没找到当前平台的安装包、或不是从安装位置运行(如 `cargo run`)时,退回到打开发布页(浏览器只能交给系统打开)。
@@ -75,7 +75,7 @@ fn pick_asset(assets: &[Value], os: &str, arch: &str) -> Option<Asset> {
     let want = |name: &str| -> bool {
         let n = name.to_ascii_lowercase();
         match os {
-            "macos" => n.ends_with(".zip") && (if arch == "aarch64" { n.contains("arm64") || n.contains("aarch64") } else { n.contains("x86_64") || n.contains("x64") || n.contains("intel") }),
+            "macos" => n.ends_with(".dmg") && (if arch == "aarch64" { n.contains("arm64") || n.contains("aarch64") } else { n.contains("x86_64") || n.contains("x64") || n.contains("intel") }),
             "windows" => n.ends_with("-setup.exe"),
             "linux" => n.ends_with(".tar.gz") && n.contains("linux") && (arch != "aarch64" || n.contains("aarch64") || n.contains("arm64")) && (arch != "x86_64" || n.contains("x86_64")),
             _ => false,
@@ -209,34 +209,59 @@ fn relaunch(exe: &Path) -> Result<(), String> {
         .map_err(|e| format!("启动新版失败: {e}"))
 }
 
-/// macOS:解压 zip → 替换 `.app` → 启动新版。
+/// 递归复制目录,保留符号链接和权限(`.app` 里的签名封印依赖它们)。
+#[cfg(target_os = "macos")]
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for e in std::fs::read_dir(src)? {
+        let e = e?;
+        let (from, to) = (e.path(), dst.join(e.file_name()));
+        let ty = e.file_type()?;
+        if ty.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(&from)?, &to)?;
+        } else if ty.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?; // 连同权限位一起复制
+        }
+    }
+    std::fs::set_permissions(dst, std::fs::metadata(src)?.permissions())
+}
+
+/// macOS:挂载 dmg → 复制 `.app` → 替换 → 启动新版。
 #[cfg(target_os = "macos")]
 fn install_macos(pkg: &Path) -> Result<(), String> {
-    let app = current_app().ok_or("当前不是从应用包里运行,请手动安装下载的包")?;
+    let app = current_app().ok_or("当前不是从应用包里运行,请手动安装下载的 dmg")?;
     let parent = app.parent().ok_or("找不到应用所在目录")?;
     let name = app.file_name().ok_or("应用名无效")?.to_string_lossy().into_owned();
-    // 解压到应用旁边,保证和旧包在同一个卷上,后面的 rename 才是原子的
+    // 复制到应用旁边,保证和旧包在同一个卷上,后面的 rename 才是原子的
     let new = parent.join(format!("{name}.new"));
     let old = parent.join(format!("{name}.old"));
     let _ = std::fs::remove_dir_all(&new);
     let _ = std::fs::remove_dir_all(&old);
-    let file = std::fs::File::open(pkg).map_err(|e| format!("打开安装包失败: {e}"))?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("安装包损坏: {e}"))?;
-    let tmp = parent.join(format!("{name}.unzip"));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let res = zip.extract(&tmp).map_err(|e| format!("解压失败(应用目录不可写?): {e}"));
-    if let Err(e) = res {
-        let _ = std::fs::remove_dir_all(&tmp);
+    let mnt = work_dir().join("mnt");
+    let _ = std::fs::create_dir_all(&mnt);
+    let attach = Command::new("hdiutil")
+        .args(["attach", "-nobrowse", "-readonly", "-noverify", "-mountpoint"])
+        .arg(&mnt)
+        .arg(pkg)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("挂载 dmg 失败: {e}"))?;
+    if !attach.status.success() {
+        return Err(format!("挂载 dmg 失败: {}", String::from_utf8_lossy(&attach.stderr).trim()));
+    }
+    let src = mnt.join("Otter.app");
+    let copied = if src.join("Contents/MacOS/otter-gui").is_file() {
+        copy_tree(&src, &new).map_err(|e| format!("复制失败(应用目录不可写?): {e}"))
+    } else {
+        Err("dmg 里没有 Otter.app".into())
+    };
+    let _ = Command::new("hdiutil").args(["detach", "-quiet", "-force"]).arg(&mnt).output();
+    if let Err(e) = copied {
+        let _ = std::fs::remove_dir_all(&new);
         return Err(e);
     }
-    // 包内是 Otter.app/...;名字固定,不信任别的
-    let unpacked = tmp.join("Otter.app");
-    if !unpacked.join("Contents/MacOS/otter-gui").is_file() {
-        let _ = std::fs::remove_dir_all(&tmp);
-        return Err("安装包里没有 Otter.app".into());
-    }
-    std::fs::rename(&unpacked, &new).map_err(|e| format!("准备新版失败: {e}"))?;
-    let _ = std::fs::remove_dir_all(&tmp);
     std::fs::rename(&app, &old).map_err(|e| format!("替换旧版失败: {e}"))?;
     if let Err(e) = std::fs::rename(&new, &app) {
         let _ = std::fs::rename(&old, &app); // 回滚
@@ -332,7 +357,6 @@ mod tests {
 
     const BODY: &str = r#"{"tag_name":"v0.3.0","html_url":"https://github.com/x/y/releases/tag/v0.3.0","draft":false,"prerelease":false,"assets":[
         {"name":"Otter-0.3.0-arm64.dmg","browser_download_url":"https://example.com/a.dmg"},
-        {"name":"Otter-0.3.0-arm64.zip","browser_download_url":"https://example.com/a.zip"},
         {"name":"Otter-0.3.0-windows-x86_64-setup.exe","browser_download_url":"https://example.com/b.exe"},
         {"name":"Otter-0.3.0-linux-x86_64.tar.gz","browser_download_url":"https://example.com/c.tgz"}]}"#;
 
@@ -340,7 +364,7 @@ mod tests {
     fn release_picks_platform_asset() {
         let u = parse_release(BODY, "0.1.0", "macos", "aarch64").unwrap();
         assert_eq!(u.version, "0.3.0");
-        assert_eq!(u.asset.unwrap().url, "https://example.com/a.zip");
+        assert_eq!(u.asset.unwrap().url, "https://example.com/a.dmg");
         let u = parse_release(BODY, "0.1.0", "windows", "x86_64").unwrap();
         assert!(u.asset.unwrap().name.ends_with("-setup.exe"));
         assert_eq!(parse_release(BODY, "0.1.0", "linux", "x86_64").unwrap().asset.unwrap().url, "https://example.com/c.tgz");

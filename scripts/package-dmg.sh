@@ -44,11 +44,5 @@ codesign --verify --strict "$APP"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 hdiutil create -volname "Otter" -srcfolder "$STAGE" -ov -format UDZO "$OUT" >/dev/null
-# 应用内自动更新用的 zip(进程内解压,不依赖 hdiutil);ditto 保留签名需要的属性和符号链接
-ZIP="${OUT%.dmg}.zip"
-rm -f "$ZIP"
-ditto -c -k --keepParent --norsrc --noextattr --noqtn "$APP" "$ZIP"
-rm -rf "$ROOT/target/dmg"
-echo "已生成: $ZIP"
 echo "已生成: $OUT"
 ls -lh "$OUT"

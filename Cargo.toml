@@ -52,7 +52,6 @@ ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] 
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-zip = { version = "8", default-features = false, features = ["deflate"] }
 gpui-macos = { package = "gpui-pre-macos", version = "=0.3.12", features = ["test-support"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
