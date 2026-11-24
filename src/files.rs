@@ -1509,7 +1509,7 @@ fn entry_from_remote(r: &RemoteEntry) -> Entry {
 
 /// 本机目录的一项:(名字, 是否目录, 大小, 修改时间)
 fn read_local(dir: &str) -> Vec<(String, bool, u64, String)> {
-    let mut v: Vec<_> = std::fs::read_dir(dir)
+    let v: Vec<_> = std::fs::read_dir(dir)
         .map(|rd| {
             rd.flatten()
                 .take(5000)

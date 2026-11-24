@@ -83,7 +83,7 @@ pub fn connect() -> std::io::Result<SyncStream> {
 pub fn bind() -> Result<mpsc::UnboundedReceiver<Conn>, BindError> {
     use tokio::net::windows::named_pipe::ServerOptions;
     let name = pipe_name();
-    let make = |first: bool| ServerOptions::new().first_pipe_instance(first).reject_remote_clients(true).create(&name);
+    let make = move |first: bool| ServerOptions::new().first_pipe_instance(first).reject_remote_clients(true).create(&name);
     let mut server = match make(true) {
         Ok(s) => s,
         // 第一个实例已被别的进程占着:ERROR_ACCESS_DENIED

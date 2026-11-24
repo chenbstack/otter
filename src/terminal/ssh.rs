@@ -656,8 +656,31 @@ async fn try_key(conn: &Conn, io: &Io, session: &mut client::Handle<Client>, k: 
     Ok(session.authenticate_publickey(conn.user.clone(), PrivateKeyWithHashAlg::new(Arc::new(key), hash)).await.map_err(|e| e.to_string())?.success())
 }
 
+type DynAgent = keys::agent::client::AgentClient<Box<dyn keys::agent::client::AgentStream + Send + Unpin>>;
+
+/// 连上本机的 SSH Agent:Unix 看 `SSH_AUTH_SOCK`;Windows 先试 OpenSSH 的命名管道,再试 Pageant。
+async fn connect_agent() -> Result<DynAgent, String> {
+    use keys::agent::client::AgentClient;
+    #[cfg(unix)]
+    {
+        let c = AgentClient::connect_env().await.map_err(|e| format!("连不上 SSH Agent:{e}"))?;
+        Ok(AgentClient::connect(c.into_inner()))
+    }
+    #[cfg(windows)]
+    {
+        let pipe = std::env::var("SSH_AUTH_SOCK").ok().filter(|p| p.starts_with(r"\\.\pipe\")).unwrap_or_else(|| r"\\.\pipe\openssh-ssh-agent".into());
+        match AgentClient::connect_named_pipe(&pipe).await {
+            Ok(c) => Ok(AgentClient::connect(c.into_inner())),
+            Err(e1) => match AgentClient::connect_pageant().await {
+                Ok(c) => Ok(AgentClient::connect(c.into_inner())),
+                Err(e2) => Err(format!("连不上 SSH Agent(OpenSSH 管道:{e1};Pageant:{e2})")),
+            },
+        }
+    }
+}
+
 async fn try_agent(conn: &Conn, session: &mut client::Handle<Client>) -> Result<bool, String> {
-    let mut agent = keys::agent::client::AgentClient::connect_env().await.map_err(|e| format!("连不上 SSH Agent:{e}"))?;
+    let mut agent = connect_agent().await?;
     let ids = agent.request_identities().await.map_err(|e| format!("读取 Agent 密钥失败:{e}"))?;
     if ids.is_empty() {
         return Err("SSH Agent 里没有密钥(可先 ssh-add)".into());
