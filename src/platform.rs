@@ -74,8 +74,9 @@ pub fn ensure_link(exe: &std::path::Path, link: &std::path::Path) -> std::io::Re
     }
 }
 
-/// 启动时调用:从「应用程序」里的 Otter.app 运行时,在 `~/.local/bin/otter` 放一个软链接,
-/// 这样终端和 MCP 配置里可以直接用 `otter`。开发版(target/ 下)不会动它。返回要写进日志的一句话。
+/// 启动时调用:从「应用程序」里的 Otter.app 运行时,在 `~/.local/bin/otter` 放一个软链接指向 App 包里的命令行程序
+/// (和界面程序 `otter-gui` 同目录的 `otter`),这样终端和 MCP 配置里可以直接用 `otter`。开发版(target/ 下)不会动它。
+/// 返回要写进日志的一句话。
 #[cfg(target_os = "macos")]
 pub fn install_cli_link() -> Option<String> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
@@ -83,8 +84,12 @@ pub fn install_cli_link() -> Option<String> {
     if !(s.contains("/Applications/") && s.contains(".app/Contents/MacOS/")) {
         return None;
     }
+    let cli = exe.with_file_name("otter");
+    if !cli.exists() {
+        return None;
+    }
     let link = home_dir().join(".local/bin/otter");
-    match ensure_link(&exe, &link) {
+    match ensure_link(&cli, &link) {
         Ok(Link::Created) => Some(format!("已创建命令行入口 {}(要在终端里直接用 otter,请确认 ~/.local/bin 在 PATH 里)", link.display())),
         Ok(Link::Updated) => Some(format!("已更新命令行入口 {}", link.display())),
         Ok(Link::Occupied) => Some(format!("{} 已被占用,没有创建命令行入口", link.display())),

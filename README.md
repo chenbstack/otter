@@ -13,7 +13,7 @@ DeskPanel 重做版:macOS 原生桌面客户端,经 SSH 管理多台服务器的
 ## 首页
 
 ```bash
-cargo run --release                                  # 打开首页
+cargo run --release                                  # 打开首页(界面程序 otter-gui;命令行程序是 otter,见 docs/modules/ctl.md)
 cargo run --release -- --shot out.png --expand 3     # 离屏截图后退出(不需要屏幕录制权限)
 #   可选: --node 1,2(选节点)  --plain(隐藏图表)  --page 0..6(菜单页)  --add(打开添加节点弹窗)
 #   文件抽屉: --files host | --files emby/emby_av(容器)  --fcd /etc(进目录)  --fsel hosts(选中)

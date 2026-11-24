@@ -71,13 +71,13 @@ pub enum UiMsg {
 /// 启动本地接口服务。已有另一个 Otter 在监听、或绑定失败时返回 `None`(日志里写明原因)。
 pub fn start() -> Option<mpsc::UnboundedReceiver<UiMsg>> {
     let _guard = crate::terminal::ssh::runtime().enter();
-    let mut conns = match crate::ipc::bind() {
+    let mut conns = match crate::ipc_server::bind() {
         Ok(c) => c,
-        Err(crate::ipc::BindError::InUse) => {
+        Err(crate::ipc_server::BindError::InUse) => {
             logs::push(logs::Level::Warn, "Agent", "已有另一个 Otter 在监听本地接口,本进程不启用");
             return None;
         }
-        Err(crate::ipc::BindError::Other(e)) => {
+        Err(crate::ipc_server::BindError::Other(e)) => {
             logs::push(logs::Level::Error, "Agent", format!("本地接口启动失败: {e}"));
             return None;
         }
@@ -93,7 +93,7 @@ pub fn start() -> Option<mpsc::UnboundedReceiver<UiMsg>> {
     Some(rx)
 }
 
-async fn serve(stream: crate::ipc::Conn, id: u64, tx: mpsc::UnboundedSender<UiMsg>) {
+async fn serve(stream: crate::ipc_server::Conn, id: u64, tx: mpsc::UnboundedSender<UiMsg>) {
     let (rd, mut wr) = tokio::io::split(stream);
     let mut lines = BufReader::new(rd).lines();
     let mut client: Option<Arc<Client>> = None;

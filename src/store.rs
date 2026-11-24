@@ -13,7 +13,7 @@ use crate::mock::{Group, Node, NodeId};
 /// 各平台的数据目录:macOS `~/Library/Application Support/otter`、
 /// Windows `%APPDATA%\otter`、Linux `$XDG_DATA_HOME/otter`。
 pub fn data_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "otter").map(|d| d.data_dir().to_path_buf())
+    crate::ipc::data_dir()
 }
 
 /// 展示用的 `user@host`,端口不是 22 时带 `:port`。

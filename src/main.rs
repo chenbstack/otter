@@ -5,8 +5,8 @@
 
 mod ctl;
 mod ipc;
+mod ipc_server;
 mod platform;
-mod ctl_cli;
 mod takeover;
 mod docker;
 mod group_form;
@@ -335,12 +335,6 @@ impl Render for Home {
 fn main() {
     // 调试参数:--shot <png> --node <g>,<n> --tabs n:<节点名>(容器模式),t:<节点名>(终端模式),f:<节点名>[@堆栈/服务](SFTP 模式),... --active <k> --expand <k> --plain --page <0..4> --add(打开添加节点弹窗) --files <host|堆栈/服务> --fcd <目录> --fsel <名字>
     let args: Vec<String> = std::env::args().collect();
-    // 子命令:不启动界面,只做本地接口的薄客户端
-    match args.get(1).map(String::as_str) {
-        Some("ctl") => std::process::exit(ctl_cli::run_ctl(&args[2..])),
-        Some("mcp") => std::process::exit(ctl_cli::run_mcp()),
-        _ => {}
-    }
     let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let shot = arg("--shot");
     let node = arg("--node");

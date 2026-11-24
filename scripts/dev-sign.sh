@@ -5,7 +5,7 @@
 # 用法:cargo build --release && scripts/dev-sign.sh [证书名]
 #   证书名默认取本机第一个 Apple Development 证书,也可用环境变量 OTTER_SIGN_ID 指定。
 set -e
-BIN="$(dirname "$0")/../target/release/otter"
+BIN="$(dirname "$0")/../target/release/otter-gui"
 ID="${1:-${OTTER_SIGN_ID:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)}}"
 [ -n "$ID" ] || { echo "没找到代码签名证书(需要 Xcode 里登录的 Apple Development 证书)" >&2; exit 1; }
 codesign -f -s "$ID" -i dev.otter.app "$BIN"

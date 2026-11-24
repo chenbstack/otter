@@ -17,6 +17,7 @@ STAGE="$ROOT/target/dmg/stage"
 OUT="$ROOT/target/Otter-$VER-$ARCH.dmg"
 rm -rf "$ROOT/target/dmg" "$OUT"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$STAGE"
+cp target/release/otter-gui "$APP/Contents/MacOS/otter-gui"
 cp target/release/otter "$APP/Contents/MacOS/otter"
 cp assets/logo/otter.icns "$APP/Contents/Resources/otter.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -26,7 +27,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>Otter</string>
   <key>CFBundleDisplayName</key><string>Otter</string>
   <key>CFBundleIdentifier</key><string>dev.otter.app</string>
-  <key>CFBundleExecutable</key><string>otter</string>
+  <key>CFBundleExecutable</key><string>otter-gui</string>
   <key>CFBundleIconFile</key><string>otter</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>$VER</string>
@@ -35,6 +36,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+codesign -f -s "$ID" -i dev.otter.app.cli "$APP/Contents/MacOS/otter"
 codesign -f -s "$ID" -i dev.otter.app "$APP"
 codesign --verify --strict "$APP"
 cp -R "$APP" "$STAGE/"
