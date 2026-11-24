@@ -326,7 +326,10 @@ impl Home {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
-                if this.update_in(cx, |this, window, cx| this.takeover_tick(window, cx)).is_err() {
+                if this.update_in(cx, |this, window, cx| {
+                    this.takeover_tick(window, cx);
+                    this.persist_new_passwords();
+                }).is_err() {
                     break;
                 }
             }

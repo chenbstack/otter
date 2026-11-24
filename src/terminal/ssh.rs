@@ -194,10 +194,20 @@ pub struct Handle {
     ever: Arc<AtomicBool>,
     epoch: Arc<AtomicU32>,
     link: Link,
+    /// 用户在终端里输入了新密码、登录成功、并选择保存:等界面写回节点(取走一次)
+    new_password: PwSlot,
     abort: tokio::task::AbortHandle,
 }
 
+/// 一个可跨任务传递的密码槽
+pub(crate) type PwSlot = Arc<Mutex<Option<Zeroizing<String>>>>;
+
 impl Handle {
+    /// 取走用户选择保存的新密码(只返回一次)
+    pub(crate) fn take_new_password(&self) -> Option<Zeroizing<String>> {
+        self.new_password.lock().ok().and_then(|mut g| g.take())
+    }
+
     /// 当前可用的已认证连接(没连上、重连中为 None)
     pub(crate) fn session(&self) -> Option<Arc<client::Handle<Client>>> {
         self.link.lock().ok().and_then(|g| g.clone())
@@ -257,8 +267,10 @@ pub fn connect(conn: Conn, cols: usize, rows: usize, activity: Arc<super::Activi
     let epoch = Arc::new(AtomicU32::new(0));
     let link: Link = Arc::new(Mutex::new(None));
     let (ever_io, epoch_io, link_io) = (ever.clone(), epoch.clone(), link.clone());
+    let new_password: PwSlot = Arc::new(Mutex::new(None));
+    let new_pw_io = new_password.clone();
     let join = runtime().spawn(async move {
-        let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone(), steps: steps_io, host_prompt: hp_io, ever: ever_io, epoch: epoch_io, link: link_io, activity };
+        let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone(), steps: steps_io, host_prompt: hp_io, ever: ever_io, epoch: epoch_io, link: link_io, activity, pw_override: Arc::new(Mutex::new(None)), save_pw: new_pw_io };
         let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
         logs::push(logs::Level::Info, &label, "开始连接");
         let size = Arc::new(Mutex::new((cols as u16, rows as u16)));
@@ -310,7 +322,7 @@ pub fn connect(conn: Conn, cols: usize, rows: usize, activity: Arc<super::Activi
         set(&st, Status::Closed(reason));
         // io 在这里释放,Output 读到 0
     });
-    (Input(in_tx.clone()), Output { rx: out_rx, left: Vec::new() }, Handle { input: in_tx, resize: rs_tx, status, steps, host_prompt, ever, epoch, link, abort: join.abort_handle() })
+    (Input(in_tx.clone()), Output { rx: out_rx, left: Vec::new() }, Handle { input: in_tx, resize: rs_tx, status, steps, host_prompt, ever, epoch, link, new_password, abort: join.abort_handle() })
 }
 
 /// 重连也没有用的错误:主机指纹问题、认证被拒。
@@ -336,6 +348,10 @@ pub(crate) struct Io {
     link: Link,
     /// 终端的执行状态;SFTP 用的无界面会话里是个用不上的占位
     activity: Arc<super::Activity>,
+    /// 保存的密码被拒、用户现场输入了能用的新密码:本次连接(含自动重连)改用它
+    pw_override: PwSlot,
+    /// 用户选择把新密码保存到节点
+    save_pw: PwSlot,
 }
 
 impl Io {
@@ -343,7 +359,7 @@ impl Io {
     pub(crate) fn headless(host_prompt: PendingHost, steps: Arc<Mutex<Vec<Step>>>) -> Io {
         let (out, _) = std_mpsc::channel();
         let (_, inp) = tokio_mpsc::unbounded_channel();
-        Io { out, inp: Arc::new(tokio::sync::Mutex::new(inp)), status: Arc::new(Mutex::new(Status::Connecting)), steps, host_prompt, ever: Arc::new(AtomicBool::new(false)), epoch: Arc::new(AtomicU32::new(0)), link: Arc::new(Mutex::new(None)), activity: Arc::default() }
+        Io { out, inp: Arc::new(tokio::sync::Mutex::new(inp)), status: Arc::new(Mutex::new(Status::Connecting)), steps, host_prompt, ever: Arc::new(AtomicBool::new(false)), epoch: Arc::new(AtomicU32::new(0)), link: Arc::new(Mutex::new(None)), activity: Arc::default(), pw_override: Arc::new(Mutex::new(None)), save_pw: Arc::new(Mutex::new(None)) }
     }
 
     /// 挂出主机指纹确认,等界面回答(取消、会话被丢弃都算拒绝)
@@ -604,6 +620,36 @@ async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, resize: &mut tokio_mpsc:
     end
 }
 
+/// 保存的密码被服务器拒绝后,在终端里最多问 3 次新密码。登录成功返回 true,并问是否保存到节点(`save_pw` 交给界面写回)。
+/// 没有交互通道(sftp、docker 等后台连接)时 `ask` 直接返回 None,这里就什么都不做。
+async fn retype_password(conn: &Conn, io: &Io, session: &mut client::Handle<Client>) -> Result<bool, String> {
+    let target = format!("{}@{}", conn.user, conn.host);
+    io.say("\r\n\x1b[33m保存的密码被服务器拒绝了,可能已经修改。\x1b[0m\r\n");
+    for _ in 0..3 {
+        let Some(p) = io.ask(&format!("{target} 的新密码(直接回车取消):"), false).await else { break };
+        if p.is_empty() {
+            break;
+        }
+        let r = session.authenticate_password(conn.user.clone(), p.clone()).await.map_err(|e| e.to_string())?;
+        if !r.success() {
+            io.say("\x1b[31m密码不对,请重试\x1b[0m\r\n");
+            continue;
+        }
+        let pw = Zeroizing::new(p);
+        if let Ok(mut g) = io.pw_override.lock() {
+            *g = Some(pw.clone());
+        }
+        let yes = io.ask("把新密码保存到这个节点? [y/N] ", true).await.is_some_and(|a| matches!(a.trim().to_lowercase().as_str(), "y" | "yes" | "是"));
+        if yes {
+            if let Ok(mut g) = io.save_pw.lock() {
+                *g = Some(pw);
+            }
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 async fn authenticate(conn: &Conn, io: &Io, session: &mut client::Handle<Client>) -> Result<(), String> {
     if let Some(e) = &conn.auth_error {
         return Err(e.clone());
@@ -632,8 +678,11 @@ async fn authenticate(conn: &Conn, io: &Io, session: &mut client::Handle<Client>
             }
         }
     }
-    let password = match &auth.password {
-        Some(p) => Some(p.clone()),
+    // 本次连接里用户现场输入过的新密码优先(自动重连时不用再问一遍)
+    let overridden = io.pw_override.lock().ok().and_then(|g| g.clone());
+    let had_saved = auth.password.is_some() || overridden.is_some();
+    let password = match overridden.or_else(|| auth.password.clone()) {
+        Some(p) => Some(p),
         // 什么都没配置:在终端里问密码
         None if auth.key.is_none() && !auth.agent => Some(Zeroizing::new(io.ask(&format!("{}@{} 的密码:", conn.user, conn.host), false).await.ok_or("已取消")?)),
         None => None,
@@ -644,6 +693,10 @@ async fn authenticate(conn: &Conn, io: &Io, session: &mut client::Handle<Client>
             return Ok(());
         }
         errors.push("密码不对或服务器不允许密码登录".into());
+        // 保存的密码被拒(多半服务器上改过):在终端里让用户输入新密码,成功后问要不要写回节点
+        if had_saved && retype_password(conn, io, session).await? {
+            return Ok(());
+        }
     }
     Err(if errors.is_empty() { "认证失败".into() } else { errors.join(";") })
 }

@@ -161,6 +161,29 @@ impl Home {
         conn
     }
 
+    /// 把节点里保存的密码换成新的(其余认证信息不动)。用户在终端里输入了新密码并选择保存时用。
+    pub(crate) fn save_node_password(&mut self, id: NodeId, pw: &str) -> Result<(), String> {
+        self.ensure_vault()?;
+        let store = self.store.as_mut().ok_or("本地库不可用")?;
+        let mut row = store.load_auth(id)?;
+        let (n, c) = self.vault.as_ref().ok_or("主密钥未就绪")?.seal(pw.as_bytes(), &aad(id, SLOT_PASSWORD))?;
+        row.secrets.retain(|(slot, _, _)| slot != SLOT_PASSWORD);
+        row.secrets.push((SLOT_PASSWORD.to_string(), n, c));
+        store.save_auth(id, &row)
+    }
+
+    /// 取走各终端里「用户输入并选择保存」的新密码,写回对应节点。每秒由 ctl 的定时器调一次。
+    pub(crate) fn persist_new_passwords(&mut self) {
+        let pending: Vec<(NodeId, zeroize::Zeroizing<String>)> = self.workspace.tabs.iter().filter_map(|t| Some((t.node()?, t.term.as_ref()?.handle.take_new_password()?))).collect();
+        for (id, pw) in pending {
+            let name = self.node_by_id(id).map(|n| n.name.clone()).unwrap_or_default();
+            match self.save_node_password(id, &pw) {
+                Ok(()) => crate::logs::push(crate::logs::Level::Info, &name, "已更新节点里保存的密码"),
+                Err(e) => crate::logs::push(crate::logs::Level::Error, &name, format!("保存新密码失败:{e}")),
+            }
+        }
+    }
+
     fn node_by_id(&self, id: NodeId) -> Option<&Node> {
         self.groups.iter().flat_map(|g| g.nodes.iter()).find(|n| n.id == id)
     }
