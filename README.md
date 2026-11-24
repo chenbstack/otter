@@ -16,6 +16,13 @@ Otter is a native desktop client for people who look after several Linux machine
 
 All your servers live in one window, organized in groups. Each one opens as a tab with its terminal and its files side by side, and you can keep as many sessions open as you like. Otter also has a local interface that lets an AI agent work in the terminal you already have open: it can read your server list freely, but taking over a session always needs your approval.
 
+## Highlights
+
+- **Native and small**: a Rust app drawing straight on the GPU, with no Electron or browser engine bundled. The macOS download is about 16 MB.
+- **Fast**: opens in well under a second, and long scrolling lists stay smooth.
+- **Nothing on the server**: no panel, no agent, no open port. Everything goes over SSH.
+- **Safe by default**: passwords and key passphrases are encrypted on disk, with the master key in the system keychain. An agent can never take over a terminal without your approval.
+
 ## Features
 
 - **Nodes & groups**: organize servers, search, import from CSV or `~/.ssh/config`.
