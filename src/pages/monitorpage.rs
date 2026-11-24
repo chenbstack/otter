@@ -4,23 +4,10 @@
 use std::time::Duration;
 
 use super::super::*;
-use super::dockerpages::{small, state_color};
-use crate::docker;
 use crate::monitor::{self, MonSnapshot};
 
 /// 图里画最近多少个点(2 秒一个,3 分钟)
 const POINTS: usize = 90;
-
-/// 占用率颜色:正常用本项的颜色,高了变橙、很高变红
-fn level(pct: f32, base: Rgba) -> Rgba {
-    if pct >= 90.0 {
-        c::danger()
-    } else if pct >= 70.0 {
-        c::warn()
-    } else {
-        base
-    }
-}
 
 fn pt(x: f32, y: f32) -> Point<Pixels> {
     point(px(x), px(y))
@@ -67,10 +54,6 @@ fn block_canvas(vals: Vec<f32>, max: Option<f32>, floor: f32, palette: Palette, 
             let bw = (slot - 2.0).max(1.0);
             let row = 4.0;
             let rows = (hh / row).floor().max(1.0);
-            for k in 1..4 {
-                let y = y0 + hh * k as f32 / 4.0;
-                window.paint_quad(gpui::fill(Bounds::new(pt(x0, y), size(px(w), px(1.0))), c::line()));
-            }
             let n = v.len();
             for (i, val) in v.iter().enumerate() {
                 let f = (val / top).clamp(0.0, 1.0);
@@ -130,8 +113,8 @@ fn graph_box(id: &'static str, tips: Vec<String>, h: f32, canvas: impl IntoEleme
     div().relative().w_full().h(px(h)).child(canvas).child(div().absolute().top_0().right_0().h(px(h)).w(relative(n as f32 / POINTS as f32)).child(slots))
 }
 
-/// 内存堆叠竖条图:每点从下到上 已用 / 缓存 / 空闲,三段加起来是总量
-fn mem_graph(hist: Vec<[f32; 3]>, h: f32) -> impl IntoElement {
+/// 内存竖条图:每点两段,下面已用、上面可用,加起来是总量(缓存和空闲只在悬浮提示和下面的条里)
+fn mem_graph(hist: Vec<[f32; 3]>, total: f32, h: f32) -> impl IntoElement {
     let samples = hist[hist.len().saturating_sub(POINTS)..].to_vec();
     let cols = mem_colors();
     let paint = samples.clone();
@@ -144,16 +127,17 @@ fn mem_graph(hist: Vec<[f32; 3]>, h: f32) -> impl IntoElement {
             let bw = (slot - 2.0).max(1.0);
             let n = paint.len();
             for (i, p) in paint.iter().enumerate() {
-                let total = (p[0] + p[1] + p[2]).max(1.0);
                 let x = x0 + w - (n - i) as f32 * slot + 1.0;
-                let mut y = y0 + hh;
-                for (k, v) in p.iter().enumerate() {
-                    let sh = (v / total * hh).round();
-                    if sh < 1.0 {
-                        continue;
-                    }
-                    y -= sh;
-                    let mut q = gpui::fill(Bounds::new(pt(x, y), size(px(bw), px(sh))), cols[k]);
+                // 不含缓存:已用从底往上,剩下的整段就是可用(= 总量 - 已用,包含空闲和可回收的缓存)
+                let used_h = (p[0] / total * hh).round().clamp(0.0, hh);
+                let avail_h = hh - used_h;
+                if used_h >= 1.0 {
+                    let mut q = gpui::fill(Bounds::new(pt(x, y0 + hh - used_h), size(px(bw), px(used_h))), cols[0]);
+                    q.corner_radii = gpui::Corners::all(px(1.0));
+                    window.paint_quad(q);
+                }
+                if avail_h >= 1.0 {
+                    let mut q = gpui::fill(Bounds::new(pt(x, y0), size(px(bw), px(avail_h))), c::online().opacity(0.8));
                     q.corner_radii = gpui::Corners::all(px(1.0));
                     window.paint_quad(q);
                 }
@@ -162,7 +146,7 @@ fn mem_graph(hist: Vec<[f32; 3]>, h: f32) -> impl IntoElement {
     )
     .absolute()
     .size_full();
-    let tips = samples.iter().map(|p| format!("已用 {}\n缓存 {}\n空闲 {}", monitor::fmt_bytes(p[0] as f64), monitor::fmt_bytes(p[1] as f64), monitor::fmt_bytes(p[2] as f64))).collect();
+    let tips = samples.iter().map(|p| format!("已用 {}\n缓存 {}\n空闲 {}\n可用 {}", monitor::fmt_bytes(p[0] as f64), monitor::fmt_bytes(p[1] as f64), monitor::fmt_bytes(p[2] as f64), monitor::fmt_bytes((total - p[0]).max(0.0) as f64))).collect();
     graph_box("mem-g", tips, h, canvas)
 }
 
@@ -203,27 +187,20 @@ fn cells(frac: f32, n: usize, fixed: Option<Rgba>) -> Div {
 
 /// 带标题的边框面板:标题是等宽小写,主色;右上角放一小段说明
 fn panel(title: &'static str, accent: Rgba, right: Div) -> Div {
-    div()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .px(px(10.0))
-        .py(px(8.0))
-        .rounded(px(t::RADIUS_MD))
-        .border_1()
-        .border_color(accent.opacity(0.32))
-        .bg(c::field().opacity(0.55))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(div().text_size(px(t::TYPE_CONTROL)).font_family(MONO).font_weight(FontWeight::BOLD).text_color(accent).child(title))
-                .child(div().flex_1().h(px(1.0)).bg(accent.opacity(0.18)))
-                .child(right),
-        )
+    let glow = |c: Rgba, blur: f32| gpui::BoxShadow { color: gpui::Hsla::from(c), offset: gpui::point(px(0.0), px(0.0)), blur_radius: px(blur), spread_radius: px(0.0), inset: false };
+    // 不用底色:只在顶上压一条主题色线,标题前一小段发光竖条
+    let base = div().min_w_0().flex().flex_col().gap(px(6.0)).px(px(10.0)).py(px(8.0)).rounded(px(t::RADIUS_SM)).border_t_2().border_color(accent.opacity(0.55));
+    base.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(div().w(px(3.0)).h(px(12.0)).flex_shrink_0().rounded_full().bg(accent).shadow(vec![glow(accent.opacity(0.9), 6.0)]))
+            .child(div().text_size(px(t::TYPE_CONTROL)).font_family(MONO).font_weight(FontWeight::BOLD).text_color(accent).child(title))
+            .child(div().flex_1().h(px(1.0)).bg(accent.opacity(0.18)))
+            .child(right),
+    )
 }
 
 fn tag(s: String) -> Div {
@@ -251,6 +228,31 @@ fn meter_row(name: String, frac: f32, value: String, fixed: Option<Rgba>, name_w
 }
 
 /// 核心的迷你柱状图:每根竖条 0.5px、间距 1px(横向尽量密),高度分 9 档,没有网格线
+const SPARK_W: f32 = 64.0;
+const SPARK_SLOTS: usize = 32;
+
+/// 进程的 CPU 小图:固定 32 列、每列 2px(竖条 1px),历史不满时从右边起;颜色随占用从绿到红
+fn proc_spark(hist: Vec<f32>, max: f32, ncores: f32) -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| (),
+        move |b, _, window, _| {
+            let (x0, y0) = (f32::from(b.origin.x), f32::from(b.origin.y));
+            let (w, hh) = (f32::from(b.size.width), f32::from(b.size.height));
+            let slot = w / SPARK_SLOTS as f32;
+            let v = &hist[hist.len().saturating_sub(SPARK_SLOTS)..];
+            let n = v.len();
+            for (i, val) in v.iter().enumerate() {
+                let ch = (hh * val / max).clamp(1.0, hh);
+                let x = x0 + w - (n - i) as f32 * slot;
+                window.paint_quad(gpui::fill(Bounds::new(pt(x, y0 + hh - ch), size(px((slot - 1.0).max(1.0)), px(ch))), heat(val / 100.0 / ncores * 2.0)));
+            }
+        },
+    )
+    .w(px(SPARK_W))
+    .flex_shrink_0()
+    .h(px(14.0))
+}
+
 fn core_canvas(vals: Vec<f32>) -> impl IntoElement {
     gpui::canvas(
         |_, _, _| (),
@@ -304,7 +306,7 @@ fn cpu_panel(m: &MonSnapshot) -> Div {
     }
     let cores = if scroll { div().id("cpu-cores").h(px(vis as f32 * 20.0)).overflow_y_scroll().child(list).into_any_element() } else { list.into_any_element() };
     let load = kv("负载", format!("{:.2}  {:.2}  {:.2}", n.load[0], n.load[1], n.load[2]), c::text());
-    let head = div().flex().flex_row().items_baseline().gap(px(8.0)).child(div().text_size(px(34.0)).font_family(MONO).font_weight(FontWeight::BOLD).text_color(heat(n.cpu / 100.0)).child(format!("{:.0}%", n.cpu))).child(tag(format!("{} 核", n.cores.len().max(1))));
+    let head = div().flex().flex_row().items_baseline().gap(px(8.0)).child(div().text_size(px(34.0)).font_family(MONO).font_weight(FontWeight::BOLD).text_color(heat(n.cpu / 100.0)).child(format!("{:.0}%", n.cpu)));
     panel("cpu", c::cpu(), tag(n.host.cpu_model.clone()))
         .child(
             div()
@@ -328,11 +330,11 @@ fn mem_panel(m: &MonSnapshot) -> Div {
         .child(meter_row("已用".into(), n.mem_used as f32 / t, monitor::fmt_bytes(n.mem_used as f64), Some(mc[0]), 34.0, 64.0))
         .child(meter_row("缓存".into(), n.mem_cache as f32 / t, monitor::fmt_bytes(n.mem_cache as f64), Some(mc[1]), 34.0, 64.0))
         .child(meter_row("空闲".into(), n.mem_free as f32 / t, monitor::fmt_bytes(n.mem_free as f64), Some(mc[2]), 34.0, 64.0))
-        .child(meter_row("可用".into(), free as f32 / t, monitor::fmt_bytes(free as f64), Some(c::online().opacity(0.8)), 34.0, 64.0));
+        .child(meter_row("可用".into(), free as f32 / t, monitor::fmt_bytes(free as f64), Some(c::online()), 34.0, 64.0));
     if n.swap_total > 0 {
         rows = rows.child(meter_row("Swap".into(), n.swap_used as f32 / n.swap_total as f32, monitor::fmt_bytes(n.swap_used as f64), Some(c::warn().opacity(0.8)), 34.0, 64.0));
     }
-    let p = panel("mem", c::mem(), tag(format!("共 {}", monitor::fmt_bytes(n.mem_total as f64)))).child(mem_graph(m.mem_s.clone(), 64.0)).child(rows);
+    let p = panel("mem", c::mem(), tag(format!("共 {}", monitor::fmt_bytes(n.mem_total as f64)))).child(mem_graph(m.mem_s.clone(), n.mem_total.max(1) as f32, 64.0)).child(rows);
     p
 }
 
@@ -366,25 +368,22 @@ fn disk_panel(m: &MonSnapshot) -> Div {
         p = p.child(tag("读不到磁盘用量".into()));
     }
     let peak = |h: &Vec<f32>| h.iter().rev().take(POINTS).cloned().fold(0.0, f32::max);
-    let io = |name: &'static str, color: Rgba, now: f32, iops: f32, hist: &Vec<f32>, gid: &'static str, accent: Rgba| {
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .child(div().flex().flex_row().items_baseline().gap(px(6.0)).child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(name)).child(div().text_size(px(t::TYPE_CONTROL)).font_family(MONO).font_weight(FontWeight::SEMIBOLD).text_color(color).child(monitor::fmt_rate(now))))
-            .child(block_graph(hist.clone(), (gid, name, monitor::fmt_rate), None, 1_048_576.0, 30.0, Palette::fixed(accent), false))
-            .child(tag(format!("{iops:.0} IOPS · 峰值 {}", monitor::fmt_rate(peak(hist)))))
-    };
-    p.child(
+    let (pr, pw) = (peak(&m.rd_h), peak(&m.wr_h));
+    // 上下对称:同一个满刻度,读向上、写向下
+    let top = pr.max(pw).max(1_048_576.0);
+    let head = |name: &'static str, color: Rgba, now: f32, iops: f32| {
         div()
             .flex()
             .flex_row()
-            .gap(px(10.0))
-            .child(io("读", c::disk(), n.disk_r, n.disk_riops, &m.rd_h, "rd-g", c::disk()))
-            .child(io("写", c::cpu(), n.disk_w, n.disk_wiops, &m.wr_h, "wr-g", c::cpu())),
-    )
+            .items_baseline()
+            .gap(px(6.0))
+            .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(name))
+            .child(div().text_size(px(t::TYPE_CONTROL)).font_family(MONO).font_weight(FontWeight::SEMIBOLD).text_color(color).child(monitor::fmt_rate(now)))
+            .child(tag(format!("{iops:.0} IOPS")))
+    };
+    p.child(div().flex().flex_row().gap(px(24.0)).child(head("↑ 读", c::disk(), n.disk_r, n.disk_riops)).child(head("↓ 写", c::cpu(), n.disk_w, n.disk_wiops)))
+        .child(mirror_graph("io-g", ("↑ 读", &m.rd_h, c::disk()), ("↓ 写", &m.wr_h, c::cpu()), top, 30.0))
+        .child(tag(format!("峰值 读 {}  写 {}", monitor::fmt_rate(pr), monitor::fmt_rate(pw))))
 }
 
 fn net_panel(m: &MonSnapshot) -> Div {
@@ -395,7 +394,7 @@ fn net_panel(m: &MonSnapshot) -> Div {
     let top = peak_rx.max(peak_tx).max(10_240.0);
     panel("net", c::net(), tag(format!("峰值 ↓{} ↑{}", monitor::fmt_rate(peak_rx), monitor::fmt_rate(peak_tx))))
         .child(div().flex().flex_row().gap(px(24.0)).child(kv("↓ 下载", monitor::fmt_rate(n.net_rx), c::net())).child(kv("↑ 上传", monitor::fmt_rate(n.net_tx), c::mem())))
-        .child(div().flex().flex_col().child(block_graph(m.rx_h.clone(), ("rx-g","↓ 下载", monitor::fmt_rate), Some(top), top, 44.0, Palette::fixed(c::net()), false)).child(div().h(px(1.0)).bg(c::border_strong())).child(block_graph(m.tx_h.clone(), ("tx-g","↑ 上传", monitor::fmt_rate), Some(top), top, 44.0, Palette::fixed(c::mem()), true)))
+        .child(mirror_graph("net-g", ("↓ 下载", &m.rx_h, c::net()), ("↑ 上传", &m.tx_h, c::mem()), top, 44.0))
 }
 
 impl Home {
@@ -429,19 +428,16 @@ impl Home {
                 )
                 .child("LIVE · 2s"),
         );
-        for s in [&h.name, &h.os, &h.kernel] {
+        for s in [&h.name, &h.os] {
             if !s.is_empty() {
                 top = top.child(chip(s.clone(), c::secondary()));
             }
         }
         top = top.child(chip(format!("运行 {}", monitor::fmt_uptime(m.now.uptime)), c::secondary()));
-        if !h.cpu_model.is_empty() {
-            top = top.child(chip(h.cpu_model.clone(), c::muted()));
-        }
 
         // CPU 独占一整行;下面左侧叠放内存、网络、磁盘,右侧是进程;容器在进程下面
         let left = div().w(px(340.0)).flex_shrink_0().flex().flex_col().gap(px(8.0)).child(mem_panel(&m)).child(net_panel(&m)).child(disk_panel(&m));
-        let mid = div().flex().flex_row().items_start().gap(px(8.0)).child(left).child(div().flex_1().min_w(px(0.0)).flex().flex_col().gap(px(8.0)).child(self.proc_card(&m, cx)).child(self.container_card()));
+        let mid = div().flex().flex_row().items_start().gap(px(8.0)).child(left).child(div().flex_1().min_w(px(0.0)).flex().flex_col().gap(px(8.0)).child(self.proc_card(&m, cx)));
 
         div().flex().flex_col().gap(px(8.0)).child(top).child(cpu_panel(&m)).child(mid).into_any_element()
     }
@@ -500,15 +496,15 @@ impl Home {
             .when(show_thr, |d| d.child(cell(34.0, true).child("线程")))
             .when(show_user, |d| d.child(cell(64.0, false).child("用户")))
             .child(cell(58.0, true).child("内存"))
-            .when(show_spark, |d| d.child(cell(52.0, false).child("")))
+            .when(show_spark, |d| d.child(cell(SPARK_W, false).child("")))
             .child(cell(44.0, true).child("CPU%"));
         let mut col = panel("proc", c::accent(), right).child(head);
-        for p in procs.iter().take(15) {
+        for p in procs.iter().take(20) {
             let idle = p.cpu < 0.05;
             let dim = |col: Rgba| if idle { col.opacity(0.55) } else { col };
             let f = p.cpu / 100.0 / ncores * 2.0;
             let spark_max = p.hist.iter().cloned().fold(5.0_f32, f32::max);
-            let spark = div().w(px(52.0)).flex_shrink_0().h(px(14.0)).flex().flex_row().items_end().gap(px(1.0)).children(p.hist.iter().map(move |h| div().flex_1().h(px((14.0 * h / spark_max).max(1.0))).rounded_t(px(1.0)).bg(heat(*h / 100.0 / ncores * 2.0))));
+            let spark = proc_spark(p.hist.clone(), spark_max, ncores);
             col = col.child(
                 div()
                     .flex()
@@ -529,49 +525,20 @@ impl Home {
         }
         col
     }
+}
 
-    /// 容器:有 Docker 才有内容;没装或没权限就简单说一句
-    fn container_card(&self) -> Div {
-        let snap = &self.dock.snap;
-        let has = !snap.containers.is_empty() || self.dock.docker_ok;
-        let up = snap.running();
-        let right = div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(if has { format!("{up}/{} 运行中", snap.containers.len()) } else { "未使用".to_string() });
-        let mut col = panel("containers", c::online(), right);
-        if !has {
-            let why = match &self.dock.docker_problem {
-                Some(docker::Problem::NoDocker) | None => "这台服务器没有安装 Docker".to_string(),
-                Some(docker::Problem::DaemonDown(_)) => "Docker 没有在运行".to_string(),
-                Some(docker::Problem::NoPermission(_)) => "没有权限运行 docker".to_string(),
-                Some(docker::Problem::Other(m)) => format!("读取 Docker 失败:{m}"),
-            };
-            return col.child(small(why, c::ghost()));
-        }
-        let mut list: Vec<&docker::Container> = snap.containers.iter().collect();
-        list.sort_by(|a, b| {
-            let ca = snap.stats.get(&a.id).map_or(0.0, |s| s.cpu);
-            let cb = snap.stats.get(&b.id).map_or(0.0, |s| s.cpu);
-            b.running().cmp(&a.running()).then(cb.partial_cmp(&ca).unwrap_or(std::cmp::Ordering::Equal))
-        });
-        let attention = snap.attention().len();
-        if attention > 0 {
-            col = col.child(small(format!("{attention} 个容器需要关注"), c::warn()));
-        }
-        for ct in list.into_iter().take(10) {
-            let st = snap.stats.get(&ct.id).copied().unwrap_or_default();
-            let (fg, _) = state_color(ct);
-            col = col.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(t::TYPE_CONTROL))
-                    .child(div().size(px(7.0)).flex_shrink_0().rounded_full().bg(fg))
-                    .child(div().flex_1().min_w_0().truncate().text_color(c::secondary()).child(ct.name.clone()))
-                    .child(div().w(px(52.0)).flex().justify_end().font_family(MONO).text_color(c::muted()).child(if ct.running() { format!("{:.1}%", st.cpu) } else { "—".into() }))
-                    .child(div().w(px(72.0)).flex().justify_end().font_family(MONO).text_color(c::muted()).child(if ct.running() { monitor::fmt_bytes(st.mem as f64) } else { "—".into() })),
-            );
-        }
-        col
-    }
+/// 上下对称的双向图:上半 `up`、下半 `down`,共用一层悬浮,悬停时同时显示这一刻的两个值
+fn mirror_graph(id: &'static str, up: (&'static str, &Vec<f32>, Rgba), down: (&'static str, &Vec<f32>, Rgba), top: f32, half: f32) -> Div {
+    let u = up.1[up.1.len().saturating_sub(POINTS)..].to_vec();
+    let d = down.1[down.1.len().saturating_sub(POINTS)..].to_vec();
+    let tips = u.iter().zip(d.iter()).map(|(a, b)| format!("{} {}\n{} {}", up.0, monitor::fmt_rate(*a), down.0, monitor::fmt_rate(*b))).collect();
+    let canvases = div()
+        .absolute()
+        .size_full()
+        .flex()
+        .flex_col()
+        .child(div().relative().w_full().h(px(half)).child(block_canvas(u, Some(top), top, Palette::fixed(up.2), false)))
+        .child(div().h(px(1.0)))
+        .child(div().relative().w_full().h(px(half)).child(block_canvas(d, Some(top), top, Palette::fixed(down.2), true)));
+    graph_box(id, tips, half * 2.0 + 1.0, canvases)
 }

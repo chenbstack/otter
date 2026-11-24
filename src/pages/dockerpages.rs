@@ -55,14 +55,11 @@ pub(crate) struct DockUi {
     pub proc_by_mem: bool,
     /// 内容区宽度(进程表窄了就收掉次要的列)
     pub view_w: f32,
-    /// Docker 是否可用,不可用时的原因(概览页的容器卡片用)
-    pub docker_ok: bool,
-    pub docker_problem: Option<Problem>,
 }
 
 impl DockUi {
     pub fn new() -> Self {
-        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, sort: (SortKey::Name, true), confirm: None, notice: None, polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0, docker_ok: false, docker_problem: None }
+        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, sort: (SortKey::Name, true), confirm: None, notice: None, polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
     }
 }
 
@@ -143,13 +140,10 @@ impl Home {
             self.dock.snap = Arc::new(Snapshot::default());
             self.dock.mon = None;
             self.dock.mon_err = None;
-            self.dock.docker_ok = false;
-            self.dock.docker_problem = None;
             self.dock.seen = 0;
         }
         if self.demo {
             self.dock.snap = Arc::new(docker::demo_snapshot(&self.node().stacks));
-            self.dock.docker_ok = true;
             self.dock.mon = Some(Arc::new(crate::monitor::demo_snapshot()));
             return;
         }
@@ -174,8 +168,6 @@ impl Home {
         d.want_volume_sizes(want_sizes);
         self.dock.mon = d.monitor();
         self.dock.mon_err = d.monitor_error().map(Into::into);
-        self.dock.docker_problem = d.problem();
-        self.dock.docker_ok = d.snapshot().is_some();
         let notice = d.take_notice();
         let ver = d.version();
         let snap = (ver != self.dock.seen).then(|| d.snapshot()).flatten();

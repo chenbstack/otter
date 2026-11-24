@@ -132,7 +132,7 @@ pub struct Metrics {
     pub procs: Vec<Proc>,
 }
 
-const PROC_KEEP: usize = 40;
+const PROC_KEEP: usize = 60;
 
 /// 界面读的快照:当前读数 + 历史折线
 #[derive(Clone, Debug, Default)]
@@ -165,7 +165,7 @@ pub struct State {
     proc_h: HashMap<u32, VecDeque<f32>>,
 }
 
-const PROC_HIST: usize = 12;
+const PROC_HIST: usize = 32;
 
 fn push<T>(q: &mut VecDeque<T>, v: T) {
     q.push_back(v);
