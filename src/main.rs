@@ -215,7 +215,7 @@ impl Home {
             import: None,
             add_menu: false,
             key_copied: None,
-            page: Page::Stacks,
+            page: Page::Overview,
             hide_charts: false,
             cols: 2,
             svc_w: SVC_MIN_W,

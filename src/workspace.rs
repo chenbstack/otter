@@ -20,7 +20,7 @@ impl NodeMode {
         match self {
             NodeMode::Terminal => "终端",
             NodeMode::Files => "SFTP",
-            NodeMode::Containers => "容器",
+            NodeMode::Containers => "服务器",
         }
     }
 
@@ -78,7 +78,7 @@ impl Tab {
         Self {
             id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             kind,
-            page: Page::Stacks,
+            page: Page::Overview,
             scroll: VirtualListScrollHandle::new(),
             files,
             follow: true,
