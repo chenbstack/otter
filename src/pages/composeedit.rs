@@ -3,7 +3,8 @@
 //! 文件位置从容器标签里读(`docker inspect`),内容用 SSH 读写;保存只写文件,
 //! 「重新部署」另外一个按钮(`docker compose up -d`),确认后才会影响正在运行的服务。
 
-use gpui_kit::component::input::{Editor, EditorState};
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::input::{Editor, EditorState, Input, InputState};
 
 use super::super::*;
 use super::dockerpages::DockAsk;
@@ -19,6 +20,30 @@ pub(crate) enum Phase {
     Ready,
     Err(String),
 }
+
+/// 新建堆栈
+#[derive(Default)]
+pub(crate) struct CreateUi {
+    open: bool,
+    name: Option<Entity<InputState>>,
+    path: Option<Entity<InputState>>,
+    /// 上一次自动填进「存储地址」的值:地址还等于它,说明用户没改过,可以跟着名称变
+    last_auto: String,
+    editor: Option<Entity<EditorState>>,
+    env_editor: Option<Entity<EditorState>>,
+    tab: Tab,
+    creating: bool,
+}
+
+const DEFAULT_ROOT: &str = "/opt/otter/docker/compose";
+
+const NEW_TEMPLATE: &str = "services:
+  app:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - \"8080:80\"
+";
 
 #[derive(Clone, Copy, PartialEq, Default)]
 enum Tab {
@@ -58,6 +83,7 @@ pub(crate) struct CompUi {
     pull: bool,
     /// 「应用」正在执行(收到结果后关闭抽屉或恢复按钮)
     pub(super) applying: bool,
+    pub(super) create: CreateUi,
     /// 打开(或上次保存)时的内容,用来判断有没有改动
     orig: String,
 }
@@ -148,6 +174,15 @@ impl Home {
 
     /// 收到「应用」的结果:成功关闭抽屉,失败恢复按钮(失败原因由通知条显示)
     pub(super) fn comp_applied(&mut self, notice: &str, cx: &mut Context<Self>) {
+        if self.dock.comp.create.creating {
+            if notice.starts_with("已创建") {
+                self.dock.comp.create.creating = false;
+                self.dock.comp.create.open = false;
+                cx.notify();
+            } else if notice.starts_with("创建失败") {
+                self.dock.comp.create.creating = false;
+            }
+        }
         if !self.dock.comp.applying {
             return;
         }
@@ -244,6 +279,7 @@ impl Home {
 
     /// 每次渲染前调用:收后台读到的文件位置和内容
     pub(crate) fn comp_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.create_sync(window, cx);
         let Some(stack) = self.dock.comp.open.clone() else { return };
         self.env_sync(window, cx);
         if self.demo || !matches!(self.dock.comp.phase, Phase::Loading) {
@@ -376,7 +412,16 @@ impl Home {
         let ready = matches!(phase, Phase::Ready);
         let dirty = self.comp_dirty(cx);
         let w = (f32::from(window.viewport_size().width) * 0.62).clamp(520.0, 820.0);
-        let sub = if path.is_empty() { "正在读取 compose 文件…".to_string() } else { path.clone() };
+        let sub = if path.is_empty() { "正在读取…".to_string() } else { path.clone() };
+        let info = div()
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .gap(px(12.0))
+            .mx(px(16.0))
+            .mt(px(14.0))
+            .child(field_col("堆栈名称", Some(190.0), div().truncate().child(stack.clone()).into_any_element(), false, true))
+            .child(field_col("文件路径", None, div().min_w_0().truncate().child(sub).into_any_element(), true, true));
         let head = div()
             .h(px(52.0))
             .flex_shrink_0()
@@ -392,7 +437,7 @@ impl Home {
             .child(div().w(px(4.0)))
             .child(super::syspages::chip(("comp-tab", 0), "Compose", tab == Tab::Compose).on_click(cx.listener(|this, _, window, cx| this.comp_tab(Tab::Compose, window, cx))))
             .child(super::syspages::chip(("comp-tab", 1), ".env", tab == Tab::Env).on_click(cx.listener(|this, _, window, cx| this.comp_tab(Tab::Env, window, cx))))
-            .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CONTROL)).font_family(MONO).text_color(c::muted()).child(sub))
+            .child(div().flex_1())
             .child(super::syspages::tip(super::dockerpages::icon_btn(("comp-x", 0), IconName::X, c::muted()).on_click(cx.listener(|this, _, _, cx| this.comp_close(cx))), "关闭"));
         let hint = if ready && tab == Tab::Compose {
             managed_hint(&c.path, c.others.len())
@@ -508,7 +553,7 @@ impl Home {
             )
             .child(save);
         Some(
-            crate::ui::drawer("comp-drawer", w, cx.listener(|this, _, _, cx| this.comp_close(cx)), [head.into_any_element()].into_iter().chain(hint.map(|h| h.into_any_element())).chain([body, foot.into_any_element()])).on_key_down(
+            crate::ui::drawer("comp-drawer", w, cx.listener(|this, _, _, cx| this.comp_close(cx)), [head.into_any_element(), info.into_any_element()].into_iter().chain(hint.map(|h| h.into_any_element())).chain([body, foot.into_any_element()])).on_key_down(
                 cx.listener(|this, e: &KeyDownEvent, _, cx| {
                     if e.keystroke.key == "escape" {
                         this.comp_close(cx);
@@ -521,6 +566,34 @@ impl Home {
             ),
         )
     }
+}
+
+/// 表单里「标签 + 一个框」的一列;`w` 为空时占满剩余宽度
+fn field_col(label: &'static str, w: Option<f32>, inner: AnyElement, mono: bool, dim: bool) -> Div {
+    div()
+        .flex_shrink_0()
+        .when(w.is_none(), |d| d.flex_1().min_w_0())
+        .when_some(w, |d, w| d.w(px(w)))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(label))
+        .child(
+            div()
+                .h(px(34.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .px(px(12.0))
+                .rounded(px(t::RADIUS_MD))
+                .bg(c::field())
+                .border_1()
+                .border_color(c::field_border())
+                .text_size(px(t::TYPE_CONTROL))
+                .when(mono, |d| d.font_family(MONO))
+                .when(dim, |d| d.text_color(c::muted()).opacity(0.8))
+                .child(inner),
+        )
 }
 
 /// 文件看起来由其他程序管理,或堆栈由多个文件组成时的提示
@@ -560,3 +633,195 @@ const DEMO_COMPOSE: &str = "services:
 volumes:
   db-data:
 ";
+
+// ---- 新建堆栈 ----------------------------------------------------------------
+
+fn default_dir(name: &str) -> String {
+    format!("{DEFAULT_ROOT}/{name}")
+}
+
+impl Home {
+    pub(crate) fn create_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let c = &mut self.dock.comp.create;
+        if c.name.is_none() {
+            let n = cx.new(|cx| InputState::new(window, cx).placeholder("小写字母、数字、- 和 _,如 myapp"));
+            cx.observe(&n, |_, _, cx| cx.notify()).detach();
+            let p = cx.new(|cx| InputState::new(window, cx).placeholder("堆栈文件所在的目录"));
+            cx.observe(&p, |_, _, cx| cx.notify()).detach();
+            let e = cx.new(|cx| EditorState::new(window, cx).language("yaml").line_number(true));
+            cx.observe(&e, |_, _, cx| cx.notify()).detach();
+            c.name = Some(n);
+            c.path = Some(p);
+            let ev = cx.new(|cx| EditorState::new(window, cx).language("yaml").line_number(true));
+            cx.observe(&ev, |_, _, cx| cx.notify()).detach();
+            c.editor = Some(e);
+            c.env_editor = Some(ev);
+        }
+        c.open = true;
+        c.creating = false;
+        c.tab = Tab::Compose;
+        c.last_auto = default_dir("");
+        let (n, p, e) = (c.name.clone(), c.path.clone(), c.editor.clone());
+        let auto = c.last_auto.clone();
+        if let (Some(n), Some(p), Some(e)) = (n, p, e) {
+            n.update(cx, |s, cx| s.set_value("", window, cx));
+            p.update(cx, |s, cx| s.set_value(&auto, window, cx));
+            e.update(cx, |s, cx| s.set_value(NEW_TEMPLATE, window, cx));
+            if let Some(ev) = self.dock.comp.create.env_editor.clone() {
+                ev.update(cx, |s, cx| s.set_value("", window, cx));
+            }
+            let f = n.focus_handle(cx);
+            window.focus(&f, cx);
+        }
+        cx.notify();
+    }
+
+    fn create_close(&mut self, cx: &mut Context<Self>) {
+        self.dock.comp.create.open = false;
+        cx.notify();
+    }
+
+    /// 存储地址没被用户改过时,跟着名称自动变
+    fn create_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let c = &self.dock.comp.create;
+        if !c.open {
+            return;
+        }
+        let (Some(n), Some(p)) = (c.name.clone(), c.path.clone()) else { return };
+        let auto = default_dir(n.read(cx).value().trim());
+        let cur = p.read(cx).value().to_string();
+        if cur == c.last_auto && cur != auto {
+            self.dock.comp.create.last_auto = auto.clone();
+            p.update(cx, |s, cx| s.set_value(&auto, window, cx));
+        }
+    }
+
+    fn create_submit(&mut self, cx: &mut Context<Self>) {
+        let c = &self.dock.comp.create;
+        if c.creating {
+            return;
+        }
+        let (Some(n), Some(p), Some(e)) = (c.name.clone(), c.path.clone(), c.editor.clone()) else { return };
+        let name = n.read(cx).value().trim().to_string();
+        let dir = p.read(cx).value().trim().to_string();
+        let mut text = e.read(cx).value().to_string();
+        let mut env = c.env_editor.clone().map(|v| v.read(cx).value().to_string()).unwrap_or_default();
+        let err = if !crate::docker::valid_project(&name) {
+            Some("堆栈名只能用小写字母、数字、- 和 _,并以字母或数字开头")
+        } else if !dir.starts_with('/') || dir.chars().any(|c| c.is_control()) {
+            Some("存储地址要是以 / 开头的绝对路径")
+        } else if text.trim().is_empty() {
+            Some("compose 内容不能是空的")
+        } else if self.node().stacks.iter().any(|s| s.name == name) {
+            Some("已经有同名的堆栈")
+        } else {
+            None
+        };
+        if let Some(m) = err {
+            self.dock.notice = Some((m.into(), std::time::Instant::now()));
+            cx.notify();
+            return;
+        }
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        if !self.demo {
+            self.dock.comp.create.creating = true;
+        }
+        if !env.trim().is_empty() && !env.ends_with('\n') {
+            env.push('\n');
+        }
+        if env.trim().is_empty() {
+            env.clear();
+        }
+        self.dock_act(Action::ComposeCreate { project: name, dir, text, env }, cx);
+    }
+
+    /// 新建抽屉
+    pub(crate) fn create_drawer(&self, window: &Window, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let c = &self.dock.comp.create;
+        if !c.open {
+            return None;
+        }
+        let w = (f32::from(window.viewport_size().width) * 0.62).clamp(520.0, 820.0);
+        let creating = c.creating;
+        let name = c.name.clone().map(|v| v.read(cx).value().trim().to_string()).unwrap_or_default();
+        let dir = c.path.clone().map(|v| v.read(cx).value().trim().to_string()).unwrap_or_default();
+        let head = div()
+            .h(px(52.0))
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(16.0))
+            .border_b_1()
+            .border_color(c::border())
+            .child(icon(IconName::Layers, 16.0, c::secondary()))
+            .child(div().flex_1().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::BOLD).child("创建堆栈"))
+            .child(super::syspages::tip(super::dockerpages::icon_btn(("create-x", 0), IconName::X, c::muted()).on_click(cx.listener(|this, _, _, cx| this.create_close(cx))), "关闭"));
+        let input = |i: Option<Entity<InputState>>| i.map(|i| div().flex_1().min_w_0().child(Input::new(&i).appearance(false).with_size(px(12.0 / 0.875))).into_any_element()).unwrap_or_else(|| div().into_any_element());
+        let tab = c.tab;
+        let tabs = div()
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .child(super::syspages::chip(("create-tab", 0), "docker-compose.yml", tab == Tab::Compose).on_click(cx.listener(|this, _, _, cx| {
+                this.dock.comp.create.tab = Tab::Compose;
+                cx.notify();
+            })))
+            .child(super::syspages::chip(("create-tab", 1), ".env", tab == Tab::Env).on_click(cx.listener(|this, _, _, cx| {
+                this.dock.comp.create.tab = Tab::Env;
+                cx.notify();
+            })));
+        let ed = if tab == Tab::Env { c.env_editor.clone() } else { c.editor.clone() };
+        let editor = div().flex_1().min_h_0().flex().flex_col().gap(px(8.0)).child(tabs).child(
+            div().flex_1().min_h_0().rounded(px(t::RADIUS_MD)).border_1().border_color(c::field_border()).bg(c::field()).overflow_hidden().children(ed.map(|e| Editor::new(&e).h_full())),
+        );
+        let row = div()
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .gap(px(12.0))
+            .child(field_col("堆栈名称", Some(190.0), input(c.name.clone()), false, false))
+            .child(field_col("存储地址", None, input(c.path.clone()), true, false));
+        let body = div().flex_1().min_h_0().flex().flex_col().gap(px(14.0)).p(px(16.0)).child(row).child(editor);
+        let hint = if name.is_empty() { String::new() } else { format!("将创建 {}/docker-compose.yml 并启动", dir.trim_end_matches('/')) };
+        let create = div()
+            .id("create-ok")
+            .h(px(34.0))
+            .px(px(18.0))
+            .flex()
+            .items_center()
+            .rounded(px(t::RADIUS_MD))
+            .text_size(px(t::TYPE_CONTROL))
+            .font_weight(FontWeight::SEMIBOLD)
+            .bg(c::accent())
+            .text_color(c::on_accent())
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.88))
+            .when(creating, |d| d.opacity(0.6))
+            .child(if creating { "创建中…" } else { "创建" })
+            .on_click(cx.listener(|this, _, _, cx| this.create_submit(cx)));
+        let foot = div()
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(16.0))
+            .py(px(12.0))
+            .border_t_1()
+            .border_color(c::border())
+            .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(hint))
+            .child(create);
+        Some(crate::ui::drawer("create-drawer", w, cx.listener(|this, _, _, cx| this.create_close(cx)), [head.into_any_element(), body.into_any_element(), foot.into_any_element()]).on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+            if e.keystroke.key == "escape" {
+                this.create_close(cx);
+                cx.stop_propagation();
+            }
+        })))
+    }
+}

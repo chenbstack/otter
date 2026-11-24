@@ -339,6 +339,13 @@ impl Home {
                 );
             }
         }
+        if self.page == Page::Stacks {
+            v.push(
+                button("stack-create", IconName::Plus, "创建堆栈")
+                    .on_click(cx.listener(|this, _, window, cx| this.create_open(window, cx)))
+                    .into_any_element(),
+            );
+        }
         if self.page == Page::Images {
             v.push(
                 button("dock-pull", IconName::Download, "拉取镜像")
@@ -429,6 +436,9 @@ impl Home {
         let mut v: Vec<AnyElement> = Vec::new();
         v.extend(self.ct_drawer(window, cx));
         if let Some(m) = self.cron_dialog(cx) {
+            v.push(m.into_any_element());
+        }
+        if let Some(m) = self.create_drawer(window, cx) {
             v.push(m.into_any_element());
         }
         if let Some(m) = self.comp_dialog(window, cx) {

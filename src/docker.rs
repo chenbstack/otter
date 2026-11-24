@@ -449,6 +449,8 @@ pub enum Action {
     /// 运维页的操作(结束进程、重启服务、保存 crontab……),在服务器上执行一段脚本
     Sys(crate::sysops::Job),
     /// 按 compose 文件重新部署堆栈(`docker compose up -d`)
+    /// 新建堆栈:建目录、写 docker-compose.yml,再 `docker compose up -d`
+    ComposeCreate { project: String, dir: String, text: String, env: String },
     ComposeUp { project: String, dir: String, files: Vec<String>, envs: Vec<String>, pull: bool },
 }
 
@@ -468,7 +470,7 @@ impl Action {
             // 走 `run_daemon`,不经过 docker 命令
             Action::SaveDaemon(_) | Action::SaveRestartDaemon(_) => Vec::new(),
             Action::Logout(h) => v(&["logout"], h),
-            Action::ConfirmInsecure(_) | Action::Sys(_) => Vec::new(),
+            Action::ConfirmInsecure(_) | Action::Sys(_) | Action::ComposeCreate { .. } => Vec::new(),
             Action::ComposeUp { project, dir, files, envs, pull } => {
                 let mut v: Vec<String> = ["compose", "-p", project, "--project-directory", dir].map(String::from).to_vec();
                 for f in files {
@@ -489,7 +491,7 @@ impl Action {
         match self {
             Action::Start(n) | Action::Stop(n) | Action::Restart(n) | Action::Remove(n) | Action::Pull(n) | Action::RemoveImage(n) | Action::RemoveVolume(n) | Action::Logout(n) | Action::ConfirmInsecure(n) => n,
             Action::Sys(j) => &j.target,
-            Action::ComposeUp { project, .. } => project,
+            Action::ComposeUp { project, .. } | Action::ComposeCreate { project, .. } => project,
             Action::PruneImages => "未使用的镜像",
             Action::PruneVolumes => "未使用的存储卷",
             Action::SaveDaemon(_) | Action::SaveRestartDaemon(_) => "daemon.json",
@@ -512,6 +514,7 @@ impl Action {
             Action::ConfirmInsecure(_) => "启用 HTTP 仓库",
             Action::Sys(_) => "执行",
             Action::ComposeUp { .. } => "应用",
+            Action::ComposeCreate { .. } => "创建",
         }
     }
 }
@@ -1659,6 +1662,62 @@ async fn monitor_task(session: Arc<SshHandle<Client>>, sh: Arc<Shared>) {
     }
 }
 
+/// compose 项目名:小写字母、数字、`-`、`_`,以字母或数字开头
+pub fn valid_project(s: &str) -> bool {
+    let mut ch = s.chars();
+    ch.next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) && s.len() <= 63 && ch.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
+}
+
+/// 新建堆栈:先用当前用户建目录写文件,没权限再用管理员权限;写好后 `docker compose up -d`
+async fn run_create(r: &Runner, sh: &Shared, project: &str, dir: &str, text: &str, env: &str) {
+    let key = format!("创建:{project}");
+    let fail = |msg: String| {
+        logs::push(logs::Level::Info, "Docker", msg.clone());
+        *sh.notice.lock().unwrap() = Some(msg);
+        sh.bump();
+    };
+    if !valid_project(project) {
+        return fail("创建失败:堆栈名只能用小写字母、数字、- 和 _".into());
+    }
+    if !dir.starts_with('/') || dir.chars().any(|c| c.is_control()) {
+        return fail("创建失败:存储地址要是以 / 开头的绝对路径".into());
+    }
+    let dir = dir.trim_end_matches('/');
+    let file = format!("{dir}/docker-compose.yml");
+    let q = shell_quote(&file);
+    let script = format!(
+        "f={q}; if [ -e \"$f\" ]; then echo '这个目录里已经有 docker-compose.yml' >&2; exit 1; fi; mkdir -p -- {} && cat > \"$f\"",
+        shell_quote(dir)
+    );
+    sh.busy.lock().unwrap().insert(key.clone());
+    sh.bump();
+    let mut root = false;
+    let mut res = sys_exec(r, &script, false, Some(text), Duration::from_secs(30)).await;
+    if matches!(&res, Ok(o) if o.code != 0 && o.stderr.to_lowercase().contains("ermission")) {
+        root = true;
+        res = sys_exec(r, &script, true, Some(text), Duration::from_secs(30)).await;
+    }
+    // 有 .env 内容就一起写(和 compose 文件同一个身份,这样两个文件属主一致)
+    if !env.is_empty() && matches!(&res, Ok(o) if o.code == 0) {
+        let envq = shell_quote(&format!("{dir}/.env"));
+        res = sys_exec(r, &format!("cat > {envq}"), root, Some(env), Duration::from_secs(30)).await;
+    }
+    let msg = match res {
+        Ok(o) if o.code == 0 => {
+            let a = Action::ComposeUp { project: project.to_string(), dir: dir.to_string(), files: vec![file.clone()], envs: Vec::new(), pull: false };
+            match r.docker(&a.args(), Duration::from_secs(600)).await {
+                Ok(o) if o.code == 0 => format!("已创建:{project}"),
+                Ok(o) => format!("创建失败:文件已写入 {file},但启动失败:{}", o.stderr.trim().lines().last().unwrap_or("未知错误")),
+                Err(e) => format!("创建失败:文件已写入 {file},但启动失败:{e}"),
+            }
+        }
+        Ok(o) => format!("创建失败:{}", last_line(&o)),
+        Err(e) => format!("创建失败:{e}"),
+    };
+    sh.busy.lock().unwrap().remove(&key);
+    fail(msg);
+}
+
 async fn run_action(r: &Runner, sh: &Shared, a: Action) {
     if let Action::ConfirmInsecure(host) = &a {
         run_insecure(r, sh, host).await;
@@ -1666,6 +1725,10 @@ async fn run_action(r: &Runner, sh: &Shared, a: Action) {
     }
     if let Action::SaveDaemon(text) | Action::SaveRestartDaemon(text) = &a {
         run_daemon(r, sh, text, matches!(a, Action::SaveRestartDaemon(_)), a.verb()).await;
+        return;
+    }
+    if let Action::ComposeCreate { project, dir, text, env } = &a {
+        run_create(r, sh, project, dir, text, env).await;
         return;
     }
     let prune = matches!(a, Action::PruneImages | Action::PruneVolumes);
@@ -1677,7 +1740,7 @@ async fn run_action(r: &Runner, sh: &Shared, a: Action) {
     let key = format!("{}:{}", a.verb(), a.target());
     sh.busy.lock().unwrap().insert(key.clone());
     sh.bump();
-    let timeout = if matches!(a, Action::Pull(_) | Action::PruneImages | Action::ComposeUp { .. }) { Duration::from_secs(600) } else { Duration::from_secs(60) };
+    let timeout = if matches!(a, Action::Pull(_) | Action::PruneImages | Action::ComposeUp { .. } | Action::ComposeCreate { .. }) { Duration::from_secs(600) } else { Duration::from_secs(60) };
     let res = r.docker(&a.args(), timeout).await;
     sh.busy.lock().unwrap().remove(&key);
     let msg = match res {
