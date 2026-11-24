@@ -4,7 +4,7 @@
 
 A native SSH client: terminal and files (SFTP) in one window. Built in Rust on [GPUI](https://www.gpui.rs) and [russh](https://github.com/Eugeny/russh).
 
-Otter is a native desktop client for people who look after several Linux machines: VPS, NAS, home servers. You add a machine once, and everything runs through the SSH connection you already have. There is no panel or agent to install on the server and no extra port to open, so a fresh machine is ready to manage as soon as you can `ssh` into it.
+Otter is a native desktop client for people who look after several Linux machines: VPS, NAS, home servers. You add a machine once, and everything runs through the SSH connection you already have, so a fresh machine is ready to manage as soon as you can `ssh` into it.
 
 All your servers live in one window, organized in groups. Each one opens as a tab with its terminal and its files side by side, and you can keep as many sessions open as you like. Otter also has a local interface that lets an AI agent work in the terminal you already have open: it can read your server list freely, but taking over a session always needs your approval.
 
@@ -20,7 +20,6 @@ All your servers live in one window, organized in groups. Each one opens as a ta
 
 - **Native and small**: a Rust app drawing straight on the GPU, with no Electron or browser engine bundled. The macOS download is about 16 MB.
 - **Fast**: launches in about 0.25 s (MacBook Pro, Apple M5 Pro), and long scrolling lists stay smooth.
-- **Nothing on the server**: no panel, no agent, no open port. Everything goes over SSH.
 - **Safe by default**: passwords and key passphrases are encrypted on disk, with the master key in the system keychain. An agent can never take over a terminal without your approval.
 
 ## Features
