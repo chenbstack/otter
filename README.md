@@ -2,7 +2,7 @@
 
 中文 · [English](README.en.md)
 
-只靠 SSH 管理服务器:终端和文件放在一个原生窗口里,服务器上什么都不用装。基于 [GPUI](https://www.gpui.rs) 和 [russh](https://github.com/Eugeny/russh),Rust 编写。
+原生 SSH 客户端:终端和文件(SFTP)放在一个窗口里,服务器上什么都不用装。基于 [GPUI](https://www.gpui.rs) 和 [russh](https://github.com/Eugeny/russh),Rust 编写。
 
 Otter 是一个原生桌面客户端,给手上有几台 Linux 机器(VPS、NAS、家里的服务器)的人用。机器只需要添加一次,之后所有操作都走你已有的 SSH 连接:服务器上不用装面板或 agent,也不用多开端口,新机器只要能 `ssh` 上去就能管。
 
