@@ -430,7 +430,7 @@ impl Io {
 
 pub(crate) fn known_hosts_file() -> PathBuf {
     let base = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    base.join("Library/Application Support/dockyard/known_hosts")
+    base.join("Library/Application Support/otter/known_hosts")
 }
 
 pub(crate) struct Client {
@@ -675,12 +675,12 @@ mod tests {
     use super::*;
 
     /// 端到端(默认跳过):终端连上 → SFTP 复用它的连接 → 连接被外部切断后自动重连。
-    /// 需要 `DOCKYARD_TEST_SSH=user@host:port`(SSH Agent 认证)、临时 `HOME`、`DOCKYARD_TEST_READY=<文件>`:
+    /// 需要 `OTTER_TEST_SSH=user@host:port`(SSH Agent 认证)、临时 `HOME`、`OTTER_TEST_READY=<文件>`:
     /// 测试在复用成功后写这个文件,等外部杀掉 sshd 会话进程,再期待状态走 Reconnecting → Connected 且代数加一。
     #[test]
     fn terminal_shares_session_and_reconnects() {
-        let Ok(target) = std::env::var("DOCKYARD_TEST_SSH") else { return };
-        let ready = std::env::var("DOCKYARD_TEST_READY").expect("DOCKYARD_TEST_READY");
+        let Ok(target) = std::env::var("OTTER_TEST_SSH") else { return };
+        let ready = std::env::var("OTTER_TEST_READY").expect("OTTER_TEST_READY");
         let conn = Conn::parse(&target);
         let (_i, _o, h) = connect(conn.clone(), 80, 24);
         let wait = |secs: u64, what: &str, f: &dyn Fn() -> bool| {

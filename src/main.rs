@@ -1,4 +1,4 @@
-//! dockyard 首页外观原型(mock 数据)。
+//! otter 首页外观原型(mock 数据)。
 //!
 //! 标题栏(含标签)+ 内容区:节点页 / 节点标签(二级导航 + 页面)等。只为看外观和交互手感,没有任何真实连接。
 #![recursion_limit = "512"]
@@ -226,7 +226,7 @@ impl Render for Home {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some((path, frames)) = &mut self.shot {
             *frames += 1;
-            let target: u32 = std::env::var("DOCKYARD_SHOT_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+            let target: u32 = std::env::var("OTTER_SHOT_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
             if *frames == target {
                 match window.render_to_image() {
                     Ok(img) => match img.save(&*path) {
@@ -303,8 +303,8 @@ fn main() {
     // --empty:截图用,空节点列表(不读写本地库)
     let empty = args.iter().any(|a| a == "--empty");
     // --demo 或 --shot:用 mock 示例数据,不读写本地库;
-    // 调试:DOCKYARD_SHOT_REAL=1 让 --shot 也读本地库(配合临时 HOME 验证真实 SFTP 画面)
-    let demo = args.iter().any(|a| a == "--demo") || (shot.is_some() && std::env::var_os("DOCKYARD_SHOT_REAL").is_none());
+    // 调试:OTTER_SHOT_REAL=1 让 --shot 也读本地库(配合临时 HOME 验证真实 SFTP 画面)
+    let demo = args.iter().any(|a| a == "--demo") || (shot.is_some() && std::env::var_os("OTTER_SHOT_REAL").is_none());
     // --tabs n:节点名,f:节点名[@堆栈/服务]  清空后依次打开标签;--active k 激活第 k 个(从 0 起)
     let tabs_arg = arg("--tabs");
     let active_arg: Option<usize> = arg("--active").and_then(|v| v.parse().ok());
@@ -406,18 +406,18 @@ fn main() {
                 if let Some(k) = nview {
                     h.activate(0);
                     h.set_nodes_view(nodes::NodesView::ALL[k.min(3)], cx);
-                    if let Ok(kind) = std::env::var("DOCKYARD_KEY_MODAL") {
+                    if let Ok(kind) = std::env::var("OTTER_KEY_MODAL") {
                         h.debug_key_modal(&kind, window, cx);
                     }
                 }
-                h.add_menu = std::env::var("DOCKYARD_ADD_MENU").is_ok();
-                if std::env::var("DOCKYARD_IMPORT_OPEN").is_ok() {
+                h.add_menu = std::env::var("OTTER_ADD_MENU").is_ok();
+                if std::env::var("OTTER_IMPORT_OPEN").is_ok() {
                     h.open_import(window, cx);
                 }
-                if std::env::var("DOCKYARD_IMPORT_SSH").is_ok() {
+                if std::env::var("OTTER_IMPORT_SSH").is_ok() {
                     h.load_ssh_config(cx);
                 }
-                if let Ok(f) = std::env::var("DOCKYARD_IMPORT") {
+                if let Ok(f) = std::env::var("OTTER_IMPORT") {
                     h.load_import_file(std::path::Path::new(&f), cx);
                 }
                 if h.all_nodes().next().is_some() {
@@ -432,10 +432,10 @@ fn main() {
                 h.shot = shot.clone().map(|p| (p, 0));
                 if add {
                     h.open_add_node(window, cx);
-                    if std::env::var_os("DOCKYARD_FORM_KEY").is_some() {
+                    if std::env::var_os("OTTER_FORM_KEY").is_some() {
                         h.debug_form_key();
                     }
-                    if std::env::var_os("DOCKYARD_ADD_MENU").is_some() {
+                    if std::env::var_os("OTTER_ADD_MENU").is_some() {
                         h.debug_open_group_menu();
                     }
                 }

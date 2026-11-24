@@ -79,8 +79,8 @@ impl Home {
         if !matches!(tab.kind, workspace::TabKind::Node(_)) {
             return None;
         }
-        // 调试:DOCKYARD_FAKE_RECONNECT=1 / =lost 在没有真实终端时也画出遮罩(截图用)
-        let fake = std::env::var("DOCKYARD_FAKE_RECONNECT").ok();
+        // 调试:OTTER_FAKE_RECONNECT=1 / =lost 在没有真实终端时也画出遮罩(截图用)
+        let fake = std::env::var("OTTER_FAKE_RECONNECT").ok();
         let (status, ever) = match (tab.term.as_ref(), fake.as_deref()) {
             (Some(t), _) => (t.handle.status(), t.handle.ever_connected()),
             (None, Some("lost")) => (Status::Closed(Some("连接中断".into())), true),

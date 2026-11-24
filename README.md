@@ -1,4 +1,4 @@
-# dockyard
+# otter
 
 DeskPanel 重做版:macOS 原生桌面客户端,经 SSH 管理多台服务器的终端、文件、Docker、数据库、网站,服务器上不装任何东西。
 当前是外观与交互原型(GPUI Kit,纯 Rust 原生,全部 mock 数据)。

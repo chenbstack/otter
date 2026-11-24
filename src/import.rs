@@ -477,7 +477,7 @@ impl Home {
 
     fn save_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dir = std::env::var_os("HOME").map(std::path::PathBuf::from).map(|h| h.join("Downloads")).unwrap_or_default();
-        let rx = cx.prompt_for_new_path(&dir, Some("dockyard_import.csv"));
+        let rx = cx.prompt_for_new_path(&dir, Some("otter_import.csv"));
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(path))) = rx.await else { return };
             let res = std::fs::write(&path, TEMPLATE);
@@ -1017,7 +1017,7 @@ Project/Prod,Web Server,prod,serverauditor.com,ssh,,root,\n\
     #[test]
     fn key_column_resolves_keychain_then_file() {
         let (pem, _) = crate::keychain::generate_ed25519("t").unwrap();
-        let path = std::env::temp_dir().join(format!("dockyard-import-key-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("otter-import-key-{}", std::process::id()));
         std::fs::write(&path, pem.as_bytes()).unwrap();
         let text = format!("Hostname/IP,Key,Agent\n1.1.1.1,生产密钥,yes\n2.2.2.2,{},\n3.3.3.3,/no/such/key,\n", path.display());
         let rows = parse_csv(&text, &ex()).unwrap();
@@ -1030,7 +1030,7 @@ Project/Prod,Web Server,prod,serverauditor.com,ssh,,root,\n\
 
     #[test]
     fn ssh_config_defaults_aliases_and_skips() {
-        let dir = std::env::temp_dir().join("dockyard-ssh-test-none");
+        let dir = std::env::temp_dir().join("otter-ssh-test-none");
         let cfg = "Host web db\n  HostName 10.0.0.5\n  User deploy\nHost api\n  HostName api.example.com\n  Port 2222\nHost jump\n  ProxyJump bastion\nHost bad\n  Port x\nHost *\n  User fallback\n  Port 2200\n";
         let rows = parse_ssh_config(cfg, &dir, &ex());
         let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
@@ -1046,7 +1046,7 @@ Project/Prod,Web Server,prod,serverauditor.com,ssh,,root,\n\
 
     #[test]
     fn ssh_config_negation_match_and_eq_syntax() {
-        let dir = std::env::temp_dir().join("dockyard-ssh-test-none");
+        let dir = std::env::temp_dir().join("otter-ssh-test-none");
         let cfg = "Host a b\n  HostName=%h.lan\nMatch host a\n  Port 1\nHost * !b\n  User star\n";
         let rows = parse_ssh_config(cfg, &dir, &ex());
         assert_eq!(rows[0].host, "a.lan");

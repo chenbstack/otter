@@ -753,7 +753,7 @@ mod tests {
 
     #[test]
     fn plan_expands_dirs_before_children() {
-        let d = std::env::temp_dir().join(format!("dockyard-plan-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("otter-plan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("proj/sub")).unwrap();
         std::fs::write(d.join("proj/a.txt"), b"hello").unwrap();
@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn unique_local_adds_suffix() {
-        let d = std::env::temp_dir().join(format!("dockyard-uniq-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("otter-uniq-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         assert_eq!(unique_local(&d, "a.txt"), d.join("a.txt"));
@@ -795,11 +795,11 @@ mod tests {
     }
 
     /// 端到端:对真实 sshd 走一遍 列目录 / 新建 / 上传(文件+文件夹)/ 下载 / 删除。
-    /// 需要 `DOCKYARD_TEST_SSH=user@host:port`(认证走 SSH Agent),且 `HOME` 指向临时目录;默认跳过。
+    /// 需要 `OTTER_TEST_SSH=user@host:port`(认证走 SSH Agent),且 `HOME` 指向临时目录;默认跳过。
     #[test]
     fn end_to_end_against_real_sshd() {
-        let Ok(target) = std::env::var("DOCKYARD_TEST_SSH") else { return };
-        let work = std::env::var("DOCKYARD_TEST_DIR").expect("DOCKYARD_TEST_DIR 远程可写目录");
+        let Ok(target) = std::env::var("OTTER_TEST_SSH") else { return };
+        let work = std::env::var("OTTER_TEST_DIR").expect("OTTER_TEST_DIR 远程可写目录");
         let sftp = Sftp::connect(Conn::parse(&target), None);
         let wait = |cond: &dyn Fn() -> bool, what: &str| {
             for _ in 0..200 {
@@ -823,7 +823,7 @@ mod tests {
         assert!(!sftp.home().is_empty());
 
         // 本地素材
-        let loc = std::env::temp_dir().join(format!("dockyard-e2e-{}", std::process::id()));
+        let loc = std::env::temp_dir().join(format!("otter-e2e-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&loc);
         std::fs::create_dir_all(loc.join("proj/sub")).unwrap();
         std::fs::write(loc.join("proj/a.txt"), vec![7u8; 700_000]).unwrap();

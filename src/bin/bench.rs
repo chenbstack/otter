@@ -1,4 +1,4 @@
-//! dockyard 滚动性能原型。
+//! otter 滚动性能原型。
 //!
 //! 一次性验证用:模拟 DeskPanel 的堆栈页(变高卡片列表),量 GPUI + gpui-kit 的滚动表现。
 //! 不是正式产品代码。
@@ -366,7 +366,7 @@ impl Render for Yard {
             .border_b_1()
             .border_color(rgb(0x30363D))
             .text_color(rgb(0xC9D1D9))
-            .child(div().child(format!("dockyard · {n} 个堆栈")))
+            .child(div().child(format!("otter · {n} 个堆栈")))
             .child(
                 div()
                     .text_color(fps_color)

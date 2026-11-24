@@ -10,10 +10,10 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 
 use crate::mock::{Group, Node, NodeId};
 
-/// 各平台的数据目录:macOS `~/Library/Application Support/dockyard`、
-/// Windows `%APPDATA%\dockyard`、Linux `$XDG_DATA_HOME/dockyard`。
+/// 各平台的数据目录:macOS `~/Library/Application Support/otter`、
+/// Windows `%APPDATA%\otter`、Linux `$XDG_DATA_HOME/otter`。
 pub fn data_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "dockyard").map(|d| d.data_dir().to_path_buf())
+    directories::ProjectDirs::from("", "", "otter").map(|d| d.data_dir().to_path_buf())
 }
 
 /// 展示用的 `user@host`,端口不是 22 时带 `:port`。
@@ -183,7 +183,7 @@ impl Store {
     pub fn open_default() -> Result<Self, String> {
         let dir = data_dir().ok_or("找不到数据目录")?;
         std::fs::create_dir_all(&dir).map_err(|e| format!("创建数据目录失败: {e}"))?;
-        Self::open(&dir.join("dockyard.db"))
+        Self::open(&dir.join("otter.db"))
     }
 
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn data_survives_reopen() {
-        let dir = std::env::temp_dir().join(format!("dockyard-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("otter-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.db");
         let _ = std::fs::remove_file(&path);

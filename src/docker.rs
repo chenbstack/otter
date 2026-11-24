@@ -1080,10 +1080,10 @@ mod tests {
         assert_eq!(names, vec!["demo-exited"]);
     }
 
-    /// 真机端到端:DOCKYARD_TEST_DOCKER=user:password@host(可选 DOCKYARD_TEST_DOCKER_SKIP_ACTIONS=1)
+    /// 真机端到端:OTTER_TEST_DOCKER=user:password@host(可选 OTTER_TEST_DOCKER_SKIP_ACTIONS=1)
     #[::core::prelude::v1::test]
     fn end_to_end_against_real_docker() {
-        let Ok(spec) = std::env::var("DOCKYARD_TEST_DOCKER") else { return };
+        let Ok(spec) = std::env::var("OTTER_TEST_DOCKER") else { return };
         let (cred, host) = spec.rsplit_once('@').unwrap();
         let (user, pw) = cred.split_once(':').unwrap();
         let mut conn = Conn::parse(&format!("{user}@{host}"));
@@ -1118,7 +1118,7 @@ mod tests {
             println!("  {} {} {} {:?} panel={:?} mounts={:?}", c.name, c.state, c.status, c.ports, c.panel, c.mounts);
         }
         assert!(!s.containers.is_empty());
-        if std::env::var("DOCKYARD_TEST_DOCKER_SKIP_ACTIONS").is_ok() {
+        if std::env::var("OTTER_TEST_DOCKER_SKIP_ACTIONS").is_ok() {
             return;
         }
         let name = s.containers.iter().find(|c| c.running() && c.panel.is_none()).map(|c| c.name.clone()).expect("一个运行中的容器");

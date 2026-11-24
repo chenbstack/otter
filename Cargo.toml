@@ -1,8 +1,8 @@
 [package]
-name = "dockyard"
+name = "otter"
 version = "0.1.0"
 edition = "2024"
-default-run = "dockyard"
+default-run = "otter"
 
 [dependencies]
 # 上游 0.3.0 的副本,为了给渲染层加关键字高亮钩子,改动见 docs/modules/terminal.md

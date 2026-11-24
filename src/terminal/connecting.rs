@@ -351,7 +351,7 @@ pub(crate) fn host_key_card(
                                 .flex_col()
                                 .gap(px(2.0))
                                 .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child("首次连接这台服务器"))
-                                .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child("dockyard 还不认识它。请核对指纹与服务器一致,再继续;继续后会记住这台主机。")),
+                                .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child("otter 还不认识它。请核对指纹与服务器一致,再继续;继续后会记住这台主机。")),
                         ),
                 )
                 .child(

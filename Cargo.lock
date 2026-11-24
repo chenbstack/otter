@@ -1886,28 +1886,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dockyard"
-version = "0.1.0"
-dependencies = [
- "chacha20poly1305",
- "chrono",
- "csv",
- "directories",
- "gpui-kit",
- "gpui-pre",
- "gpui-pre-macos",
- "gpui_xterm",
- "keyring",
- "rand 0.10.3",
- "regex",
- "rusqlite",
- "russh",
- "russh-sftp",
- "tokio",
- "zeroize",
-]
-
-[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5506,6 +5484,28 @@ checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "otter"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "chrono",
+ "csv",
+ "directories",
+ "gpui-kit",
+ "gpui-pre",
+ "gpui-pre-macos",
+ "gpui_xterm",
+ "keyring",
+ "rand 0.10.3",
+ "regex",
+ "rusqlite",
+ "russh",
+ "russh-sftp",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

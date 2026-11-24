@@ -274,7 +274,7 @@ impl Home {
         cx.notify();
     }
 
-    /// 调试:截图时直接显示钥匙串密钥选择行(DOCKYARD_FORM_KEY=1)
+    /// 调试:截图时直接显示钥匙串密钥选择行(OTTER_FORM_KEY=1)
     pub(crate) fn debug_form_key(&mut self) {
         let first = self.keys.first().map(|k| k.id);
         if let Some(f) = &mut self.form {
@@ -284,11 +284,11 @@ impl Home {
         }
     }
 
-    /// 调试:截图时展开分组下拉(DOCKYARD_ADD_MENU=1)
+    /// 调试:截图时展开分组下拉(OTTER_ADD_MENU=1)
     pub(crate) fn debug_open_group_menu(&mut self) {
         if let Some(f) = &mut self.form {
-            // DOCKYARD_ADD_MENU=auth 展开「添加认证方式」,其他值展开分组下拉
-            if std::env::var("DOCKYARD_ADD_MENU").as_deref() == Ok("auth") {
+            // OTTER_ADD_MENU=auth 展开「添加认证方式」,其他值展开分组下拉
+            if std::env::var("OTTER_ADD_MENU").as_deref() == Ok("auth") {
                 f.add_menu = true;
             } else {
                 f.group_menu = true;

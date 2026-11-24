@@ -49,7 +49,7 @@ impl BackgroundRect {
     }
 }
 
-/// 关键字高亮钩子(dockyard 加的,上游没有):输入一行文字,返回需要换色的字符范围(按字符下标)。
+/// 关键字高亮钩子(otter 加的,上游没有):输入一行文字,返回需要换色的字符范围(按字符下标)。
 /// 只会作用在默认前景色、未选中、非 ALT_SCREEN 的格子上,服务器自己输出的颜色优先。
 #[derive(Clone)]
 pub struct Highlighter(pub std::sync::Arc<dyn Fn(&str) -> Vec<(Range<usize>, Hsla)> + Send + Sync>);

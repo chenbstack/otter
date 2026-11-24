@@ -117,7 +117,7 @@ impl Home {
         }
     }
 
-    /// 调试:截图时直接打开钥匙串弹窗(DOCKYARD_KEY_MODAL=add|gen|rename|delete)
+    /// 调试:截图时直接打开钥匙串弹窗(OTTER_KEY_MODAL=add|gen|rename|delete)
     pub(crate) fn debug_key_modal(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
         match kind {
             "rename" => self.open_rename_key(0, window, cx),

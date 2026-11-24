@@ -2,13 +2,13 @@
 //!
 //! 一把 32 字节随机主密钥放在系统凭据库(macOS 钥匙串 / Windows 凭据管理器 / Linux Secret Service),
 //! 秘密用 XChaCha20-Poly1305 加密后存进 SQLite。每条密文绑定 AAD(`节点id:槽位`),
-//! 拷到别的行就解不开。调试可用 `DOCKYARD_MASTER_KEY_FILE` 改读本地文件。
+//! 拷到别的行就解不开。调试可用 `OTTER_MASTER_KEY_FILE` 改读本地文件。
 
 use chacha20poly1305::aead::{Aead, Generate, Key, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use zeroize::Zeroizing;
 
-const SERVICE: &str = "dockyard";
+const SERVICE: &str = "otter";
 const ACCOUNT: &str = "master-key";
 
 pub struct Vault {
@@ -44,7 +44,7 @@ fn new_key() -> Zeroizing<[u8; 32]> {
 impl Vault {
     /// 取主密钥;没有就生成并存起来。系统凭据库不可用时返回错误(不回退到明文)。
     pub fn open() -> Result<Self, String> {
-        if let Some(path) = std::env::var_os("DOCKYARD_MASTER_KEY_FILE") {
+        if let Some(path) = std::env::var_os("OTTER_MASTER_KEY_FILE") {
             return Self::open_file(std::path::Path::new(&path));
         }
         let unavailable = |e: &dyn std::fmt::Display| format!("系统凭据库不可用:{e}。无法保存或读取密码、私钥");
@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn key_file_is_owner_only_and_loose_perms_rejected() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("dockyard-key-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("otter-key-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("k");
         let _ = std::fs::remove_file(&f);

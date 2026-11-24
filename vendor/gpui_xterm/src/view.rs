@@ -36,7 +36,7 @@ pub struct TerminalConfig {
 
     pub colors: ColorPalette,
 
-    /// 关键字高亮(dockyard 加的);`None` 表示不高亮
+    /// 关键字高亮(otter 加的);`None` 表示不高亮
     pub highlighter: Option<crate::render::Highlighter>,
 }
 

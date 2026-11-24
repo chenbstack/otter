@@ -585,7 +585,7 @@ impl Files {
 
     /// 创建筛选输入框(需要 window 和 cx,所以不放在 `new` 里)
     pub fn init_search(&mut self, window: &mut Window, cx: &mut Context<Home>) {
-        if std::env::var_os("DOCKYARD_FILES_SRC").is_some() && self.left.search.is_none() {
+        if std::env::var_os("OTTER_FILES_SRC").is_some() && self.left.search.is_none() {
             self.left.menu = true;
             self.left.search = Some(cx.new(|cx| InputState::new(window, cx).placeholder("搜索服务器")));
         }
@@ -633,27 +633,27 @@ impl Files {
             self.path = p;
         }
         self.selected = sel;
-        // 调试:DOCKYARD_FILES_LOCAL=0 截图时关闭双栏(默认打开);DOCKYARD_FILES_SEARCH=1 展开两个筛选框
-        if std::env::var("DOCKYARD_FILES_LOCAL").as_deref() == Ok("0") {
+        // 调试:OTTER_FILES_LOCAL=0 截图时关闭双栏(默认打开);OTTER_FILES_SEARCH=1 展开两个筛选框
+        if std::env::var("OTTER_FILES_LOCAL").as_deref() == Ok("0") {
             self.local = false;
         }
-        if std::env::var_os("DOCKYARD_FILES_SEARCH").is_some() {
+        if std::env::var_os("OTTER_FILES_SEARCH").is_some() {
             self.sopen = true;
             self.lsopen = true;
         }
-        // DOCKYARD_FILES_ADDR=1|2 截图时让本地/远程栏进入地址栏编辑,DOCKYARD_FILES_ADDR_ERR=1 同时标红
-        self.addr_edit = std::env::var("DOCKYARD_FILES_ADDR").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-        self.addr_err = std::env::var_os("DOCKYARD_FILES_ADDR_ERR").is_some();
-        // DOCKYARD_FILES_CTX=2:名字 / 2: / 1:名字 截图时弹出右键菜单(位置固定)
-        if let Ok(v) = std::env::var("DOCKYARD_FILES_CTX")
+        // OTTER_FILES_ADDR=1|2 截图时让本地/远程栏进入地址栏编辑,OTTER_FILES_ADDR_ERR=1 同时标红
+        self.addr_edit = std::env::var("OTTER_FILES_ADDR").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        self.addr_err = std::env::var_os("OTTER_FILES_ADDR_ERR").is_some();
+        // OTTER_FILES_CTX=2:名字 / 2: / 1:名字 截图时弹出右键菜单(位置固定)
+        if let Ok(v) = std::env::var("OTTER_FILES_CTX")
             && let Some((w, n)) = v.split_once(':')
         {
             self.ctx = Some(CtxMenu { which: w.parse().unwrap_or(2), name: Some(n.to_string()).filter(|n| !n.is_empty()), pos: point(px(1500.0), px(330.0)) });
         }
-        // DOCKYARD_FILES_SRC=1 截图时展开左栏的来源下拉
-        self.left.menu = std::env::var_os("DOCKYARD_FILES_SRC").is_some();
-        // DOCKYARD_FILES_MORE=1|2 截图时展开本地/远程栏的「更多」菜单
-        self.more = std::env::var("DOCKYARD_FILES_MORE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        // OTTER_FILES_SRC=1 截图时展开左栏的来源下拉
+        self.left.menu = std::env::var_os("OTTER_FILES_SRC").is_some();
+        // OTTER_FILES_MORE=1|2 截图时展开本地/远程栏的「更多」菜单
+        self.more = std::env::var("OTTER_FILES_MORE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     }
 
     /// 截图调试用:切换目标并回到该目标的主目录
@@ -2472,8 +2472,8 @@ impl Home {
 
     /// 真实 SFTP 正在加载目录(含复用终端连接时等通道打开):列表区显示骨架占位
     fn sftp_loading(&self) -> bool {
-        // 调试:DOCKYARD_FILES_LOADING=1 强制显示加载骨架(截图用)
-        if std::env::var_os("DOCKYARD_FILES_LOADING").is_some() {
+        // 调试:OTTER_FILES_LOADING=1 强制显示加载骨架(截图用)
+        if std::env::var_os("OTTER_FILES_LOADING").is_some() {
             return true;
         }
         if !self.sftp_real() {
