@@ -20,7 +20,7 @@ impl Home {
         match v {
             NodesView::Hosts => self.groups.iter().map(|g| g.nodes.len()).sum(),
             NodesView::Keychain => self.keys.len(),
-            NodesView::KnownHosts => self.known_hosts.len(),
+            NodesView::KnownHosts => self.known_hosts.len() + self.grants.len(),
             NodesView::Logs => crate::logs::len(),
         }
     }
@@ -29,6 +29,7 @@ impl Home {
         self.nodes_view = v;
         if v == NodesView::KnownHosts {
             self.known_hosts = crate::known_hosts::load();
+            self.reload_grants();
         }
         cx.notify();
     }
@@ -124,52 +125,126 @@ impl Home {
         div().id(id).flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap(px(6.0)).px(px(CONTENT_PAD)).pb(px(CONTENT_PAD)).children(rows)
     }
 
-    // ---- 已知主机 ----
+    // ---- 信任:已知主机 + Agent 授权 ----
+
+    fn reload_grants(&mut self) {
+        self.grants = self.store.as_ref().and_then(|s| s.list_grants().ok()).unwrap_or_default();
+    }
+
+    /// 撤销一条授权;这个 Agent 正在接管该节点的话,接管立刻结束
+    fn revoke_grant(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(g) = self.grants.get(i).cloned() else { return };
+        if let Some(s) = &self.store {
+            if let Err(e) = s.grant_remove(&g.client_name, &g.parent_exe, g.node_id) {
+                crate::logs::push(crate::logs::Level::Error, "Agent", format!("撤销授权失败: {e}"));
+                return;
+            }
+        }
+        let node = self.node_name(Some(g.node_id));
+        crate::logs::push(crate::logs::Level::Info, "Agent", format!("已撤销 {} 对 {} 的接管授权", g.client_name, node));
+        let live: Vec<u64> = self
+            .workspace
+            .tabs
+            .iter()
+            .filter(|t| t.node() == Some(g.node_id) && t.takeover.as_ref().is_some_and(|k| k.client_name == g.client_name))
+            .map(|t| t.id)
+            .collect();
+        for id in live {
+            self.end_takeover(id, Some("user_stopped"), window, cx);
+        }
+        self.reload_grants();
+        cx.notify();
+    }
+
+    fn section_title(text: &'static str, n: usize) -> Div {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(CONTENT_PAD))
+            .pt(px(8.0))
+            .pb(px(2.0))
+            .child(div().text_size(px(t::TYPE_CONTROL)).font_weight(FontWeight::SEMIBOLD).text_color(c::secondary()).child(text))
+            .child(div().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(n.to_string()))
+    }
+
+    fn section_empty(text: &'static str) -> Div {
+        div().px(px(CONTENT_PAD)).py(px(10.0)).text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(text)
+    }
 
     fn known_hosts_view(&self, cx: &mut Context<Self>) -> Div {
-        let body = if self.known_hosts.is_empty() {
-            empty_state(IconName::ShieldCheck, "还没有已知主机", "首次连接并确认指纹后会记录在这里").into_any_element()
-        } else {
-            let rows: Vec<_> = self
-                .known_hosts
-                .iter()
-                .enumerate()
-                .map(|(i, h)| {
-                    Self::glass_row(("kh", i))
-                        .group(format!("kh-{i}"))
-                        .child(icon(IconName::ShieldCheck, 16.0, c::online()))
-                        .child(div().w(px(200.0)).flex_shrink_0().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(h.host.clone()))
-                        .child(tag(h.algo.clone()))
-                        .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(h.fingerprint.clone()))
-                        .child(
-                            div()
-                                .id(("kh-del", i))
-                                .size(px(26.0))
-                                .flex_shrink_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(t::RADIUS_SM))
-                                .opacity(0.0)
-                                .group_hover(format!("kh-{i}"), |s| s.opacity(1.0))
-                                .hover(|s| s.bg(c::hover()))
-                                .child(icon(IconName::Trash, 14.0, c::danger()))
-                                .tooltip(|_, cx| cx.new(|_| crate::files::Tip("删除记录".into())).into())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(h) = this.known_hosts.get(i) {
-                                        if crate::known_hosts::remove(h) {
-                                            crate::logs::push(crate::logs::Level::Info, &h.host, "已删除已知主机记录");
-                                        }
+        let mut hosts = div().flex().flex_col().gap(px(6.0)).px(px(CONTENT_PAD));
+        for (i, h) in self.known_hosts.iter().enumerate() {
+            hosts = hosts.child(
+                Self::glass_row(("kh", i))
+                    .group(format!("kh-{i}"))
+                    .child(icon(IconName::ShieldCheck, 16.0, c::online()))
+                    .child(div().w(px(200.0)).flex_shrink_0().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(h.host.clone()))
+                    .child(tag(h.algo.clone()))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(h.fingerprint.clone()))
+                    .child(
+                        div()
+                            .id(("kh-del", i))
+                            .size(px(26.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(t::RADIUS_SM))
+                            .opacity(0.0)
+                            .group_hover(format!("kh-{i}"), |s| s.opacity(1.0))
+                            .hover(|s| s.bg(c::hover()))
+                            .child(icon(IconName::Trash, 14.0, c::danger()))
+                            .tooltip(|_, cx| cx.new(|_| crate::files::Tip("删除记录".into())).into())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(h) = this.known_hosts.get(i) {
+                                    if crate::known_hosts::remove(h) {
+                                        crate::logs::push(crate::logs::Level::Info, &h.host, "已删除已知主机记录");
                                     }
-                                    this.known_hosts = crate::known_hosts::load();
-                                    cx.notify();
-                                })),
-                        )
-                })
-                .collect();
-            Self::rows_scroll("kh-scroll", rows).into_any_element()
-        };
-        Self::side_view("已知主机", "已信任的服务器指纹。服务器重装后指纹会变,可在这里删除旧记录再重新连接", None, body)
+                                }
+                                this.known_hosts = crate::known_hosts::load();
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        let mut grants = div().flex().flex_col().gap(px(6.0)).px(px(CONTENT_PAD));
+        for (i, g) in self.grants.iter().enumerate() {
+            let when = chrono::DateTime::from_timestamp(g.created_at, 0)
+                .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default();
+            grants = grants.child(
+                Self::glass_row(("grant", i))
+                    .child(icon(IconName::Bot, 16.0, c::accent()))
+                    .child(
+                        div()
+                            .w(px(200.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(g.client_name.clone()))
+                            .child(div().truncate().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(self.node_name(Some(g.node_id)))),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(g.parent_exe.clone()))
+                    .child(div().flex_shrink_0().text_size(px(t::TYPE_MICRO)).text_color(c::muted()).child(when))
+                    .child(button("grant-revoke", IconName::Trash, "撤销").id(("grant-revoke", i)).on_click(cx.listener(move |this, _, window, cx| this.revoke_grant(i, window, cx)))),
+            );
+        }
+        let body = div()
+            .id("trust-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .pb(px(CONTENT_PAD))
+            .child(Self::section_title("Agent 授权", self.grants.len()))
+            .child(if self.grants.is_empty() { Self::section_empty("没有「总是允许」的授权,Agent 每次接管都会先询问你").into_any_element() } else { grants.into_any_element() })
+            .child(Self::section_title("已知主机", self.known_hosts.len()))
+            .child(if self.known_hosts.is_empty() { Self::section_empty("还没有已知主机,首次连接并确认指纹后会记录在这里").into_any_element() } else { hosts.into_any_element() });
+        Self::side_view("信任", "已信任的服务器指纹,以及被你「总是允许」接管的 Agent。服务器重装后指纹会变,可删除旧记录再重新连接", None, body.into_any_element())
     }
 
     // ---- 日志 ----

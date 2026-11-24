@@ -129,7 +129,7 @@ impl Home {
         self.workspace.tabs.iter().position(|t| t.id == id)
     }
 
-    fn node_name(&self, id: Option<NodeId>) -> String {
+    pub(crate) fn node_name(&self, id: Option<NodeId>) -> String {
         id.and_then(|i| self.all_nodes().find(|n| n.id == i)).map_or_else(|| "?".into(), |n| n.name.clone())
     }
 

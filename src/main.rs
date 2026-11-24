@@ -101,6 +101,8 @@ struct Home {
     nodes_view: nodes::NodesView,
     /// 已知主机视图的缓存(切到该视图或删除后重新读文件)
     known_hosts: Vec<known_hosts::KnownHost>,
+    /// 「信任」页的 Agent 授权列表
+    grants: Vec<store::AgentGrant>,
     /// 钥匙串里的密钥(含被几个节点使用)
     keys: Vec<store::KeyRow>,
     /// 钥匙串页的弹窗:添加 / 重命名 / 删除
@@ -195,6 +197,7 @@ impl Home {
             tab_menu: None,
             nodes_view: nodes::NodesView::Hosts,
             known_hosts: Vec::new(),
+            grants: Vec::new(),
             keys,
             key_modal: None,
             import: None,

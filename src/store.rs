@@ -146,10 +146,13 @@ pub fn now_secs() -> i64 {
 }
 
 /// 一条「总是允许」的 agent 接管授权。
+#[derive(Clone)]
 pub struct AgentGrant {
     pub client_name: String,
     pub parent_exe: String,
     pub node_id: NodeId,
+    /// 授权时间(Unix 秒)
+    pub created_at: i64,
 }
 
 /// 秘密槽位
@@ -462,9 +465,9 @@ impl Store {
     }
 
     pub fn list_grants(&self) -> Result<Vec<AgentGrant>, String> {
-        let mut st = self.conn.prepare("SELECT client_name, parent_exe, node_id FROM agent_grants ORDER BY created_at, rowid").map_err(|e| e.to_string())?;
+        let mut st = self.conn.prepare("SELECT client_name, parent_exe, node_id, created_at FROM agent_grants ORDER BY created_at, rowid").map_err(|e| e.to_string())?;
         let rows = st
-            .query_map([], |r| Ok(AgentGrant { client_name: r.get(0)?, parent_exe: r.get(1)?, node_id: NodeId(r.get::<_, u32>(2)?) }))
+            .query_map([], |r| Ok(AgentGrant { client_name: r.get(0)?, parent_exe: r.get(1)?, node_id: NodeId(r.get::<_, u32>(2)?), created_at: r.get(3)? }))
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
     }

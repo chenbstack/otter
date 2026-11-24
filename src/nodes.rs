@@ -71,7 +71,7 @@ impl NodesView {
         match self {
             NodesView::Hosts => "主机",
             NodesView::Keychain => "钥匙串",
-            NodesView::KnownHosts => "已知主机",
+            NodesView::KnownHosts => "信任",
             NodesView::Logs => "日志",
         }
     }
