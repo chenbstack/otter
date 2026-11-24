@@ -1,2 +1,3 @@
 [toolchain]
-channel = "nightly"
+# 固定到已验证能编译的 nightly:最新 nightly 偶尔会让依赖(如 pathfinder_geometry)触发编译器崩溃
+channel = "nightly-2026-10-21"
