@@ -4,7 +4,7 @@
 
 # Otter
 
-**Manage your servers over plain SSH: terminal, files and Docker in one native window. Nothing to install on the server.**
+**Manage your servers over plain SSH: terminal and files in one native window. Nothing to install on the server.**
 
 English · [简体中文](README.zh-CN.md)
 
