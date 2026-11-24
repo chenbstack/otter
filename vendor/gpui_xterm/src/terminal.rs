@@ -38,6 +38,17 @@ impl Dimensions for TermDimensions {
     }
 }
 
+/// 终端文本快照,见 `TerminalState::text_snapshot`。
+pub struct TextSnapshot {
+    /// 先回滚后屏幕,逐行
+    pub lines: Vec<String>,
+    /// `lines` 里屏幕第一行的下标(前面的都是回滚)
+    pub screen_start: usize,
+    /// 光标在屏幕里的行、列(从 0 起)
+    pub cursor_line: usize,
+    pub cursor_col: usize,
+}
+
 pub struct TerminalState {
     term: Arc<Mutex<Term<GpuiEventProxy>>>,
 
@@ -144,6 +155,30 @@ impl TerminalState {
     pub fn display_offset(&self) -> usize {
         let term = self.term.lock();
         term.grid().display_offset()
+    }
+
+    /// 屏幕和回滚的纯文本快照:`history` 是最多带上多少行回滚(排在屏幕行前面)。每行去掉行尾空格。
+    pub fn text_snapshot(&self, history: usize) -> TextSnapshot {
+        use alacritty_terminal::index::{Column, Line};
+        use alacritty_terminal::term::cell::Flags;
+        let term = self.term.lock();
+        let grid = term.grid();
+        let (cols, screen) = (grid.columns(), grid.screen_lines());
+        let hist = grid.history_size().min(history);
+        let mut lines = Vec::with_capacity(hist + screen);
+        for i in -(hist as i32)..(screen as i32) {
+            let row = &grid[Line(i)];
+            let mut s = String::new();
+            for c in 0..cols {
+                let cell = &row[Column(c)];
+                if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    s.push(cell.c);
+                }
+            }
+            lines.push(s.trim_end().to_string());
+        }
+        let cur = grid.cursor.point;
+        TextSnapshot { lines, screen_start: hist, cursor_line: cur.line.0.max(0) as usize, cursor_col: cur.column.0 }
     }
 
     pub fn term_arc(&self) -> Arc<Mutex<Term<GpuiEventProxy>>> {

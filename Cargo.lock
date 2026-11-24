@@ -5504,6 +5504,8 @@ dependencies = [
  "rusqlite",
  "russh",
  "russh-sftp",
+ "serde",
+ "serde_json",
  "tokio",
  "zeroize",
 ]

@@ -128,7 +128,22 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE node_auth ADD COLUMN key_id INTEGER REFERENCES keys(id) ON DELETE SET NULL;",
     // v5:连接后探测到的服务器系统(osinfo::OsKind 的 key),空串 = 还没探测
     "ALTER TABLE nodes ADD COLUMN os TEXT NOT NULL DEFAULT '';",
+    // v6:用户选了「总是允许」的 agent 接管授权:(客户端名称, 客户端父进程路径, 节点)
+    "CREATE TABLE agent_grants (
+         client_name TEXT NOT NULL,
+         parent_exe  TEXT NOT NULL,
+         node_id     INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+         created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+         PRIMARY KEY (client_name, parent_exe, node_id)
+     );",
 ];
+
+/// 一条「总是允许」的 agent 接管授权。
+pub struct AgentGrant {
+    pub client_name: String,
+    pub parent_exe: String,
+    pub node_id: NodeId,
+}
 
 /// 秘密槽位
 pub const SLOT_PASSWORD: &str = "password";
@@ -416,6 +431,35 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// 「总是允许」:记下这个客户端可以接管这个节点(已有则忽略)。
+    pub fn grant_add(&self, client: &str, parent_exe: &str, node: NodeId) -> Result<(), String> {
+        self.conn
+            .execute("INSERT OR IGNORE INTO agent_grants (client_name, parent_exe, node_id) VALUES (?1, ?2, ?3)", params![client, parent_exe, node.0])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn grant_has(&self, client: &str, parent_exe: &str, node: NodeId) -> bool {
+        self.conn
+            .query_row("SELECT 1 FROM agent_grants WHERE client_name=?1 AND parent_exe=?2 AND node_id=?3", params![client, parent_exe, node.0], |_| Ok(()))
+            .is_ok()
+    }
+
+    pub fn grant_remove(&self, client: &str, parent_exe: &str, node: NodeId) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM agent_grants WHERE client_name=?1 AND parent_exe=?2 AND node_id=?3", params![client, parent_exe, node.0])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn list_grants(&self) -> Result<Vec<AgentGrant>, String> {
+        let mut st = self.conn.prepare("SELECT client_name, parent_exe, node_id FROM agent_grants ORDER BY created_at, rowid").map_err(|e| e.to_string())?;
+        let rows = st
+            .query_map([], |r| Ok(AgentGrant { client_name: r.get(0)?, parent_exe: r.get(1)?, node_id: NodeId(r.get::<_, u32>(2)?) }))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+    }
+
     /// 记下探测到的系统(osinfo 的 key);节点不存在返回错误。
     pub fn set_node_os(&mut self, id: NodeId, os: &str) -> Result<(), String> {
         let n = self.conn.execute("UPDATE nodes SET os=?1 WHERE id=?2", params![os, id.0]).map_err(|e| e.to_string())?;
@@ -575,6 +619,24 @@ mod tests {
         let left: i64 = s.conn.query_row("SELECT COUNT(*) FROM node_tags", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 0);
         assert!(s.delete_group(g2).is_err());
+    }
+
+    #[test]
+    fn agent_grants_add_check_remove_and_cascade() {
+        let mut s = Store::open_memory().unwrap();
+        let gid = s.load_groups().unwrap()[0].id;
+        let id = s.add_node(&NewNode { group_id: gid, name: "n", user: "u", host: "h", port: 22, note: "", tags: &[] }).unwrap();
+        assert!(!s.grant_has("claude", "/bin/x", id));
+        s.grant_add("claude", "/bin/x", id).unwrap();
+        s.grant_add("claude", "/bin/x", id).unwrap();
+        assert!(s.grant_has("claude", "/bin/x", id));
+        assert!(!s.grant_has("claude", "/bin/y", id), "父进程路径不同要重新询问");
+        assert_eq!(s.list_grants().unwrap().len(), 1);
+        s.grant_remove("claude", "/bin/x", id).unwrap();
+        assert!(!s.grant_has("claude", "/bin/x", id));
+        s.grant_add("claude", "/bin/x", id).unwrap();
+        s.delete_node(id).unwrap();
+        assert!(s.list_grants().unwrap().is_empty(), "删节点要级联删授权");
     }
 
     #[test]

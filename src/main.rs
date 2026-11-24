@@ -3,6 +3,9 @@
 //! 标题栏(含标签)+ 内容区:节点页 / 节点标签(二级导航 + 页面)等。只为看外观和交互手感,没有任何真实连接。
 #![recursion_limit = "512"]
 
+mod ctl;
+mod ctl_cli;
+mod takeover;
 mod docker;
 mod group_form;
 mod import;
@@ -132,6 +135,12 @@ struct Home {
     os_probed: std::collections::HashSet<NodeId>,
     /// 各文件视图共享的 mock 上传/新建/删除状态
     fstore: files::Store,
+    /// 等用户确认的 agent 接管申请(队首正在弹窗)
+    takeover_prompts: std::collections::VecDeque<takeover::Prompt>,
+    /// 被结束但 agent 还没得知的接管:(连接 id, 会话 id) → 原因
+    takeover_revoked: std::collections::HashMap<(u64, u64), &'static str>,
+    /// 接管遮罩的焦点句柄:接管期间焦点放在它上面,键盘到不了终端
+    takeover_focus: Option<FocusHandle>,
 }
 
 impl Home {
@@ -196,6 +205,9 @@ impl Home {
             dock: pages::dockerpages::DockUi::new(),
             os_probed: Default::default(),
             fstore: files::Store::default(),
+            takeover_prompts: Default::default(),
+            takeover_revoked: Default::default(),
+            takeover_focus: None,
         }
     }
 
@@ -283,9 +295,10 @@ impl Render for Home {
         };
         // 终端连接中断、自动重连时,整个标签内容区盖一层加载状态(透过它能看到后面的内容)
         let overlay = self.reconnect_overlay(cx);
-        let body = div().relative().flex_1().min_h_0().flex().flex_col().child(body).children(overlay);
+        let takeover = self.takeover_overlay(cx);
+        let body = div().relative().flex_1().min_h_0().flex().flex_col().child(body).children(overlay).children(takeover);
         let drawer = if is_files_tab { None } else { self.files_drawer(window, cx) };
-        let dialog = self.node_dialog(window, cx).or_else(|| self.key_modal_view(window, cx)).or_else(|| self.import_dialog(cx)).or_else(|| self.group_delete_dialog(cx)).or_else(|| self.node_delete_dialog(cx)).or_else(|| self.group_form_dialog(window, cx));
+        let dialog = self.takeover_prompt_dialog(cx).or_else(|| self.node_dialog(window, cx)).or_else(|| self.key_modal_view(window, cx)).or_else(|| self.import_dialog(cx)).or_else(|| self.group_delete_dialog(cx)).or_else(|| self.node_delete_dialog(cx)).or_else(|| self.group_form_dialog(window, cx));
         div()
             .size_full()
             .relative()
@@ -306,6 +319,12 @@ impl Render for Home {
 fn main() {
     // 调试参数:--shot <png> --node <g>,<n> --tabs n:<节点名>(容器模式),t:<节点名>(终端模式),f:<节点名>[@堆栈/服务](SFTP 模式),... --active <k> --expand <k> --plain --page <0..4> --add(打开添加节点弹窗) --files <host|堆栈/服务> --fcd <目录> --fsel <名字>
     let args: Vec<String> = std::env::args().collect();
+    // 子命令:不启动界面,只做本地接口的薄客户端
+    match args.get(1).map(String::as_str) {
+        Some("ctl") => std::process::exit(ctl_cli::run_ctl(&args[2..])),
+        Some("mcp") => std::process::exit(ctl_cli::run_mcp()),
+        _ => {}
+    }
     let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let shot = arg("--shot");
     let node = arg("--node");
@@ -338,7 +357,7 @@ fn main() {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1360.0), px(860.0)), cx))),
             titlebar: Some(TitlebarOptions {
-                title: Some("DeskPanel".into()),
+                title: Some("Otter".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(16.0), px(16.0))),
             }),
@@ -451,6 +470,12 @@ fn main() {
                     h.page = Page::ALL[p.min(Page::ALL.len() - 1)];
                 }
                 h.shot = shot.clone().map(|p| (p, 0));
+                if let Ok(m) = std::env::var("OTTER_TAKEOVER") {
+                    h.debug_takeover(&m, window, cx);
+                }
+                if !demo && shot.is_none() {
+                    h.start_ctl(window, cx);
+                }
                 if add {
                     h.open_add_node(window, cx);
                     if std::env::var_os("OTTER_FORM_KEY").is_some() {

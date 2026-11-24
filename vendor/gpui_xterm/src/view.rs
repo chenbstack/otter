@@ -497,6 +497,11 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// 屏幕(和最多 `history` 行回滚)的纯文本,给 agent 读终端用。
+    pub fn text_snapshot(&self, history: usize) -> crate::terminal::TextSnapshot {
+        self.state.text_snapshot(history)
+    }
+
     pub fn has_selection(&self) -> bool {
         self.state
             .selection_text()

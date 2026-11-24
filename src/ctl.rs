@@ -1,0 +1,289 @@
+//! 本地接口:App 监听一个 Unix socket,MCP / CLI 经它访问运行中的 Otter。
+//! 协议是按行分隔的 JSON-RPC;连接后第一条必须是 `hello`。方法分发和只读方法在这里,
+//! 接管(授权、遮罩、输入)在 `takeover.rs`。设计见 docs/modules/ctl.md。
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{mpsc, oneshot};
+
+use crate::mock::NodeId;
+use crate::terminal::ssh::Status;
+use crate::workspace::{NodeMode, TabKind};
+use gpui_kit::{Context, Window};
+
+use crate::{Home, logs};
+
+pub const PROTOCOL: u32 = 1;
+
+pub fn sock_path() -> Option<PathBuf> {
+    crate::store::data_dir().map(|d| d.join("ctl.sock"))
+}
+
+/// 一个已握手的客户端连接。
+pub struct Client {
+    pub id: u64,
+    /// 客户端自报的名称(MCP 取 `clientInfo.name`),只用来给用户看,不能当身份
+    pub name: String,
+    /// 客户端进程的父进程路径,同样只用来展示
+    pub parent_exe: String,
+}
+
+/// 返回给客户端的错误。`kind` 是稳定的机器可读码(见 docs/modules/ctl.md 的错误码表)。
+#[derive(Debug, Clone)]
+pub struct RpcError {
+    pub kind: &'static str,
+    pub message: String,
+    pub reason: Option<&'static str>,
+}
+
+impl RpcError {
+    pub fn new(kind: &'static str, message: impl Into<String>) -> Self {
+        Self { kind, message: message.into(), reason: None }
+    }
+    pub fn revoked(reason: &'static str) -> Self {
+        let message = match reason {
+            "user_stopped" => "用户停止了接管",
+            "idle_timeout" => "空闲太久,接管已自动结束",
+            "max_duration" => "接管时间到上限,已结束",
+            "tab_closed" => "标签已关闭",
+            "disconnected" => "连接已断开",
+            _ => "接管已结束",
+        };
+        Self { kind: "takeover_revoked", message: message.into(), reason: Some(reason) }
+    }
+    fn to_json(&self) -> Value {
+        let mut data = json!({ "kind": self.kind });
+        if let Some(r) = self.reason {
+            data["reason"] = json!(r);
+        }
+        json!({ "code": -32000, "message": self.message, "data": data })
+    }
+}
+
+pub type Reply = oneshot::Sender<Result<Value, RpcError>>;
+
+/// 从连接线程发往界面线程的消息。
+pub enum UiMsg {
+    Call { client: Arc<Client>, method: String, params: Value, reply: Reply },
+    /// 客户端连接断开:它持有的接管要释放
+    Closed { client_id: u64 },
+}
+
+/// 启动 socket 服务。已有另一个 Otter 在监听、或绑定失败时返回 `None`(日志里写明原因)。
+pub fn start() -> Option<mpsc::UnboundedReceiver<UiMsg>> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = sock_path()?;
+    let _ = std::fs::create_dir_all(path.parent()?);
+    if path.exists() {
+        // 还能连上说明另一个 Otter 正在运行,不去抢它的 socket
+        if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+            logs::push(logs::Level::Warn, "Agent", "已有另一个 Otter 在监听本地接口,本进程不启用");
+            return None;
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    let _guard = crate::terminal::ssh::runtime().enter();
+    let listener = match UnixListener::bind(&path) {
+        Ok(l) => l,
+        Err(e) => {
+            logs::push(logs::Level::Error, "Agent", format!("本地接口启动失败: {e}"));
+            return None;
+        }
+    };
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    let (tx, rx) = mpsc::unbounded_channel();
+    crate::terminal::ssh::runtime().spawn(async move {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        loop {
+            let Ok((stream, _)) = listener.accept().await else { continue };
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            tokio::spawn(serve(stream, id, tx.clone()));
+        }
+    });
+    Some(rx)
+}
+
+async fn serve(stream: UnixStream, id: u64, tx: mpsc::UnboundedSender<UiMsg>) {
+    let (rd, mut wr) = stream.into_split();
+    let mut lines = BufReader::new(rd).lines();
+    let mut client: Option<Arc<Client>> = None;
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let req: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = write(&mut wr, &error_response(Value::Null, &RpcError::new("bad_request", format!("不是合法的 JSON: {e}")))).await;
+                continue;
+            }
+        };
+        let rid = req.get("id").cloned().unwrap_or(Value::Null);
+        let method = req.get("method").and_then(Value::as_str).unwrap_or("").to_string();
+        let params = req.get("params").cloned().unwrap_or(Value::Null);
+        let resp = if method == "hello" {
+            let s = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or("").chars().take(200).collect::<String>();
+            let name = Some(s("client_name")).filter(|n| !n.is_empty()).unwrap_or_else(|| "未命名客户端".into());
+            client = Some(Arc::new(Client { id, name, parent_exe: s("parent_exe") }));
+            ok_response(rid, json!({ "protocol": PROTOCOL, "app": "otter" }))
+        } else if let Some(c) = &client {
+            let (rtx, rrx) = oneshot::channel();
+            if tx.send(UiMsg::Call { client: c.clone(), method, params, reply: rtx }).is_err() {
+                return;
+            }
+            match rrx.await {
+                Ok(Ok(v)) => ok_response(rid, v),
+                Ok(Err(e)) => error_response(rid, &e),
+                Err(_) => error_response(rid, &RpcError::new("internal", "App 没有响应")),
+            }
+        } else {
+            error_response(rid, &RpcError::new("bad_request", "第一条消息必须是 hello"))
+        };
+        if write(&mut wr, &resp).await.is_err() {
+            break;
+        }
+    }
+    if client.is_some() {
+        let _ = tx.send(UiMsg::Closed { client_id: id });
+    }
+}
+
+fn ok_response(id: Value, result: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+fn error_response(id: Value, e: &RpcError) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": e.to_json() })
+}
+
+async fn write(wr: &mut tokio::net::unix::OwnedWriteHalf, v: &Value) -> std::io::Result<()> {
+    let mut s = v.to_string();
+    s.push('\n');
+    wr.write_all(s.as_bytes()).await
+}
+
+/// `user@host[:port]` 拆成 (用户, 主机, 端口)
+pub fn split_user_host(uh: &str) -> (String, String, u16) {
+    let (user, rest) = uh.split_once('@').unwrap_or(("", uh));
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) if p.parse::<u16>().is_ok() => (h, p.parse().unwrap_or(22)),
+        _ => (rest, 22),
+    };
+    (user.to_string(), host.to_string(), port)
+}
+
+fn state_name(s: &Status) -> &'static str {
+    match s {
+        Status::Connecting | Status::Waiting => "connecting",
+        Status::Connected => "connected",
+        Status::Reconnecting(_) => "reconnecting",
+        Status::Closed(_) => "failed",
+    }
+}
+
+impl Home {
+    /// 在界面线程里处理一条来自客户端的消息。
+    pub(crate) fn ctl_msg(&mut self, msg: UiMsg, window: &mut Window, cx: &mut Context<Self>) {
+        match msg {
+            UiMsg::Closed { client_id } => self.takeover_client_closed(client_id, window, cx),
+            UiMsg::Call { client, method, params, reply } => match method.as_str() {
+                "list_nodes" => {
+                    let _ = reply.send(Ok(self.ctl_list_nodes()));
+                }
+                "list_sessions" => {
+                    let _ = reply.send(Ok(self.ctl_list_sessions()));
+                }
+                "get_focus" => {
+                    let _ = reply.send(Ok(self.ctl_get_focus()));
+                }
+                // 其余方法(接管相关)由 takeover.rs 接手,reply 也交给它回
+                _ => self.takeover_call(&client, &method, &params, reply, window, cx),
+            },
+        }
+    }
+
+    fn ctl_node_json(&self, id: NodeId) -> Value {
+        let g = self.groups.iter().find(|g| g.nodes.iter().any(|n| n.id == id));
+        let n = g.and_then(|g| g.nodes.iter().find(|n| n.id == id));
+        match (g, n) {
+            (Some(g), Some(n)) => {
+                let (user, host, port) = split_user_host(&n.user_host);
+                json!({
+                    "id": n.id.0, "name": n.name, "host": host, "user": user, "port": port,
+                    "group": g.name, "tags": n.tags, "os": n.os.key(), "connected": self.node_connected(n.id),
+                })
+            }
+            _ => Value::Null,
+        }
+    }
+
+    fn node_connected(&self, id: NodeId) -> bool {
+        self.workspace.tabs.iter().any(|t| t.node() == Some(id) && t.term.as_ref().is_some_and(|s| s.handle.status() == Status::Connected))
+    }
+
+    pub(crate) fn ctl_list_nodes(&self) -> Value {
+        Value::Array(self.groups.iter().flat_map(|g| g.nodes.iter()).map(|n| self.ctl_node_json(n.id)).collect())
+    }
+
+    fn ctl_session_json(&self, ix: usize) -> Value {
+        let t = &self.workspace.tabs[ix];
+        let (kind, mode) = match &t.kind {
+            TabKind::Nodes => ("nodes", ""),
+            TabKind::Node(_) => ("node", match t.mode {
+                NodeMode::Terminal => "terminal",
+                NodeMode::Files => "sftp",
+                NodeMode::Containers => "docker",
+            }),
+            TabKind::Terminal { .. } => ("container_terminal", "terminal"),
+            TabKind::Logs { .. } => ("logs", ""),
+        };
+        let state = t.term.as_ref().map_or("none", |s| state_name(&s.handle.status()));
+        json!({
+            "session": t.id,
+            "node": t.node().map(|n| n.0),
+            "node_name": t.node().and_then(|n| self.all_nodes().find(|x| x.id == n)).map(|n| n.name.clone()),
+            "kind": kind, "mode": mode, "state": state,
+            "focused": self.workspace.active == Some(ix),
+            "takeover": t.takeover.is_some(),
+        })
+    }
+
+    pub(crate) fn ctl_list_sessions(&self) -> Value {
+        Value::Array((0..self.workspace.tabs.len()).filter(|&i| !matches!(self.workspace.tabs[i].kind, TabKind::Nodes)).map(|i| self.ctl_session_json(i)).collect())
+    }
+
+    pub(crate) fn ctl_get_focus(&self) -> Value {
+        match self.workspace.active {
+            Some(a) if !matches!(self.workspace.tabs[a].kind, TabKind::Nodes) => self.ctl_session_json(a),
+            _ => Value::Null,
+        }
+    }
+
+    /// 启动本地接口并开始处理消息。演示模式和截图不启用,免得抢走真实 App 的 socket。
+    pub(crate) fn start_ctl(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut rx) = start() else { return };
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(msg) = rx.recv().await {
+                if this.update_in(cx, |this, window, cx| this.ctl_msg(msg, window, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                if this.update_in(cx, |this, window, cx| this.takeover_tick(window, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+}
+

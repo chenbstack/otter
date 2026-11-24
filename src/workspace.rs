@@ -47,6 +47,8 @@ pub enum TabKind {
 }
 
 pub struct Tab {
+    /// 进程内唯一的会话 id,对外接口(ctl)用它指代标签;标签下标会变,它不会
+    pub id: u64,
     pub kind: TabKind,
     /// 该标签的二级页。激活期间的实时值在 `Home.page`,切走时存回这里。
     pub page: Page,
@@ -66,11 +68,15 @@ pub struct Tab {
     pub stash: Files,
     /// 容器模式的 Docker 连接(真实数据);关闭标签即丢弃
     pub docker: Option<crate::docker::Docker>,
+    /// 正在被 agent 接管时的状态(见 takeover.rs)
+    pub takeover: Option<crate::takeover::Takeover>,
 }
 
 impl Tab {
     pub(crate) fn new(kind: TabKind, files: Files) -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             kind,
             page: Page::Stacks,
             scroll: VirtualListScrollHandle::new(),
@@ -81,6 +87,7 @@ impl Tab {
             mode: NodeMode::Containers,
             stash: Files::new(),
             docker: None,
+            takeover: None,
         }
     }
 
@@ -248,6 +255,8 @@ impl Home {
         if ix >= ws.tabs.len() || matches!(ws.tabs[ix].kind, TabKind::Nodes) {
             return;
         }
+        self.takeover_tab_closing(ix);
+        let ws = &mut self.workspace;
         let was_active = ws.active == Some(ix);
         ws.tabs.remove(ix);
         if was_active {
