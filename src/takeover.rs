@@ -301,7 +301,8 @@ impl Home {
             return;
         }
         let lease = params.get("lease").and_then(Value::as_bool).unwrap_or(false);
-        let granted = self.store.as_ref().is_some_and(|s| s.grant_has(&client.name, &client.parent_exe, node));
+        // 来源没验证出来(parent_exe 为空)的客户端,不能用长期授权
+        let granted = !client.parent_exe.is_empty() && self.store.as_ref().is_some_and(|s| s.grant_has(&client.name, &client.parent_exe, node));
         if granted {
             let l = self.start_takeover(ix, client, &reason, lease, window, cx);
             let mut r = json!({ "session": sid, "granted": "always" });
@@ -427,6 +428,8 @@ impl Home {
     /// 用户对确认框的选择。
     pub(crate) fn resolve_takeover_prompt(&mut self, d: Decision, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = self.takeover_prompts.pop_front() else { return };
+        // 来源没验证出来的客户端只能「允许一次」,即使界面被绕过也不落长期授权
+        let d = if p.client.parent_exe.is_empty() && matches!(d, Decision::Day | Decision::Always) { Decision::Once } else { d };
         let ix = self.tab_ix_by_id(p.tab_id);
         let node = ix.and_then(|i| self.workspace.tabs[i].node());
         let node_name = self.node_name(node);
@@ -685,7 +688,8 @@ impl Home {
             let tab_id = self.workspace.tabs[a].id;
             let input = (mode == "sudo").then(|| cx.new(|cx| InputState::new(window, cx).placeholder("sudo 密码").masked(true)));
             self.sudo_prompt = Some(SudoPrompt { tab_id, client, reason: "清理 /var/log 下的旧日志".into(), line: "[sudo] password for chen:".into(), input, reply });
-        } else if mode == "prompt" {
+        } else if mode.starts_with("prompt") {
+            let client = if mode == "prompt-unverified" { Arc::new(Client { id: 0, name: "Claude Code".into(), parent_exe: String::new() }) } else { client };
             let (reply, _rx) = tokio::sync::oneshot::channel();
             let tab_id = self.workspace.tabs[a].id;
             self.takeover_prompts.push_back(Prompt { tab_id, client, reason: "排查磁盘占用,执行 df -h 和 du".into(), lease: false, reply });
@@ -813,8 +817,11 @@ impl Home {
         if !p.reason.is_empty() {
             rows.push((IconName::Sparkles, c::accent(), format!("原因:{}", p.reason)));
         }
-        if !p.client.parent_exe.is_empty() {
+        let verified = !p.client.parent_exe.is_empty();
+        if verified {
             rows.push((IconName::Terminal, c::muted(), format!("来自 {}", p.client.parent_exe)));
+        } else {
+            rows.push((IconName::TriangleAlert, c::warn(), "无法确认调用方来自哪个程序,只能允许这一次".into()));
         }
         rows.push((IconName::Keyboard, c::warn(), "能在终端里输入命令、读取屏幕".into()));
         rows.push((IconName::ScanEye, c::warn(), "能看到终端里已有的历史内容".into()));
@@ -825,19 +832,17 @@ impl Home {
         let choice = |id: &'static str, label: &'static str, d: Decision, cx: &mut Context<Self>| {
             crate::node_form::ctl_btn(id, None, label, 38.0).w(px(btn_w)).flex_none().justify_center().on_click(cx.listener(move |this, _, window, cx| this.resolve_takeover_prompt(d, window, cx)))
         };
-        let day = choice("tp-day", "24 小时", Decision::Day, cx);
-        let always = choice("tp-always", "总是允许", Decision::Always, cx);
         let deny = crate::node_form::ctl_btn("tp-deny", None, "拒绝", 38.0).w_full().flex_none().justify_center().on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Deny, window, cx)));
-        let once = crate::ui::alert_primary_btn("tp-once", None, "允许一次", Some(btn_w)).on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Once, window, cx)));
-        let hint = div().w_full().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).text_center().child(format!("「24 小时」「总是允许」只对 {} 生效,可在「信任」页撤销", node.name));
-        let buttons = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .child(div().w_full().flex().flex_row().gap(px(10.0)).child(always).child(day).child(once))
-            .child(deny)
-            .child(hint);
+        let once_w = if verified { btn_w } else { crate::ui::alert_btn_w(1) };
+        let once = crate::ui::alert_primary_btn("tp-once", None, "允许一次", Some(once_w)).on_click(cx.listener(|this, _, window, cx| this.resolve_takeover_prompt(Decision::Once, window, cx)));
+        let buttons = if verified {
+            let day = choice("tp-day", "24 小时", Decision::Day, cx);
+            let always = choice("tp-always", "总是允许", Decision::Always, cx);
+            let hint = div().w_full().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).text_center().child(format!("「24 小时」「总是允许」只对 {} 生效,可在「信任」页撤销", node.name));
+            div().w_full().flex().flex_col().gap(px(10.0)).child(div().w_full().flex().flex_row().gap(px(10.0)).child(always).child(day).child(once)).child(deny).child(hint)
+        } else {
+            div().w_full().flex().flex_col().gap(px(10.0)).child(once).child(deny)
+        };
         let body = crate::ui::alert_body(hero, Some(target), points, buttons);
         Some(crate::ui::modal_bg(
             "takeover-prompt",
@@ -1091,7 +1096,7 @@ fn revoke_label(r: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{INPUT_MAX, is_sudo_prompt, OUTPUT_MAX, Takeover, key_bytes, limit_output, new_lease, trim_trailing_blank};
+    use super::{is_sudo_prompt, OUTPUT_MAX, Takeover, key_bytes, limit_output, new_lease, trim_trailing_blank};
     use crate::ctl::Client;
     use serde_json::json;
     use std::time::Instant;

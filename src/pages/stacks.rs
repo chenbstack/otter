@@ -569,18 +569,17 @@ pub(crate) fn service_card(
         .h(px(22.0))
         .overflow_hidden()
         .child(icon(IconName::Plug, 12.0, c::ghost()))
-        .children(svc.ports[..shown].iter().map(|p| tag(p.clone()).font_family(MONO).text_size(px(t::TYPE_MICRO))))
+        .children(svc.ports[..shown].iter().map(|p| tag(p.clone()).mono().small()))
         .when(shown < svc.ports.len(), |d| {
             let all = svc.ports.clone();
             d.child(
-                tag(format!("+{}", svc.ports.len() - shown))
-                    .id(("more-ports", key))
-                    .font_family(MONO)
-                    .text_size(px(t::TYPE_MICRO))
-                    .text_color(c::muted())
-                    .cursor_default()
-                    .hover(|s| s.bg(c::selected()).text_color(c::text()))
-                    .tooltip(move |_, cx| cx.new(|_| node_form::PortsTip(all.clone())).into()),
+                tag(format!("+{}", svc.ports.len() - shown)).mono().small().color(c::muted()).decorate(move |pill| {
+                    pill.id(("more-ports", key))
+                        .cursor_default()
+                        .hover(|s| s.bg(c::selected()).text_color(c::text()))
+                        .tooltip(move |_, cx| cx.new(|_| node_form::PortsTip(all.clone())).into())
+                        .into_any_element()
+                }),
             )
         });
 

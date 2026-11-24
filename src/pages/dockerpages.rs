@@ -712,7 +712,7 @@ impl Home {
                     this.ask(DockAsk { title: "删除存储卷", tile: IconName::HardDrive, name: n.clone(), detail: "Docker 存储卷", body: "卷里的数据会永久丢失", label: "删除存储卷", action: Action::RemoveVolume(n.clone()), list: Vec::new() }, cx);
                 })));
             }
-            let mounted: Vec<Div> = users.iter().take(3).map(|c| tag(c.name.clone())).collect();
+            let mounted: Vec<crate::ui::Tag> = users.iter().take(3).map(|c| tag(c.name.clone())).collect();
             rows.push(
                 row(("vl", i))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::MEDIUM).child(v.name.clone()))

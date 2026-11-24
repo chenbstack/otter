@@ -64,3 +64,28 @@ pub fn parent_exe() -> String {
         .and_then(|p| p.exe().map(|e| e.to_string_lossy().into_owned()))
         .unwrap_or_default()
 }
+
+/// 本地接口对端进程(`otter` 命令或 `otter mcp`)的**父进程**的可执行文件完整路径,也就是调用它的 agent 宿主(或 shell)。
+/// 由 App 根据系统给的对端进程号查出来,不信客户端自己报的。查不到(进程已退出、没权限)返回空串,调用方要把它当「来源未验证」。
+/// 各平台统一用 sysinfo,拿不到 exe 路径时退回进程名。
+pub fn peer_source(pid: u32) -> String {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let kind = ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet);
+    let mut sys = System::new();
+    let peer = Pid::from_u32(pid);
+    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[peer]), true, kind);
+    let Some(parent) = sys.process(peer).and_then(|p| p.parent()) else { return String::new() };
+    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[parent]), true, kind);
+    let Some(p) = sys.process(parent) else { return String::new() };
+    p.exe().map(|e| e.to_string_lossy().into_owned()).filter(|s| !s.is_empty()).unwrap_or_else(|| p.name().to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn peer_source_finds_the_parent_of_a_process() {
+        // 测试进程自己的父进程(cargo / shell)一定查得到;不存在的进程号返回空串
+        assert!(!super::peer_source(std::process::id()).is_empty());
+        assert!(super::peer_source(u32::MAX - 7).is_empty());
+    }
+}

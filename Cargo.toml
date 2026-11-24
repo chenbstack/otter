@@ -42,6 +42,8 @@ directories = "6.0.0"
 keyring = "4.2.0"
 chacha20poly1305 = { version = "0.11.0", features = ["getrandom"] }
 zeroize = "1.9.2"
+# 查本地接口对端进程的真实可执行路径(各平台通用)
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 rand = "0.10"
 russh-sftp = "4.0.0"
 serde = { version = "1", features = ["derive"] }
@@ -57,7 +59,8 @@ libc = "0.2"
 gpui-macos = { package = "gpui-pre-macos", version = "=0.3.12", features = ["test-support"] }
 
 [target.'cfg(windows)'.dependencies]
-sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+# 命名管道对端进程号:GetNamedPipeClientProcessId
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Pipes"] }
 
 [build-dependencies]
 flate2 = "1"

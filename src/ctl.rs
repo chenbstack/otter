@@ -85,15 +85,15 @@ pub fn start() -> Option<mpsc::UnboundedReceiver<UiMsg>> {
     let (tx, rx) = mpsc::unbounded_channel();
     crate::terminal::ssh::runtime().spawn(async move {
         static NEXT: AtomicU64 = AtomicU64::new(1);
-        while let Some(stream) = conns.recv().await {
+        while let Some(acc) = conns.recv().await {
             let id = NEXT.fetch_add(1, Ordering::Relaxed);
-            tokio::spawn(serve(stream, id, tx.clone()));
+            tokio::spawn(serve(acc.conn, acc.pid, id, tx.clone()));
         }
     });
     Some(rx)
 }
 
-async fn serve(stream: crate::ipc_server::Conn, id: u64, tx: mpsc::UnboundedSender<UiMsg>) {
+async fn serve(stream: crate::ipc_server::Conn, pid: Option<u32>, id: u64, tx: mpsc::UnboundedSender<UiMsg>) {
     let (rd, mut wr) = tokio::io::split(stream);
     let mut lines = BufReader::new(rd).lines();
     let mut client: Option<Arc<Client>> = None;
@@ -117,7 +117,12 @@ async fn serve(stream: crate::ipc_server::Conn, id: u64, tx: mpsc::UnboundedSend
             if name.is_empty() {
                 error_response(rid, &RpcError::new("bad_request", "hello 必须带 client_name:说明你是哪个 agent"))
             } else {
-                client = Some(Arc::new(Client { id, name, parent_exe: s("parent_exe") }));
+                // 调用方的来源只信系统给的对端进程号查出来的父进程路径,客户端自己报的 parent_exe 一律忽略。查不到就是空串 = 来源未验证
+                let parent_exe = match pid {
+                    Some(p) => tokio::task::spawn_blocking(move || crate::ipc::peer_source(p)).await.unwrap_or_default(),
+                    None => String::new(),
+                };
+                client = Some(Arc::new(Client { id, name, parent_exe }));
                 ok_response(rid, json!({ "protocol": PROTOCOL, "app": "otter" }))
             }
         } else if let Some(c) = &client {

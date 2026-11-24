@@ -203,7 +203,8 @@ fn panel(title: &'static str, accent: Rgba, right: Div) -> Div {
     )
 }
 
-fn tag(s: String) -> Div {
+/// 面板标题右侧的灰色说明文字(不是标签胶囊)
+fn panel_note(s: String) -> Div {
     div().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::muted()).child(s)
 }
 
@@ -307,7 +308,7 @@ fn cpu_panel(m: &MonSnapshot) -> Div {
     let cores = if scroll { div().id("cpu-cores").h(px(vis as f32 * 20.0)).overflow_y_scroll().child(list).into_any_element() } else { list.into_any_element() };
     let load = kv("负载", format!("{:.2}  {:.2}  {:.2}", n.load[0], n.load[1], n.load[2]), c::text());
     let head = div().flex().flex_row().items_baseline().gap(px(8.0)).child(div().text_size(px(34.0)).font_family(MONO).font_weight(FontWeight::BOLD).text_color(heat(n.cpu / 100.0)).child(format!("{:.0}%", n.cpu)));
-    panel("cpu", c::cpu(), tag(n.host.cpu_model.clone()))
+    panel("cpu", c::cpu(), panel_note(n.host.cpu_model.clone()))
         .child(
             div()
                 .flex()
@@ -334,13 +335,13 @@ fn mem_panel(m: &MonSnapshot) -> Div {
     if n.swap_total > 0 {
         rows = rows.child(meter_row("Swap".into(), n.swap_used as f32 / n.swap_total as f32, monitor::fmt_bytes(n.swap_used as f64), Some(c::warn().opacity(0.8)), 34.0, 64.0));
     }
-    let p = panel("mem", c::mem(), tag(format!("共 {}", monitor::fmt_bytes(n.mem_total as f64)))).child(mem_graph(m.mem_s.clone(), n.mem_total.max(1) as f32, 64.0)).child(rows);
+    let p = panel("mem", c::mem(), panel_note(format!("共 {}", monitor::fmt_bytes(n.mem_total as f64)))).child(mem_graph(m.mem_s.clone(), n.mem_total.max(1) as f32, 64.0)).child(rows);
     p
 }
 
 fn disk_panel(m: &MonSnapshot) -> Div {
     let n = &m.now;
-    let mut p = panel("disks", c::disk(), tag(format!("IO 繁忙 {:.0}%", n.disk_util)));
+    let mut p = panel("disks", c::disk(), panel_note(format!("IO 繁忙 {:.0}%", n.disk_util)));
     for d in n.disks.iter().take(5) {
         let pct = pct_of(d.used, d.total);
         let free = d.total.saturating_sub(d.used);
@@ -361,11 +362,11 @@ fn disk_panel(m: &MonSnapshot) -> Div {
                         .child(div().flex_shrink_0().font_family(MONO).font_weight(FontWeight::SEMIBOLD).text_size(px(t::TYPE_CONTROL)).text_color(heat(pct / 100.0)).child(format!("{pct:.0}%"))),
                 )
                 .child(cells(pct / 100.0, 56, None))
-                .child(tag(format!("已用 {} · 可用 {} · 共 {}", monitor::fmt_bytes(d.used as f64), monitor::fmt_bytes(free as f64), monitor::fmt_bytes(d.total as f64)))),
+                .child(panel_note(format!("已用 {} · 可用 {} · 共 {}", monitor::fmt_bytes(d.used as f64), monitor::fmt_bytes(free as f64), monitor::fmt_bytes(d.total as f64)))),
         );
     }
     if n.disks.is_empty() {
-        p = p.child(tag("读不到磁盘用量".into()));
+        p = p.child(panel_note("读不到磁盘用量".into()));
     }
     let peak = |h: &Vec<f32>| h.iter().rev().take(POINTS).cloned().fold(0.0, f32::max);
     let (pr, pw) = (peak(&m.rd_h), peak(&m.wr_h));
@@ -379,11 +380,11 @@ fn disk_panel(m: &MonSnapshot) -> Div {
             .gap(px(6.0))
             .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(name))
             .child(div().text_size(px(t::TYPE_CONTROL)).font_family(MONO).font_weight(FontWeight::SEMIBOLD).text_color(color).child(monitor::fmt_rate(now)))
-            .child(tag(format!("{iops:.0} IOPS")))
+            .child(panel_note(format!("{iops:.0} IOPS")))
     };
     p.child(div().flex().flex_row().gap(px(24.0)).child(head("↑ 读", c::disk(), n.disk_r, n.disk_riops)).child(head("↓ 写", c::cpu(), n.disk_w, n.disk_wiops)))
         .child(mirror_graph("io-g", ("↑ 读", &m.rd_h, c::disk()), ("↓ 写", &m.wr_h, c::cpu()), top, 30.0))
-        .child(tag(format!("峰值 读 {}  写 {}", monitor::fmt_rate(pr), monitor::fmt_rate(pw))))
+        .child(panel_note(format!("峰值 读 {}  写 {}", monitor::fmt_rate(pr), monitor::fmt_rate(pw))))
 }
 
 fn net_panel(m: &MonSnapshot) -> Div {
@@ -392,7 +393,7 @@ fn net_panel(m: &MonSnapshot) -> Div {
     let peak_tx = m.tx_h.iter().rev().take(POINTS).cloned().fold(0.0, f32::max);
     // 上下对称:同一个满刻度,下载向上、上传向下
     let top = peak_rx.max(peak_tx).max(10_240.0);
-    panel("net", c::net(), tag(format!("峰值 ↓{} ↑{}", monitor::fmt_rate(peak_rx), monitor::fmt_rate(peak_tx))))
+    panel("net", c::net(), panel_note(format!("峰值 ↓{} ↑{}", monitor::fmt_rate(peak_rx), monitor::fmt_rate(peak_tx))))
         .child(div().flex().flex_row().gap(px(24.0)).child(kv("↓ 下载", monitor::fmt_rate(n.net_rx), c::net())).child(kv("↑ 上传", monitor::fmt_rate(n.net_tx), c::mem())))
         .child(mirror_graph("net-g", ("↓ 下载", &m.rx_h, c::net()), ("↑ 上传", &m.tx_h, c::mem()), top, 44.0))
 }

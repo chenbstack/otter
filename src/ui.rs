@@ -739,17 +739,54 @@ pub fn pill(label: impl Into<SharedString>, fg: Rgba, bg: Rgba) -> Div {
         .child(label.into())
 }
 
-/// 中性小标签(节点名、端口等)。
-pub fn tag(label: impl Into<SharedString>) -> Div {
-    div()
-        .flex_shrink_0()
-        .px(px(7.0))
-        .py(px(2.0))
-        .rounded(px(t::RADIUS_SM))
-        .bg(c::idle_soft())
-        .text_size(px(t::TYPE_CAPTION))
-        .text_color(c::secondary())
-        .child(label.into())
+/// 中性小标签(端口、算法、挂载它的容器名等)。**一律用它,不要手写**:
+/// 外面包了一层行布局,所以不管放进块级容器(列、单元格)还是弹性容器,标签都只有文字那么宽,不会被撑满整列。
+/// 例:`tag("ssh-ed25519")`、`tag(port).mono().small()`;要加 id、悬停、提示的用 `.decorate(|pill| …)`,作用在标签本体上。
+pub struct Tag {
+    label: SharedString,
+    mono: bool,
+    size: f32,
+    color: Rgba,
+    decorate: Option<Box<dyn FnOnce(Div) -> AnyElement>>,
+}
+
+pub fn tag(label: impl Into<SharedString>) -> Tag {
+    Tag { label: label.into(), mono: false, size: t::TYPE_CAPTION, color: c::secondary(), decorate: None }
+}
+
+impl Tag {
+    /// 等宽字体(端口、哈希这类)。
+    pub fn mono(mut self) -> Self {
+        self.mono = true;
+        self
+    }
+    /// 小一号的字(表格行里放多个时用)。
+    pub fn small(mut self) -> Self {
+        self.size = t::TYPE_MICRO;
+        self
+    }
+    pub fn color(mut self, color: Rgba) -> Self {
+        self.color = color;
+        self
+    }
+    /// 给标签本体加东西(id、悬停、提示、光标),返回最终元素。
+    pub fn decorate(mut self, f: impl FnOnce(Div) -> AnyElement + 'static) -> Self {
+        self.decorate = Some(Box::new(f));
+        self
+    }
+}
+
+impl IntoElement for Tag {
+    type Element = Div;
+
+    fn into_element(self) -> Div {
+        let pill = div().flex_shrink_0().px(px(7.0)).py(px(2.0)).rounded(px(t::RADIUS_SM)).bg(c::idle_soft()).text_size(px(self.size)).text_color(self.color).when(self.mono, |d| d.font_family(crate::MONO)).child(self.label);
+        let inner = match self.decorate {
+            Some(f) => f(pill),
+            None => pill.into_any_element(),
+        };
+        div().flex().flex_row().items_center().flex_shrink_0().child(inner)
+    }
 }
 
 /// 迷你柱状图:越旧越淡,最新一根满色,读起来有"时间往右走"的方向感。

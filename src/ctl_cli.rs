@@ -57,7 +57,7 @@ impl Conn {
         let wr = crate::ipc::connect().map_err(|_| CallError { kind: "not_running".into(), message: "Otter is not running; open Otter first".into() })?;
         let rd = BufReader::new(wr.try_clone().map_err(|e| CallError { kind: "internal".into(), message: e.to_string() })?);
         let mut c = Self { rd, wr, next: 1 };
-        c.call("hello", json!({ "client_name": client_name, "parent_exe": crate::ipc::parent_exe() }))?;
+        c.call("hello", json!({ "client_name": client_name }))?;
         Ok(c)
     }
 
