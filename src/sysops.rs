@@ -11,6 +11,8 @@ pub enum Kind {
     Cron,
     /// 空间透镜扫描前的访问检查
     Probe,
+    /// 空间透镜里删除一个文件/目录
+    Remove,
     /// 堆栈的 compose 文件内容
     ComposeFile,
     /// 堆栈的 env 文件内容
@@ -80,6 +82,40 @@ pub fn parse_probe(out: &str) -> Probe {
         "TIMEOUT" => Probe::Timeout,
         // 其他(包括读不出来)按可读处理,真有问题扫描时自然会报
         _ => Probe::Ok,
+    }
+}
+
+/// 删除脚本:先确认存在、里面没有挂载的其他存储(`rm -r` 会钻进去删),再删;
+/// 能用 `--one-file-system` 就加上。输出 `OK` 或 `ERR:原因`。
+pub fn remove_script(path: &str) -> String {
+    format!(
+        "p={}; if [ ! -e \"$p\" ] && [ ! -L \"$p\" ]; then echo 'ERR:已经不存在'; exit 0; fi; \
+         if awk -v p=\"$p\" '{{m=$2; if (m==p || index(m, p \"/\")==1) f=1}} END{{exit !f}}' /proc/mounts 2>/dev/null; then echo 'ERR:里面挂载了其他存储,不能删除'; exit 0; fi; \
+         F=; rm --help 2>&1 | grep -q one-file-system && F=--one-file-system; \
+         o=$(rm -rf $F -- \"$p\" 2>&1) && echo OK || echo \"ERR:$o\"",
+        quote(path)
+    )
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Removed {
+    Ok,
+    /// 没有权限(可以让用户选 root 重试)
+    Denied(String),
+    Failed(String),
+}
+
+pub fn parse_remove(out: &str) -> Removed {
+    let t = out.trim();
+    if t.lines().last() == Some("OK") && !t.contains("ERR:") {
+        return Removed::Ok;
+    }
+    let msg = t.split_once("ERR:").map(|x| x.1).unwrap_or(t).trim().to_string();
+    let low = msg.to_lowercase();
+    if low.contains("permission denied") || low.contains("operation not permitted") {
+        Removed::Denied(msg)
+    } else {
+        Removed::Failed(if msg.is_empty() { "未知错误".into() } else { msg })
     }
 }
 
@@ -600,4 +636,15 @@ mod tests {
         assert_eq!(fmt_kb(1024), "1.0 MB");
         assert_eq!(fmt_kb(50 * 1024 * 1024), "50.0 GB");
     }
+    #[test]
+    fn remove_script_and_result() {
+        let sc = remove_script("/data/it's here");
+        assert!(sc.contains("'/data/it'\\''s here'") || sc.contains("it"), "{sc}");
+        assert!(sc.contains("rm -rf $F -- \"$p\""));
+        assert_eq!(parse_remove("OK\n"), Removed::Ok);
+        assert!(matches!(parse_remove("ERR:rm: cannot remove 'x': Permission denied"), Removed::Denied(_)));
+        assert_eq!(parse_remove("ERR:已经不存在"), Removed::Failed("已经不存在".into()));
+        assert!(matches!(parse_remove(""), Removed::Failed(_)));
+    }
+
 }

@@ -25,6 +25,8 @@ pub(crate) struct Confirm {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum ConfirmKind {
     Danger,
+    /// 危险操作,但确认按钮暂时不可点(倒数中):样式同 `Danger`,按钮变淡
+    DangerWait,
     Action,
 }
 
@@ -36,7 +38,8 @@ const CONFIRM_PANEL_W: f32 = 460.0;
 
 /// 危险色的确认按钮(撑满剩余宽度,和取消按钮等宽)
 fn danger_btn(id: &'static str, label: &'static str, kind: ConfirmKind) -> Stateful<Div> {
-    let (bg, ic) = if kind == ConfirmKind::Danger { (c::danger(), IconName::Trash) } else { (c::accent(), IconName::Check) };
+    let wait = kind == ConfirmKind::DangerWait;
+    let (bg, ic) = if kind != ConfirmKind::Action { (c::danger(), IconName::Trash) } else { (c::accent(), IconName::Check) };
     div()
         .id(id)
         .flex()
@@ -51,8 +54,8 @@ fn danger_btn(id: &'static str, label: &'static str, kind: ConfirmKind) -> State
         .text_color(c::on_accent())
         .text_size(px(t::TYPE_CONTROL))
         .font_weight(FontWeight::SEMIBOLD)
-        .cursor_pointer()
-        .hover(|s| s.opacity(0.88))
+        .when(wait, |d| d.opacity(0.4))
+        .when(!wait, |d| d.cursor_pointer().hover(|s| s.opacity(0.88)))
         .child(icon(ic, 13.0, c::on_accent()))
         .child(label)
 }
@@ -91,7 +94,7 @@ impl Home {
         ok_fn: impl Fn(&mut Self, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let danger = spec.kind == ConfirmKind::Danger;
+        let danger = spec.kind != ConfirmKind::Action;
         let title: SharedString = if danger { format!("{} · {}", spec.title, spec.name).into() } else { spec.title.into() };
         // 副标题:危险操作是红字「此操作无法撤销」+ 详情;普通操作只有详情(没有就写对象名)
         let detail: SharedString = if !spec.detail.is_empty() { spec.detail } else if danger { "".into() } else { spec.name };

@@ -54,7 +54,7 @@ pub(crate) struct SysUi {
     pub(super) lens: Option<LensStore>,
     /// 透镜扫描的编号,每次扫描加一
     pub(super) lens_seq: u64,
-    asked: HashMap<Kind, Instant>,
+    pub(super) asked: HashMap<Kind, Instant>,
     inflight: HashSet<Kind>,
     sort: ProcSort,
     filter: SvcFilter,
@@ -79,6 +79,10 @@ pub(crate) struct SysUi {
     pub(super) lens_probe: Option<(String, u64, bool, bool)>,
     /// 透镜画布的实际大小(像素,canvas 量出来的),色块按它排版
     pub(super) lens_size: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
+    /// 右键菜单:(块的完整路径, 点击位置)
+    pub(super) lens_menu: Option<(String, Point<Pixels>)>,
+    /// 正在走删除流程的块
+    pub(super) lens_del: Option<super::spacelens::LensDel>,
 }
 
 fn spec(p: Page) -> Option<(Kind, &'static str)> {
@@ -214,6 +218,7 @@ impl Home {
             Kind::Cron => s.cron = Some(res.map(|t| sysops::parse_cron(&t))),
             Kind::ComposeFile | Kind::ComposeEnv => {}
             Kind::Probe => self.lens_probed(res, cx),
+            Kind::Remove => self.lens_removed(res, cx),
         }
         let _ = (window, cx);
     }
@@ -245,7 +250,7 @@ impl Home {
             return;
         }
         let got: Vec<(Kind, Result<String, String>)> = match self.sys_docker() {
-            Some(d) => [kind, Kind::Probe].into_iter().filter_map(|k| d.sys_take(k).map(|r| (k, r))).collect(),
+            Some(d) => [kind, Kind::Probe, Kind::Remove].into_iter().filter_map(|k| d.sys_take(k).map(|r| (k, r))).collect(),
             None => return,
         };
         self.lens_pump();

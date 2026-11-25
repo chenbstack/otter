@@ -1643,7 +1643,9 @@ async fn lens_run(r: &Runner, sh: &Shared, path: &str, depth: u32, scan: u64, fi
 
 /// 运维页读数据:输出原样存起来,解析在界面一侧
 async fn sys_load(r: &Runner, sh: &Shared, kind: crate::sysops::Kind, script: &str, root: bool) {
-    let res = match sys_exec(r, script, root, None, Duration::from_secs(30)).await {
+    // 删除大目录可能很久
+    let t = if kind == crate::sysops::Kind::Remove { Duration::from_secs(1800) } else { Duration::from_secs(30) };
+    let res = match sys_exec(r, script, root, None, t).await {
         Ok(o) if o.code == 0 || !o.stdout.trim().is_empty() => Ok(o.stdout),
         Ok(o) => Err(last_line(&o)),
         Err(e) => Err(e),

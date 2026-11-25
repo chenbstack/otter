@@ -9,7 +9,9 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-use ::gpui::{MouseButton, canvas, hsla, relative};
+use std::time::{Duration, Instant};
+
+use ::gpui::{MouseButton, anchored, canvas, deferred, hsla, relative};
 
 use super::super::*;
 use super::dockerpages::{icon_btn, small};
@@ -233,6 +235,47 @@ impl LensStore {
         }
     }
 
+    /// 服务器上已经删掉一个文件/目录:从树里去掉,各级上层目录和挂载点总量扣掉它的大小
+    pub fn remove(&mut self, path: &str, kb: u64) {
+        let mut a = parent_path(path);
+        while let Some(p) = a {
+            if let Some(s) = self.sizes.get_mut(&p) {
+                *s = s.saturating_sub(kb);
+            }
+            a = parent_path(&p);
+        }
+        self.total = self.total.saturating_sub(kb);
+        let gone = |p: &String| p == path || is_under(p, path);
+        self.sizes.retain(|p, _| !gone(p));
+        self.complete.retain(|p| !gone(p));
+        self.files.retain(|p| !gone(p));
+        self.listed.retain(|p| !gone(p));
+        self.rebuild();
+    }
+
+    /// 这个路径为什么不能在透镜里删(挂载点、系统目录、扫描起点、面板管理的资源……);能删就是 None
+    pub fn protected(&self, path: &str) -> Option<&'static str> {
+        if path.contains("\u{2026}其他") {
+            return Some("这是合并显示的多个小项,不能整体删除");
+        }
+        if path == self.root {
+            return Some("这是扫描起点");
+        }
+        if self.mounts.iter().any(|(m, _)| m == path) {
+            return Some("这是挂载点");
+        }
+        if self.mounts.iter().any(|(m, _)| is_under(m, path)) {
+            return Some("里面挂载了其他存储");
+        }
+        if is_system_dir(path) {
+            return Some("系统目录");
+        }
+        if is_panel_path(path) {
+            return Some("面板管理的资源,只读");
+        }
+        None
+    }
+
     /// 用已有的大小重拼目录树
     fn rebuild(&mut self) {
         let mount_kb: HashMap<&str, u64> = self.mounts.iter().map(|(m, k)| (m.as_str(), *k)).collect();
@@ -314,6 +357,19 @@ impl LensStore {
         let lazy = !file && !mount && out.is_empty() && kb > 0 && !self.complete.contains(path) && path != self.root;
         Node { name, path: path.to_string(), kb, kids: out, lazy, file, mount, pending: false }
     }
+}
+
+/// 系统目录:根下一级的标准目录,以及 /usr、/var 下面几个关键子目录
+fn is_system_dir(path: &str) -> bool {
+    const TOP: &[&str] = &["bin", "boot", "dev", "etc", "home", "lib", "lib32", "lib64", "libx32", "lost+found", "media", "mnt", "opt", "proc", "root", "run", "sbin", "srv", "sys", "tmp", "usr", "var", "snap"];
+    const SUB: &[&str] = &["/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib64", "/usr/local", "/usr/share", "/usr/include", "/var/lib", "/var/log", "/var/cache", "/var/run", "/var/spool", "/var/tmp"];
+    let p = path.trim_end_matches('/');
+    p.is_empty() || p.strip_prefix('/').is_some_and(|r| TOP.contains(&r)) || SUB.contains(&p)
+}
+
+/// 1Panel、宝塔管理的目录:只读
+fn is_panel_path(path: &str) -> bool {
+    ["/www/server/panel", "/opt/1panel", "/www/server"].iter().any(|b| path == *b || is_under(path, b))
 }
 
 /// 按完整路径找节点
@@ -726,6 +782,14 @@ impl Home {
             .p(px(if level == 1 { 2.0 } else { 1.5 }))
             .when(has_kids || is_mount, |d| d.cursor_pointer())
             .on_hover(cx.listener(move |this, hv: &bool, _, cx| this.lens_hover_move(&path_h, *hv, cx)))
+            .on_mouse_down(MouseButton::Right, cx.listener({
+                let path = node.path.clone();
+                move |this, ev: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.dock.sys.lens_menu = Some((path.clone(), ev.position));
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                 if level > 1 || ev.click_count >= 2 {
                     cx.stop_propagation();
@@ -967,6 +1031,243 @@ impl Home {
     }
 }
 
+/// 删除流程的状态(右键菜单 → 确认 → 文件夹再确认 → 执行 → 没权限时问要不要用 root)
+pub(crate) struct LensDel {
+    pub path: String,
+    pub name: String,
+    pub kb: u64,
+    pub file: bool,
+    /// 1 第一次确认;2 文件夹的第二次确认(倒数 3 秒后才能点)
+    pub step: u8,
+    /// 进入第二步的时间
+    pub since: Instant,
+    pub as_root: bool,
+    /// 命令已发出,等结果
+    pub busy: bool,
+    /// 登录用户没权限(这里是服务器的原话),等用户决定要不要用 root
+    pub denied: Option<String>,
+    /// 删除失败的原因
+    pub fail: Option<String>,
+}
+
+/// 第二次确认的倒数秒数
+const DEL_WAIT: u64 = 3;
+
+impl Home {
+    /// 右键菜单(删除、复制路径);保护的块只给原因
+    pub(crate) fn lens_menu_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::ui::{MenuItem, MenuSide, dropdown_menu_compact};
+        if self.page != Page::Storage {
+            return None;
+        }
+        let (path, pos) = self.dock.sys.lens_menu.clone()?;
+        let st = self.dock.sys.lens.as_ref()?;
+        let reason = st.protected(&path);
+        let mut items = vec![MenuItem::new("复制路径").icon(IconName::Copy)];
+        items.push(match reason {
+            Some(r) => MenuItem::new("不能删除").sub(r).icon(IconName::Lock),
+            None => MenuItem::new("删除").icon(IconName::Trash),
+        });
+        let (t1, t2) = (cx.entity(), cx.entity());
+        let p2 = path.clone();
+        let can = reason.is_none();
+        Some(
+            deferred(
+                anchored().position(pos).snap_to_window_with_margin(px(8.0)).child(div().relative().w(px(crate::ui::DROPDOWN_COMPACT_W)).h(px(0.0)).child(dropdown_menu_compact(
+                    "lens-menu",
+                    items,
+                    None,
+                    MenuSide::Below,
+                    0.0,
+                    move |i, _, cx| {
+                        if i == 0 {
+                            cx.write_to_clipboard(ClipboardItem::new_string(p2.clone()));
+                        }
+                        let path = path.clone();
+                        t1.update(cx, |this, cx| {
+                            this.dock.sys.lens_menu = None;
+                            if i == 1 && can {
+                                this.lens_del_open(&path, cx);
+                            }
+                            cx.notify();
+                        })
+                    },
+                    move |_, cx| {
+                        t2.update(cx, |this, cx| {
+                            this.dock.sys.lens_menu = None;
+                            cx.notify();
+                        })
+                    },
+                ))),
+            )
+            .with_priority(2)
+            .into_any_element(),
+        )
+    }
+
+    fn lens_del_open(&mut self, path: &str, _cx: &mut Context<Self>) {
+        let Some(st) = self.dock.sys.lens.as_ref() else { return };
+        let Some(n) = find(&st.tree, path) else { return };
+        self.dock.sys.lens_del = Some(LensDel {
+            path: path.to_string(),
+            name: n.name.clone(),
+            kb: n.kb,
+            file: n.file,
+            step: 1,
+            since: Instant::now(),
+            as_root: false,
+            busy: false,
+            denied: None,
+            fail: None,
+        });
+    }
+
+    /// 发出删除命令
+    fn lens_del_run(&mut self, as_root: bool) {
+        let Some(d) = self.dock.sys.lens_del.as_mut() else { return };
+        d.busy = true;
+        d.as_root = as_root;
+        d.denied = None;
+        let (path, kb) = (d.path.clone(), d.kb);
+        if self.demo {
+            self.lens_del_done(&path, kb);
+            return;
+        }
+        self.sys_ask(crate::sysops::Kind::Remove, &crate::sysops::remove_script(&path), as_root);
+    }
+
+    /// 删除命令的结果
+    pub(crate) fn lens_removed(&mut self, res: Result<String, String>, cx: &mut Context<Self>) {
+        use crate::sysops::{Removed, parse_remove};
+        let Some(d) = self.dock.sys.lens_del.as_mut() else { return };
+        d.busy = false;
+        let r = match res {
+            Ok(t) => parse_remove(&t),
+            Err(e) => Removed::Failed(e),
+        };
+        match r {
+            Removed::Ok => {
+                let (path, kb) = (d.path.clone(), d.kb);
+                self.lens_del_done(&path, kb);
+            }
+            Removed::Denied(m) if !d.as_root => d.denied = Some(m),
+            Removed::Denied(m) => d.fail = Some(format!("root 也没有权限删除:{m}")),
+            Removed::Failed(m) => d.fail = Some(m),
+        }
+        cx.notify();
+    }
+
+    /// 删掉了:从树里去掉,收起相关状态,提示释放了多少
+    fn lens_del_done(&mut self, path: &str, kb: u64) {
+        let name = self.dock.sys.lens_del.take().map(|d| d.name).unwrap_or_default();
+        if let Some(st) = self.dock.sys.lens.as_mut() {
+            st.remove(path, kb);
+        }
+        let s = &mut self.dock.sys;
+        s.lens_open.retain(|p| p != path && !is_under(p, path));
+        s.lens_zoom.retain(|p| p != path && !is_under(p, path));
+        s.lens_hover = None;
+        // 挂载点的已用量变了,下次渲染重读
+        s.asked.remove(&crate::sysops::Kind::Storage);
+        self.dock.notice = Some((format!("已删除 {name},释放 {}", fmt_kb(kb)).into(), Instant::now()));
+    }
+
+    /// 删除确认框(文件一次,文件夹两次;第二次倒数后才能点)
+    pub(crate) fn lens_delete_dialog(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        use crate::confirm::{Confirm, ConfirmKind};
+        if self.page != Page::Storage {
+            return None;
+        }
+        let d = self.dock.sys.lens_del.as_ref()?;
+        let tile = Self::icon_tile(IconName::Trash, c::danger(), c::idle_soft()).into_any_element();
+        let wait_left = if d.step == 2 { DEL_WAIT.saturating_sub(d.since.elapsed().as_secs()) } else { 0 };
+        let size = fmt_kb(d.kb);
+        let mut points: Vec<(IconName, Rgba, SharedString)> = Vec::new();
+        let (title, ok_label, kind): (&'static str, &'static str, ConfirmKind);
+        if let Some(m) = &d.fail {
+            title = "删除失败";
+            ok_label = "知道了";
+            kind = ConfirmKind::Action;
+            points.push((IconName::TriangleAlert, c::danger(), m.clone().into()));
+        } else if let Some(m) = &d.denied {
+            title = "没有权限删除";
+            ok_label = "用 root(sudo)删除";
+            kind = ConfirmKind::Danger;
+            points.push((IconName::Lock, c::warn(), format!("登录用户没有权限:{m}").into()));
+            points.push((IconName::Info, c::muted(), "改用 root(sudo)执行需要免密 sudo,或在节点里保存了密码;不会自动提权".into()));
+        } else if d.busy {
+            title = "删除";
+            ok_label = "删除中…";
+            kind = ConfirmKind::DangerWait;
+            points.push((IconName::Clock, c::warn(), if d.file { "正在删除…".into() } else { "正在删除,目录大的话可能要一会儿…".into() }));
+        } else if d.step == 1 {
+            title = if d.file { "删除文件" } else { "删除目录" };
+            ok_label = if d.file { "删除" } else { "下一步" };
+            kind = ConfirmKind::Danger;
+            points.push((IconName::Trash, c::danger(), "从服务器上永久删除,不经回收站,无法恢复".into()));
+            points.push((if d.file { IconName::File } else { IconName::Folder }, c::muted(), if d.file { format!("文件大小 {size}") } else { format!("目录及里面所有内容,约 {size}") }.into()));
+            if !d.file {
+                points.push((IconName::ShieldAlert, c::warn(), "目录需要再确认一次".into()));
+            }
+        } else {
+            title = "再次确认删除目录";
+            ok_label = ["确认删除", "1 秒后可点", "2 秒后可点", "3 秒后可点"][wait_left as usize];
+            kind = if wait_left > 0 { ConfirmKind::DangerWait } else { ConfirmKind::Danger };
+            points.push((IconName::TriangleAlert, c::danger(), format!("整个目录和里面所有文件都会被永久删除,约 {size}").into()));
+            points.push((IconName::Folder, c::muted(), d.path.clone().into()));
+        }
+        let spec = Confirm {
+            ids: ["lens-del-cancel", "lens-del-ok"],
+            title,
+            tile,
+            name: d.name.clone().into(),
+            detail: d.path.clone().into(),
+            points,
+            ok_label,
+            kind,
+            extra: None,
+        };
+        Some(self.delete_confirm(
+            "lens-del",
+            spec,
+            |this| {
+                // 删除进行中不能取消(命令已经在服务器上跑)
+                if !this.dock.sys.lens_del.as_ref().is_some_and(|d| d.busy) {
+                    this.dock.sys.lens_del = None;
+                }
+            },
+            move |this, cx| {
+                let Some(d) = this.dock.sys.lens_del.as_mut() else { return };
+                if d.busy {
+                    return;
+                }
+                if d.fail.is_some() {
+                    this.dock.sys.lens_del = None;
+                } else if d.denied.is_some() {
+                    this.lens_del_run(true);
+                } else if d.step == 1 && !d.file {
+                    d.step = 2;
+                    d.since = Instant::now();
+                    // 倒数期间每秒重绘一次
+                    cx.spawn(async move |this, cx| {
+                        for _ in 0..=DEL_WAIT {
+                            cx.background_executor().timer(Duration::from_millis(1000)).await;
+                            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                } else if d.step == 1 || d.since.elapsed() >= Duration::from_secs(DEL_WAIT) {
+                    this.lens_del_run(false);
+                }
+                cx.notify();
+            },
+            cx,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1095,4 +1396,29 @@ mod tests {
         assert_eq!(last.name, "其他 10 项");
         assert!(!last.lazy);
     }
+    #[test]
+    fn protects_mounts_system_dirs_and_root() {
+        let st = LensStore::new("/", 100).with_mounts(&[("/mnt/nas".into(), 10)]);
+        assert_eq!(st.protected("/"), Some("这是扫描起点"));
+        assert_eq!(st.protected("/mnt/nas"), Some("这是挂载点"));
+        assert_eq!(st.protected("/mnt"), Some("里面挂载了其他存储"));
+        assert!(st.protected("/var").is_some() && st.protected("/usr/local").is_some() && st.protected("/etc").is_some());
+        assert!(st.protected("/var/lib/docker").is_none());
+        assert!(st.protected("/home/chen/old.iso").is_none());
+        assert!(st.protected("/opt/1panel/apps").is_some() && st.protected("/www/server/panel").is_some());
+        assert!(st.protected("/var/\u{2026}其他").is_some());
+        assert!(st.protected("/data/x").is_none());
+    }
+
+    #[test]
+    fn removing_a_node_shrinks_ancestors() {
+        let mut st = LensStore::new("/", 100);
+        st.begin(1, "/", 3);
+        st.apply(LensEv::Lines { scan: 1, lines: vec![(100, "/".into(), LineKind::Dir), (60, "/a".into(), LineKind::Dir), (40, "/a/b".into(), LineKind::Dir), (20, "/a/c".into(), LineKind::Dir), (40, "/d".into(), LineKind::Dir)] });
+        st.remove("/a/b", 40);
+        assert!(find(&st.tree, "/a/b").is_none());
+        assert_eq!(find(&st.tree, "/a").unwrap().kb, 20);
+        assert_eq!(st.tree.kb, 60);
+    }
+
 }
