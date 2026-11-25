@@ -19,6 +19,8 @@ pub(super) struct BackupDlg {
     pub launched: Option<usize>,
     pub err: Option<String>,
     pub restore_ask: Option<String>,
+    /// 恢复前是否先备份当前数据;由用户在确认框里勾选,每次打开确认框都从不勾选开始
+    pub rs_pre: bool,
     pub del_ask: Option<String>,
     /// 这次打开弹窗后发起过恢复,等它出结果
     pub restoring: bool,
@@ -36,7 +38,7 @@ pub(super) struct BackupDlg {
 
 impl BackupDlg {
     pub fn new(db: String) -> Self {
-        Self { db, data: None, last: Instant::now(), starting: false, launched: None, err: None, restore_ask: None, del_ask: None, restoring: false, watch: Instant::now(), want: false, deleting: None, rs_file: None, dl: None }
+        Self { db, data: None, last: Instant::now(), starting: false, launched: None, err: None, restore_ask: None, rs_pre: false, del_ask: None, restoring: false, watch: Instant::now(), want: false, deleting: None, rs_file: None, dl: None }
     }
 
     /// 备份/恢复确实在进行(不含刚发起后的观察窗口):此时不能再发起新的
@@ -265,7 +267,7 @@ impl Home {
             cx.notify();
             return;
         }
-        match inst.kind.restore_script(&inst.container.name, &b.db, &file) {
+        match inst.kind.restore_script(&inst.container.name, &b.db, &file, b.rs_pre) {
             Ok(s) => {
                 b.starting = true;
                 b.restoring = true;
@@ -408,7 +410,7 @@ impl Home {
         };
         let mut notes = div().flex().flex_col().gap(px(6.0));
         if running {
-            notes = notes.child(banner(true, "正在恢复:先自动备份当前数据,再导入所选备份…".into(), c::accent()));
+            notes = notes.child(banner(true, "正在恢复所选备份…".into(), c::accent()));
         }
         if b.starting && !running && !backing {
             notes = notes.child(banner(true, "正在启动…".into(), c::accent()));
@@ -522,6 +524,7 @@ impl Home {
                             super::syspages::tip(icon_btn_c(("dbm-bk-rs", i), IconName::Undo2, c::muted()), "恢复").on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(b) = this.dock.dbm.bk.as_mut() {
                                     b.restore_ask = Some(n2.clone());
+                                    b.rs_pre = false;
                                 }
                                 cx.notify();
                             })).into_any_element()
@@ -580,7 +583,7 @@ impl Home {
             .child(bar)
             .children(has_notes.then_some(notes))
             .child(div().id("dbm-bk-list").max_h(px(300.0)).overflow_y_scroll().child(list))
-            .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child("恢复会覆盖库里现有数据,恢复前自动再备份一份当前数据"));
+            .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child("恢复会覆盖库里现有数据;恢复时可以选择先备份当前数据"));
         let esc = cx.listener(|this: &mut Self, e: &KeyDownEvent, _, cx| {
             if e.keystroke.key == "escape" {
                 this.dbm_bk_close(cx);
@@ -596,21 +599,59 @@ impl Home {
         let Some(b) = self.dock.dbm.bk.as_ref() else { return v };
         let db = b.db.clone();
         if let Some(file) = b.restore_ask.clone() {
+            let on = b.rs_pre;
+            let pre_check = div()
+                .id("dbm-bkrs-pre")
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(10.0))
+                .cursor_pointer()
+                .child(
+                    div()
+                        .mt(px(1.0))
+                        .size(px(16.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.0))
+                        .border_1()
+                        .when(on, |d| d.bg(c::accent()).border_color(c::accent()))
+                        .when(!on, |d| d.border_color(c::field_border()))
+                        .children(on.then(|| icon(IconName::Check, 12.0, c::on_accent()))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::secondary()).child("恢复前先备份当前数据"))
+                        .child(div().text_size(px(t::TYPE_MICRO + 1.0)).text_color(c::ghost()).child("多占一份磁盘空间;不勾选则直接覆盖,无法回退")),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(b) = this.dock.dbm.bk.as_mut() {
+                        b.rs_pre = !b.rs_pre;
+                    }
+                    cx.notify();
+                }))
+                .into_any_element();
             let spec = crate::confirm::Confirm {
                 ids: ["dbm-bkrs-cancel", "dbm-bkrs-ok"],
                 title: "恢复数据库",
                 tile: Self::icon_tile(IconName::Undo2, c::accent(), c::accent().opacity(0.18)).into_any_element(),
-                name: db.clone().into(),
-                detail: file.clone().into(),
+                name: file.clone().into(),
+                detail: "".into(),
                 points: vec![
                     (IconName::Database, c::warn(), "库里现有的数据会被这份备份覆盖;备份之后新增的数据会丢失".into()),
-                    (IconName::DatabaseBackup, c::online(), "恢复前会自动再备份一份当前数据,可再恢复回来".into()),
                     (IconName::TriangleAlert, c::warn(), "恢复期间用到这个库的应用可能报错".into()),
                 ],
                 ok_label: "覆盖并恢复",
-                compact: false,
                 kind: crate::confirm::ConfirmKind::Action,
-                extra: None,
+                extra: Some(pre_check),
             };
             v.push(self.delete_confirm("dbm-bkrs-dialog", spec, |this| { if let Some(b) = this.dock.dbm.bk.as_mut() { b.restore_ask = None; } }, move |this, cx| this.dbm_bk_restore(file.clone(), cx), cx).into_any_element());
         }
@@ -626,7 +667,6 @@ impl Home {
                     (IconName::Database, c::online(), "数据库本身不受影响".into()),
                 ],
                 ok_label: "删除备份",
-                compact: false,
                 kind: crate::confirm::ConfirmKind::Danger,
                 extra: None,
             };

@@ -576,7 +576,6 @@ impl Home {
                 (IconName::Users, c::accent(), "所属用户不会被删除,可到「用户」里另行处理".into()),
             ],
             ok_label: "删除数据库",
-            compact: false,
             kind: crate::confirm::ConfirmKind::Danger,
             extra: None,
         };
@@ -804,7 +803,6 @@ impl Home {
                 (IconName::Database, c::accent(), if mysql { "它的库不会被删除".into() } else { "它还拥有库或对象时会删除失败,需要先转移或删除那些库".into() }),
             ],
             ok_label: "删除用户",
-            compact: false,
             kind: crate::confirm::ConfirmKind::Danger,
             extra: None,
         };

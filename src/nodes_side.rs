@@ -311,7 +311,6 @@ impl Home {
                 (IconName::Trash, c::danger(), "已保存到本地库的也会删除,无法恢复".into()),
             ],
             ok_label: "清空日志",
-            compact: false,
             kind: crate::confirm::ConfirmKind::Danger,
             extra: None,
         };

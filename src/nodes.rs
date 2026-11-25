@@ -677,7 +677,6 @@ impl Home {
                 (IconName::ShieldCheck, c::online(), "服务器上的内容不受影响".into()),
             ],
             ok_label: "删除分组",
-            compact: false,
             kind: crate::confirm::ConfirmKind::Danger,
             extra: None,
         };
@@ -700,7 +699,6 @@ impl Home {
                 (IconName::ShieldCheck, c::online(), "服务器上的内容不受影响".into()),
             ],
             ok_label: "删除节点",
-            compact: false,
             kind: crate::confirm::ConfirmKind::Danger,
             extra: None,
         };

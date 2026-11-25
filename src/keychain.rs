@@ -554,7 +554,6 @@ impl Home {
                     detail: k.map(|k| k.fingerprint.clone()).unwrap_or_default().into(),
                     points,
                     ok_label: "删除密钥",
-                    compact: false,
                     kind: crate::confirm::ConfirmKind::Danger,
                     extra: None,
                 };

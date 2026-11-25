@@ -784,7 +784,6 @@ impl Home {
                     .collect()
                 },
                 ok_label: cf.label,
-                compact: true,
                 kind: if install { crate::confirm::ConfirmKind::Action } else { crate::confirm::ConfirmKind::Danger },
                 extra: install.then(|| self.accel_check(cx).into_any_element()),
             };

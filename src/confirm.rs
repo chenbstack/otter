@@ -2,22 +2,20 @@
 //! 和提示框(`ui::alert_*`,接管确认、连接已断开)是两个组件:确认框只管「要不要做这件破坏性操作」,固定的版式和按钮,调用方只给内容。
 
 use super::*;
-use crate::ui::{alert_body, alert_hero, alert_rows, alert_target, modal_glass};
+use crate::ui::modal;
 
 /// 删除确认框的内容(见 `confirm_parts`)
 pub(crate) struct Confirm {
     /// 取消、确认两个按钮的元素 id
     pub ids: [&'static str; 2],
     pub title: &'static str,
-    /// 对象卡片左边的图标块
+    /// 标题行左边的图标块(对象自己的图标,32)
     pub tile: AnyElement,
     pub name: SharedString,
     pub detail: SharedString,
     /// 后果清单,一条一行:(图标, 图标颜色, 文字)。会丢的东西用红色,不受影响的用绿色
     pub points: Vec<(IconName, Rgba, SharedString)>,
     pub ok_label: &'static str,
-    /// 紧凑模式:图标和标题同一行、不显示对象卡片、清单行更矮,用于清单较长的确认框
-    pub compact: bool,
     /// 危险操作(红色、垃圾桶、「无法撤销」)还是普通操作(强调色、对勾、无副标题警告)
     pub kind: ConfirmKind,
     /// 清单下面的额外内容(比如一个勾选项);没有就 None
@@ -32,6 +30,8 @@ pub(crate) enum ConfirmKind {
 
 /// 删除确认框宽度(比表单弹窗窄:内容少,居中排版)
 pub(crate) const CONFIRM_W: f32 = 400.0;
+/// 确认框面板宽度(标题行左对齐、文件名等详情要一行放下,比提示框宽一点)
+const CONFIRM_PANEL_W: f32 = 460.0;
 
 
 /// 危险色的确认按钮(撑满剩余宽度,和取消按钮等宽)
@@ -39,13 +39,13 @@ fn danger_btn(id: &'static str, label: &'static str, kind: ConfirmKind) -> State
     let (bg, ic) = if kind == ConfirmKind::Danger { (c::danger(), IconName::Trash) } else { (c::accent(), IconName::Check) };
     div()
         .id(id)
-        .flex_1()
         .flex()
         .flex_row()
         .items_center()
         .justify_center()
         .gap(px(6.0))
-        .h(px(38.0))
+        .h(px(32.0))
+        .px(px(16.0))
         .rounded(px(t::RADIUS_MD))
         .bg(bg)
         .text_color(c::on_accent())
@@ -68,9 +68,9 @@ impl Home {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let parts = self.confirm_parts(spec, cancel_fn, ok_fn, cx);
-        modal_glass(
+        modal(
             dialog_id,
-            CONFIRM_W,
+            CONFIRM_PANEL_W,
             cx.listener(move |this, e: &KeyDownEvent, _, cx| {
                 if e.keystroke.key == "escape" {
                     cancel_fn(this);
@@ -82,9 +82,8 @@ impl Home {
         )
     }
 
-    /// 删除确认框的内容(节点、分组、密钥共用),居中排版,自上而下:
-    /// 红色图标(带一圈淡光晕) → 标题 + “此操作无法撤销” → 对象卡片(和节点页的节点卡片同款) → 后果清单(一行一项,图标区分“会丢的”和“不受影响的”) → 取消 / 删除两个等宽按钮。
-    /// 不再单独做底栏:按钮直接放在内容里,整体更紧凑。
+    /// 确认框的内容(节点、分组、密钥、Docker、数据库共用),版式和备份弹窗、连接信息弹窗一致:
+    /// 左对齐标题行(对象图标块 + 标题 + 副标题;危险操作标题带对象名、副标题红字「此操作无法撤销」)→ 后果清单(一条一个描边小框)→ 额外内容 → 右对齐的取消 / 确认按钮。没有单独的对象卡片。
     pub(crate) fn confirm_parts(
         &self,
         spec: Confirm,
@@ -92,81 +91,56 @@ impl Home {
         ok_fn: impl Fn(&mut Self, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        if spec.compact {
-            return self.confirm_compact(spec, cancel_fn, ok_fn, cx);
-        }
-        let (hic, tone, sub) = if spec.kind == ConfirmKind::Danger { (IconName::Trash, c::danger(), "此操作无法撤销") } else { (IconName::Check, c::accent(), "") };
-        let hero = alert_hero(hic, tone, spec.title.to_string(), sub);
-        let target = alert_target(spec.tile, spec.name, spec.detail);
-        let rows = alert_rows(spec.points.into_iter().map(|(ic, color, text)| (ic, color, text.to_string())).collect());
-        let cancel = crate::node_form::ctl_btn(spec.ids[0], None, "取消", 38.0).flex_1().justify_center().on_click(cx.listener(move |this, _, _, cx| {
-            cancel_fn(this);
-            cx.notify();
-        }));
-        let ok = danger_btn(spec.ids[1], spec.ok_label, spec.kind).on_click(cx.listener(move |this, _, _, cx| ok_fn(this, cx)));
-        let buttons = div().w_full().flex().flex_row().gap(px(10.0)).child(cancel).child(ok);
-        vec![alert_body(hero, Some(target), rows, buttons).into_any_element()]
-    }
-
-    /// 紧凑版:左上小图标 + 标题/副标题一行,下面直接是清单和按钮,不再显示对象卡片(标题已经说明对象)。
-    fn confirm_compact(
-        &self,
-        spec: Confirm,
-        cancel_fn: impl Fn(&mut Self) + Copy + 'static,
-        ok_fn: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
         let danger = spec.kind == ConfirmKind::Danger;
-        let (tone, hic, sub, gap) = if danger { (c::danger(), IconName::Trash, "此操作无法撤销", 12.0) } else { (c::accent(), IconName::Download, "", 16.0) };
+        let title: SharedString = if danger { format!("{} · {}", spec.title, spec.name).into() } else { spec.title.into() };
+        // 副标题:危险操作是红字「此操作无法撤销」+ 详情;普通操作只有详情(没有就写对象名)
+        let detail: SharedString = if !spec.detail.is_empty() { spec.detail } else if danger { "".into() } else { spec.name };
         let head = div()
-            .w_full()
+            .mb(px(6.0))
             .flex()
             .flex_row()
             .items_center()
             .gap(px(12.0))
-            .child(
-                div()
-                    .size(px(40.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(t::RADIUS_LG))
-                    .bg(tone.opacity(0.16))
-                    .border_1()
-                    .border_color(tone.opacity(0.36))
-                    .child(icon(hic, 18.0, tone)),
-            )
+            .child(spec.tile)
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .gap(px(1.0))
-                    .child(div().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::BOLD).text_color(c::text()).child(SharedString::from(format!("{} · {}", spec.title, spec.name))))
-                    .children((!sub.is_empty()).then(|| div().text_size(px(t::TYPE_MICRO)).text_color(c::muted()).child(sub))),
+                    .child(div().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::BOLD).text_color(c::text()).child(title))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(6.0))
+                            .text_size(px(t::TYPE_CAPTION))
+                            .children(danger.then(|| div().flex_none().text_color(c::danger()).child("此操作无法撤销")))
+                            .children((!detail.is_empty()).then(|| div().min_w_0().truncate().text_color(c::ghost()).child(if danger { format!("· {detail}") } else { detail.to_string() }))),
+                    ),
             );
-        let n = spec.points.len();
-        let rows = div().w_full().flex().flex_col().rounded(px(t::RADIUS_MD)).border_1().border_color(c::field_border()).bg(c::field()).children(spec.points.into_iter().enumerate().map(|(i, (ic, color, text))| {
+        let rows = div().w_full().flex().flex_col().gap(px(6.0)).children(spec.points.into_iter().map(|(ic, color, text)| {
             div()
-                .min_h(px(if danger { 28.0 } else { 40.0 }))
-                .px(px(if danger { 10.0 } else { 14.0 }))
-                .py(px(if danger { 4.0 } else { 10.0 }))
+                .min_h(px(40.0))
+                .px(px(12.0))
+                .py(px(6.0))
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(if danger { 8.0 } else { 10.0 }))
-                .when(i + 1 < n, |d| d.border_b_1().border_color(c::line()))
-                .child(icon(ic, 13.0, color))
-                .child(div().flex_1().min_w_0().when(!danger, |d| d.line_height(relative(1.5))).text_size(px(t::TYPE_MICRO + 1.0)).text_color(c::secondary()).child(text))
+                .gap(px(10.0))
+                .rounded(px(t::RADIUS_MD))
+                .bg(c::field())
+                .border_1()
+                .border_color(c::field_border())
+                .child(icon(ic, 14.0, color))
+                .child(div().flex_1().min_w_0().line_height(relative(1.5)).text_size(px(t::TYPE_CONTROL)).text_color(c::secondary()).child(text))
         }));
-        let cancel = crate::node_form::ctl_btn(spec.ids[0], None, "取消", 32.0).flex_1().justify_center().on_click(cx.listener(move |this, _, _, cx| {
+        let cancel = crate::node_form::ctl_btn(spec.ids[0], None, "取消", 32.0).on_click(cx.listener(move |this, _, _, cx| {
             cancel_fn(this);
             cx.notify();
         }));
-        let ok = danger_btn(spec.ids[1], spec.ok_label, spec.kind).h(px(32.0)).on_click(cx.listener(move |this, _, _, cx| ok_fn(this, cx)));
-        let buttons = div().w_full().flex().flex_row().gap(px(10.0)).child(cancel).child(ok);
-        vec![div().flex().flex_col().gap(px(gap)).px(px(20.0)).pt(px(20.0)).pb(px(20.0)).child(head).child(rows).children(spec.extra).child(buttons).into_any_element()]
+        let ok = danger_btn(spec.ids[1], spec.ok_label, spec.kind).on_click(cx.listener(move |this, _, _, cx| ok_fn(this, cx)));
+        let buttons = div().w_full().flex().flex_row().justify_end().gap(px(10.0)).child(cancel).child(ok);
+        vec![div().flex().flex_col().gap(px(14.0)).px(px(20.0)).pt(px(20.0)).pb(px(18.0)).child(head).child(rows).children(spec.extra).child(buttons).into_any_element()]
     }
 }

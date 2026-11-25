@@ -939,8 +939,8 @@ impl DbKind {
         ))
     }
 
-    /// 恢复:先自动做一份「恢复前」备份(失败就取消),再导入。进度写在 `$D/.restore-<库>`
-    pub fn restore_script(self, ctr: &str, db: &str, file: &str) -> Result<String, String> {
+    /// 恢复:`pre` 为真时先做一份「恢复前」备份(失败就取消),再导入;默认由用户决定,不替用户做主。进度写在 `$D/.restore-<库>`
+    pub fn restore_script(self, ctr: &str, db: &str, file: &str, pre: bool) -> Result<String, String> {
         let ext = self.backup_ext().ok_or("Redis 不支持恢复")?;
         if !valid_container(ctr) || !valid_ident(db) || !valid_backup_file(file) {
             return Err("容器名、库名或文件名里有不支持的字符".into());
@@ -950,8 +950,16 @@ impl DbKind {
         }
         let s = sq(self.restore_inner());
         let feed = if self == DbKind::Postgres { format!(r#"docker exec -i -e OTG_DB={db} {ctr} sh -c {s} <"$F" 2>"$ST.err""#) } else { format!(r#"gunzip -c "$F" | docker exec -i -e OTG_DB={db} {ctr} sh -c {s} 2>"$ST.err""#) };
+        let (space, dump) = if pre {
+            (
+                r#"a=$(df -Pk "$D" | awk 'NR==2{print $4}'); [ "${a:-0}" -ge 102400 ] || { echo "服务器磁盘剩余空间不足 100MB,无法先做恢复前备份" >&2; exit 1; }; "#.to_string(),
+                format!(r#"P="{db}_$(date +%Y%m%d-%H%M%S)-pre.{ext}"; if ! dump_to "$P"; then st "fail 恢复前备份失败,已取消恢复"; exit 1; fi; "#),
+            )
+        } else {
+            (String::new(), String::new())
+        };
         Ok(format!(
-            r#"{}a=$(df -Pk "$D" | awk 'NR==2{{print $4}}'); [ "${{a:-0}}" -ge 102400 ] || {{ echo "服务器磁盘剩余空间不足 100MB,无法先做恢复前备份" >&2; exit 1; }}; {}F={file_q}; [ -f "$D/$F" ] || {{ echo "备份文件不存在" >&2; exit 1; }}; ST="$D/.restore-{db}"; case "$F" in *.sql.gz) gzip -t "$D/$F" || {{ echo "备份文件已损坏(gzip 校验失败)" >&2; exit 1; }};; esac; if [ -f "$ST" ] && [ "$(head -n1 "$ST")" = running ]; then echo "这个库正在恢复中" >&2; exit 1; fi; st() {{ printf '%s\n' "$1" >"$ST"; chown "$U" "$ST" 2>/dev/null; }}; st running; ( trap '' HUP; cd "$D" || exit 1; P="{db}_$(date +%Y%m%d-%H%M%S)-pre.{ext}"; if ! dump_to "$P"; then st "fail 恢复前备份失败,已取消恢复"; exit 1; fi; F="$D/$F"; if {feed}; then st ok; else m=$(tail -n1 "$ST.err" 2>/dev/null | tr '\t' ' '); st "fail ${{m:-恢复失败}}"; fi; rm -f "$ST.err" ) </dev/null >/dev/null 2>&1 & echo started
+            r#"{}{space}{}F={file_q}; [ -f "$D/$F" ] || {{ echo "备份文件不存在" >&2; exit 1; }}; ST="$D/.restore-{db}"; case "$F" in *.sql.gz) gzip -t "$D/$F" || {{ echo "备份文件已损坏(gzip 校验失败)" >&2; exit 1; }};; esac; if [ -f "$ST" ] && [ "$(head -n1 "$ST")" = running ]; then echo "这个库正在恢复中" >&2; exit 1; fi; st() {{ printf '%s\n' "$1" >"$ST"; chown "$U" "$ST" 2>/dev/null; }}; st running; ( trap '' HUP; cd "$D" || exit 1; {dump}F="$D/$F"; if {feed}; then st ok; else m=$(tail -n1 "$ST.err" 2>/dev/null | tr '\t' ' '); st "fail ${{m:-恢复失败}}"; fi; rm -f "$ST.err" ) </dev/null >/dev/null 2>&1 & echo started
 "#,
             Self::backup_prelude(ctr),
             self.dump_fn(ctr, db),
@@ -1302,8 +1310,10 @@ mod tests {
         for k in [DbKind::Postgres, DbKind::Mysql, DbKind::Mariadb] {
             let ext = k.backup_ext().unwrap();
             let b = k.backup_script("my-db.1", "shop").unwrap();
-            let r = k.restore_script("my-db.1", "shop", &format!("shop_20260101-101010.{ext}")).unwrap();
-            for s in [&b, &r] {
+            let r = k.restore_script("my-db.1", "shop", &format!("shop_20260101-101010.{ext}"), true).unwrap();
+            let r0 = k.restore_script("my-db.1", "shop", &format!("shop_20260101-101010.{ext}"), false).unwrap();
+            assert!(!r0.contains("-pre.") && !r0.contains("df -Pk") && r0.contains(".restore-shop"));
+            for s in [&b, &r, &r0] {
                 assert!(std::process::Command::new("sh").arg("-n").arg("-c").arg(s).status().unwrap().success(), "{k:?}: {s}");
                 // 密码不会出现在脚本里,只在容器里读环境变量
                 assert!(!s.contains("PASSWORD=") || s.contains("\"$p\""));
@@ -1313,7 +1323,8 @@ mod tests {
             if let Ok(dir) = std::env::var("OTTER_DUMP_SCRIPTS") {
                 let n = if k == DbKind::Postgres { "pg" } else if k == DbKind::Mysql { "my" } else { "maria" };
                 std::fs::write(format!("{dir}/bk-{n}.sh"), &b).unwrap();
-                std::fs::write(format!("{dir}/rs-{n}.sh"), k.restore_script("my-db.1", "shop", &format!("shop_20260101-101010.{ext}")).unwrap()).unwrap();
+                std::fs::write(format!("{dir}/rs-{n}.sh"), k.restore_script("my-db.1", "shop", &format!("shop_20260101-101010.{ext}"), true).unwrap()).unwrap();
+                std::fs::write(format!("{dir}/rsn-{n}.sh"), &r0).unwrap();
                 std::fs::write(format!("{dir}/ls.sh"), backup_list_script("my-db.1").unwrap()).unwrap();
                 std::fs::write(format!("{dir}/cancel.sh"), backup_cancel_script("my-db.1", "shop_X.dump.part").unwrap()).unwrap();
             }
@@ -1322,9 +1333,9 @@ mod tests {
         assert!(DbKind::Postgres.backup_script("c;rm", "x").is_err());
         assert!(DbKind::Postgres.backup_script("c", "x y").is_err());
         // 恢复只接受属于这个库、扩展名对得上的文件
-        assert!(DbKind::Postgres.restore_script("c", "shop", "other_20260101-101010.dump").is_err());
-        assert!(DbKind::Postgres.restore_script("c", "shop", "shop_2026.sql.gz").is_err());
-        assert!(DbKind::Postgres.restore_script("c", "shop", "../shop_1.dump").is_err());
+        assert!(DbKind::Postgres.restore_script("c", "shop", "other_20260101-101010.dump", false).is_err());
+        assert!(DbKind::Postgres.restore_script("c", "shop", "shop_2026.sql.gz", false).is_err());
+        assert!(DbKind::Postgres.restore_script("c", "shop", "../shop_1.dump", false).is_err());
         assert!(std::process::Command::new("sh").arg("-n").arg("-c").arg(backup_list_script("c").unwrap()).status().unwrap().success());
     }
 
