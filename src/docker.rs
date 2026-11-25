@@ -414,6 +414,37 @@ fn shell_quote(s: &str) -> String {
 
 // ---- 运行时:连接、轮询、操作 ----------------------------------------------------
 
+const CANCELLED: &str = "安装已取消";
+
+/// 一键安装 Docker 走到哪一步
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum InstallPhase {
+    #[default]
+    Idle,
+    /// 正在探测系统、测速
+    Probing,
+    /// 探测完,等用户确认
+    Ready,
+    Running,
+    /// 与服务器的连接断了,安装还在服务器上继续;重新检测会重连并接着看
+    Lost,
+    /// 用户取消了安装
+    Cancelled,
+    Failed(String),
+    Done,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InstallView {
+    pub phase: InstallPhase,
+    pub probe: Option<crate::docker_install::Probe>,
+    pub log: Vec<String>,
+    /// 最近一次收到新输出的时间(界面据此提示「很久没动静」)
+    pub last_output: Option<std::time::Instant>,
+    /// 已经请求取消,等服务器上的进程退出
+    pub cancelling: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Problem {
     /// 服务器上没有 docker 命令
@@ -452,6 +483,8 @@ pub enum Action {
     /// 新建堆栈:建目录、写 docker-compose.yml,再 `docker compose up -d`
     ComposeCreate { project: String, dir: String, text: String, env: String },
     ComposeUp { project: String, dir: String, files: Vec<String>, envs: Vec<String>, pull: bool },
+    /// 在没装 Docker 的服务器上一键安装(只在「没有安装 Docker」页出现):安装源,以及装完是否配置 Docker Hub 镜像加速
+    InstallDocker { source: crate::docker_install::Source, accel: bool },
 }
 
 impl Action {
@@ -470,7 +503,7 @@ impl Action {
             // 走 `run_daemon`,不经过 docker 命令
             Action::SaveDaemon(_) | Action::SaveRestartDaemon(_) => Vec::new(),
             Action::Logout(h) => v(&["logout"], h),
-            Action::ConfirmInsecure(_) | Action::Sys(_) | Action::ComposeCreate { .. } => Vec::new(),
+            Action::ConfirmInsecure(_) | Action::Sys(_) | Action::ComposeCreate { .. } | Action::InstallDocker { .. } => Vec::new(),
             Action::ComposeUp { project, dir, files, envs, pull } => {
                 let mut v: Vec<String> = ["compose", "-p", project, "--project-directory", dir].map(String::from).to_vec();
                 for f in files {
@@ -495,9 +528,10 @@ impl Action {
             Action::PruneImages => "未使用的镜像",
             Action::PruneVolumes => "未使用的存储卷",
             Action::SaveDaemon(_) | Action::SaveRestartDaemon(_) => "daemon.json",
+            Action::InstallDocker { .. } => "docker",
         }
     }
-    fn verb(&self) -> &'static str {
+    pub(crate) fn verb(&self) -> &'static str {
         match self {
             Action::Start(_) => "启动",
             Action::Stop(_) => "停止",
@@ -515,6 +549,7 @@ impl Action {
             Action::Sys(_) => "执行",
             Action::ComposeUp { .. } => "应用",
             Action::ComposeCreate { .. } => "创建",
+            Action::InstallDocker { .. } => "安装",
         }
     }
 }
@@ -530,6 +565,10 @@ enum Sudo {
 
 enum Cmd {
     Refresh,
+    /// 「没有安装 Docker」页:探测系统并测速,结果用 `install_view` 取
+    InstallProbe,
+    /// 取消服务器上进行中的安装
+    InstallCancel,
     Act(Action),
     /// 读服务器上的 daemon.json
     LoadDaemon,
@@ -571,6 +610,10 @@ struct Shared {
     pending_login: Mutex<Option<(String, String, zeroize::Zeroizing<String>)>>,
     /// 需要向用户确认的 HTTP 仓库地址;界面取走后清空
     insecure_ask: Mutex<Option<String>>,
+    /// 一键安装 Docker 的状态和日志
+    install: Mutex<InstallView>,
+    /// 已经有一个循环在盯着服务器上的安装(避免重复)
+    install_following: AtomicBool,
     /// 界面每次需要重绘时递增
     version: AtomicU64,
     /// 界面最后一次表示「我还在看」的时间(毫秒时间戳);太久没人看就暂停轮询
@@ -626,6 +669,8 @@ impl Docker {
             monitor: Mutex::new(None),
             monitor_err: Mutex::new(None),
             busy: Mutex::new(HashSet::new()),
+            install: Mutex::new(InstallView::default()),
+            install_following: AtomicBool::new(false),
             notice: Mutex::new(None),
             daemon: Mutex::new(None),
             registries: Mutex::new(None),
@@ -810,6 +855,54 @@ impl Docker {
         self.sh.busy.lock().map(|b| b.iter().any(|k| k.ends_with(&format!(":{target}")))).unwrap_or(false)
     }
 
+    /// 探测系统并测速(只在还没探测过时发出);之后用 `install_view` 看进度
+    pub fn install_probe(&self) {
+        {
+            let mut v = self.sh.install.lock().unwrap();
+            if v.phase != InstallPhase::Idle {
+                return;
+            }
+            v.phase = InstallPhase::Probing;
+        }
+        let _ = self.cmd.send(Cmd::InstallProbe);
+        self.sh.bump();
+    }
+
+    /// 取消进行中的安装(结束服务器上的安装进程)
+    pub fn install_cancel(&self) {
+        {
+            let mut v = self.sh.install.lock().unwrap();
+            if v.phase != InstallPhase::Running || v.cancelling {
+                return;
+            }
+            v.cancelling = true;
+            v.log.push("==> 正在取消安装…".into());
+        }
+        let _ = self.cmd.send(Cmd::InstallCancel);
+        self.sh.bump();
+    }
+
+    pub fn install_view(&self) -> InstallView {
+        self.sh.install.lock().unwrap().clone()
+    }
+
+    /// 这个目标上正在进行的操作的动词(没有则 None)
+    pub fn busy_label(&self, target: &str) -> Option<String> {
+        let suffix = format!(":{target}");
+        self.sh.busy.lock().ok().and_then(|b| b.iter().find_map(|k| k.strip_suffix(&suffix).map(str::to_string)))
+    }
+
+    /// 是否有任何目标在执行指定动词的操作(拉取、清理……)
+    pub fn any_busy_verb(&self, verb: &str) -> bool {
+        let prefix = format!("{verb}:");
+        self.sh.busy.lock().map(|b| b.iter().any(|k| k.starts_with(&prefix))).unwrap_or(false)
+    }
+
+    /// 这个目标上是否正在执行指定动词的操作(「停止」「重启」……)
+    pub fn is_busy_verb(&self, verb: &str, target: &str) -> bool {
+        self.sh.busy.lock().map(|b| b.contains(&format!("{verb}:{target}"))).unwrap_or(false)
+    }
+
     pub fn take_notice(&self) -> Option<String> {
         self.sh.notice.lock().ok().and_then(|mut n| n.take())
     }
@@ -878,7 +971,7 @@ impl Runner {
             Sudo::WithPassword => {
                 let pw = self.password.as_deref().map(String::as_str).unwrap_or("");
                 let data = zeroize::Zeroizing::new(format!("{pw}\n{}", input.unwrap_or("")));
-                exec(&self.session, &format!("sudo -S -p '' docker {quoted}"), Some(data.as_bytes()), timeout).await
+                exec(&self.session, &format!("sudo -k; sudo -S -p '' docker {quoted}"), Some(data.as_bytes()), timeout).await
             }
         }
     }
@@ -896,7 +989,7 @@ impl Runner {
                 let pw = self.password.as_deref().map(String::as_str).unwrap_or("");
                 let mut data = zeroize::Zeroizing::new(format!("{pw}\n").into_bytes());
                 data.extend_from_slice(input.unwrap_or(&[]));
-                exec_raw(&self.session, &format!("sudo -S -p '' docker {quoted}{tail}"), Some(&data), timeout).await
+                exec_raw(&self.session, &format!("sudo -k; sudo -S -p '' docker {quoted}{tail}"), Some(&data), timeout).await
             }
         }
     }
@@ -908,10 +1001,196 @@ impl Runner {
             Sudo::WithPassword => {
                 let pw = self.password.as_deref().map(String::as_str).unwrap_or("");
                 let data = format!("{pw}\n{}", input.unwrap_or(""));
-                exec(&self.session, &format!("sudo -S -p '' sh -c {q}"), Some(data.as_bytes()), timeout).await
+                exec(&self.session, &format!("sudo -k; sudo -S -p '' sh -c {q}"), Some(data.as_bytes()), timeout).await
             }
             _ => exec(&self.session, &format!("if [ \"$(id -u)\" = 0 ]; then sh -c {q}; else sudo -n sh -c {q}; fi"), input.map(str::as_bytes), timeout).await,
         }
+    }
+}
+
+/// 探测:系统、架构、权限、各安装源的速度。只读,不需要 root。
+async fn run_install_probe(r: &Runner, sh: &Shared, has_password: bool) {
+    let cmd = format!("sh -c {}", shell_quote(crate::docker_install::PROBE_SCRIPT));
+    let res = exec(&r.session, &cmd, None, Duration::from_secs(40)).await;
+    let mut attach = false;
+    {
+        let mut v = sh.install.lock().unwrap();
+        match res {
+            Ok(o) => {
+                let probe = crate::docker_install::parse_probe(&o.stdout, has_password);
+                attach = probe.inst_running;
+                v.probe = Some(probe);
+                v.phase = InstallPhase::Ready;
+            }
+            Err(e) => v.phase = InstallPhase::Failed(format!("探测失败:{e}")),
+        }
+    }
+    sh.bump();
+    // 服务器上有一次安装还在跑(上次连接断了、Otter 重开过):接着看
+    if attach {
+        install_follow(r, sh, true).await;
+    }
+}
+
+/// 安装 Docker:把安装脚本交给服务器,脱离 SSH 连接在后台跑,再轮询日志。
+/// 断网、休眠、关掉 Otter 都不会中断安装;重新连上后会接着看。
+async fn run_install(r: &Runner, sh: &Shared, src: crate::docker_install::Source, accel: bool) {
+    {
+        let mut v = sh.install.lock().unwrap();
+        v.phase = InstallPhase::Running;
+        v.log.clear();
+        v.cancelling = false;
+        v.last_output = Some(std::time::Instant::now());
+    }
+    sh.bump();
+    logs::push(logs::Level::Info, "Docker", format!("开始安装 Docker(源:{})", src.label()));
+    // 选中的源排第一,其余能连通的按速度排后面:一个源失败(镜像同步不全等)脚本会自动换下一个
+    let order = sh.install.lock().unwrap().probe.as_ref().map_or_else(|| vec![src], |p| p.ranked(src));
+    let script = crate::docker_install::install_script(&order);
+    let fail = |e: String| {
+        sh.install.lock().unwrap().phase = InstallPhase::Failed(e);
+        sh.bump();
+    };
+    match r.root(&crate::docker_install::start_script(accel), Some(&script), Duration::from_secs(60)).await {
+        Ok(o) if o.code == 0 => {}
+        Ok(o) => {
+            let text = format!("{}{}", o.stdout, o.stderr);
+            let hint = crate::docker_install::explain(&text).map(|h| format!(",{h}")).unwrap_or_default();
+            return fail(format!("没能在服务器上启动安装{hint}:{}", text.trim().lines().last().unwrap_or("")));
+        }
+        Err(e) => return fail(format!("没能在服务器上启动安装:{e}")),
+    }
+    install_follow(r, sh, false).await;
+}
+
+/// 盯着服务器上的安装:每 2 秒取一次新日志,直到结束或连接断掉。`attach` 表示是重连后接上的(日志从头读)。
+async fn install_follow(r: &Runner, sh: &Shared, attach: bool) {
+    use crate::docker_install::{explain, parse_poll, poll_script};
+    if sh.install_following.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if attach {
+        let mut v = sh.install.lock().unwrap();
+        v.phase = InstallPhase::Running;
+        v.log.clear();
+        v.cancelling = false;
+        v.last_output = Some(std::time::Instant::now());
+        v.log.push("==> 接上了服务器上正在进行的安装".into());
+    }
+    let key = "安装:docker".to_string();
+    sh.busy.lock().unwrap().insert(key.clone());
+    sh.bump();
+
+    let mut offset = 0usize;
+    let mut pending: Vec<u8> = Vec::new();
+    let mut fails = 0;
+    let outcome: Option<Result<(), String>> = loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if sh.closed.load(Ordering::Relaxed) {
+            break None;
+        }
+        let cmd = format!("sh -c {}", shell_quote(&poll_script(offset)));
+        let raw = match exec_raw(&r.session, &cmd, None, Duration::from_secs(20)).await {
+            Ok(o) => {
+                fails = 0;
+                o
+            }
+            Err(_) => {
+                fails += 1;
+                if fails >= 3 {
+                    break None;
+                }
+                continue;
+            }
+        };
+        let poll = parse_poll(&raw.out);
+        if !poll.log.is_empty() {
+            offset += poll.log.len();
+            pending.extend_from_slice(&poll.log);
+            let mut v = sh.install.lock().unwrap();
+            v.last_output = Some(std::time::Instant::now());
+            while let Some(i) = pending.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = pending.drain(..=i).collect();
+                let text = String::from_utf8_lossy(&line[..line.len() - 1]).into_owned();
+                // 进度条用 \r 原地刷新,只留最后一段
+                v.log.push(text.rsplit('\r').next().unwrap_or("").to_string());
+            }
+            if v.log.len() > 2000 {
+                v.log.drain(..500);
+            }
+            drop(v);
+            sh.bump();
+        }
+        let ended = poll.status.is_some() || !poll.alive;
+        if !ended {
+            continue;
+        }
+        let (cancelled, log_text) = {
+            let v = sh.install.lock().unwrap();
+            (v.cancelling, v.log.iter().rev().take(25).rev().cloned().collect::<Vec<_>>().join("\n"))
+        };
+        let last = log_text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string();
+        let hint = explain(&log_text).map(|h| format!(",{h}")).unwrap_or_default();
+        let res = match poll.status {
+            Some(0) => {
+                if poll.accel && !poll.accel_done {
+                    install_accel(r, sh).await;
+                }
+                Ok(())
+            }
+            Some(code) => Err(format!("安装失败(退出码 {code}){hint}:{last}")),
+            None if cancelled => Err(CANCELLED.into()),
+            None => Err(format!("安装进程中断了(服务器可能重启过,或进程被结束){hint}:{last}")),
+        };
+        // 结果已经读完,日志也在界面里了:清掉服务器上的脚本、日志和状态文件。失败只记一行
+        if let Err(e) = r.root(&crate::docker_install::cleanup_script(res.is_err()), None, Duration::from_secs(15)).await {
+            logs::push(logs::Level::Warn, "Docker", format!("没能清理服务器上的安装临时文件:{e}"));
+        }
+        break Some(res);
+    };
+    sh.busy.lock().unwrap().remove(&key);
+    sh.install_following.store(false, Ordering::SeqCst);
+    match outcome {
+        None => {
+            logs::push(logs::Level::Warn, "Docker", "与服务器的连接断了,安装仍在服务器上进行");
+            let mut v = sh.install.lock().unwrap();
+            if v.phase == InstallPhase::Running {
+                v.phase = InstallPhase::Lost;
+            }
+        }
+        Some(res) => {
+            logs::push(if res.is_ok() { logs::Level::Info } else { logs::Level::Warn }, "Docker", match &res {
+                Ok(()) => "Docker 安装完成".to_string(),
+                Err(e) => e.clone(),
+            });
+            sh.install.lock().unwrap().phase = match res {
+                Ok(()) => InstallPhase::Done,
+                Err(e) if e == CANCELLED => InstallPhase::Cancelled,
+                Err(e) => InstallPhase::Failed(e),
+            };
+        }
+    }
+    sh.bump();
+}
+
+/// 装完后配置 Docker Hub 镜像加速(合并进 daemon.json);服务器上的标记文件保证只做一次。失败只记一行,不算安装失败。
+async fn install_accel(r: &Runner, sh: &Shared) {
+    let push = |line: String| {
+        sh.install.lock().unwrap().log.push(line);
+        sh.bump();
+    };
+    push("==> 配置 Docker Hub 镜像加速".into());
+    let done = match read_daemon_text(r).await.and_then(|t| crate::daemon_conf::add_mirrors(&t, &crate::docker_install::REGISTRY_MIRRORS)) {
+        Ok(text) => match write_daemon(r, &text).await {
+            Ok(()) => restart_docker(r).await,
+            Err(e) => Err(e),
+        },
+        Err(e) => Err(e),
+    };
+    let _ = r.root(&crate::docker_install::accel_done_script(), None, Duration::from_secs(15)).await;
+    match done {
+        Ok(()) => push("镜像加速已配置".into()),
+        Err(e) => push(format!("镜像加速没有配置成功:{e}")),
     }
 }
 
@@ -1385,7 +1664,9 @@ async fn run_insecure(r: &Runner, sh: &Shared, host: &str) {
 fn classify(stderr: &str) -> Problem {
     let low = stderr.to_lowercase();
     let msg = stderr.trim().lines().last().unwrap_or("").to_string();
-    if low.contains("command not found") || low.contains("not found") && low.contains("docker") {
+    // 服务器可能是中文等其他语言环境:「未找到命令」「找不到命令」「No such file」也算没装
+    let not_found = low.contains("command not found") || low.contains("未找到命令") || low.contains("找不到命令") || low.contains("未找到") && low.contains("docker") || low.contains("not found") && low.contains("docker");
+    if not_found {
         Problem::NoDocker
     } else if low.contains("permission denied") {
         Problem::NoPermission(msg)
@@ -1562,6 +1843,20 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
             while let Some(cmd) = rx.recv().await {
                 match cmd {
                     Cmd::Refresh => return Err("请重新进入页面重试".into()),
+                    Cmd::InstallProbe => {
+                        let (r, sh2, pw) = (sys.clone(), sh.clone(), conn.auth.password.is_some());
+                        tokio::spawn(async move { run_install_probe(&r, &sh2, pw).await });
+                    }
+                    Cmd::InstallCancel => {
+                        let r = sys.clone();
+                        tokio::spawn(async move {
+                            let _ = r.root(&crate::docker_install::cancel_script(), None, Duration::from_secs(20)).await;
+                        });
+                    }
+                    Cmd::Act(Action::InstallDocker { source, accel }) => {
+                        let (r, sh2) = (sys.clone(), sh.clone());
+                        tokio::spawn(async move { run_install(&r, &sh2, source, accel).await });
+                    }
                     Cmd::Sys { kind, script, root } => {
                         let (r, sh2) = (sys.clone(), sh.clone());
                         tokio::spawn(async move { sys_load(&r, &sh2, kind, &script, root).await });
@@ -1594,6 +1889,8 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
                         pol.last_ps = None;
                         pol.last_stats = None;
                     }
+                    // 只在「没有安装 Docker」页用;已经能跑 docker 时不会发出
+                    Cmd::InstallProbe | Cmd::InstallCancel => continue,
                     Cmd::LoadDaemon => {
                         let (r, sh2) = (runner.clone(), sh.clone());
                         tokio::spawn(async move { load_daemon(&r, &sh2).await });
@@ -1774,6 +2071,9 @@ async fn run_action(r: &Runner, sh: &Shared, a: Action) {
         run_insecure(r, sh, host).await;
         return;
     }
+    if matches!(a, Action::InstallDocker { .. }) {
+        return;
+    }
     if let Action::SaveDaemon(text) | Action::SaveRestartDaemon(text) = &a {
         run_daemon(r, sh, text, matches!(a, Action::SaveRestartDaemon(_)), a.verb()).await;
         return;
@@ -1793,6 +2093,8 @@ async fn run_action(r: &Runner, sh: &Shared, a: Action) {
     sh.bump();
     let timeout = if matches!(a, Action::Pull(_) | Action::PruneImages | Action::ComposeUp { .. } | Action::ComposeCreate { .. }) { Duration::from_secs(600) } else { Duration::from_secs(60) };
     let res = r.docker(&a.args(), timeout).await;
+    // 先把列表刷新到最新再撤掉"进行中",否则动画结束后要等下一轮轮询才看到变化
+    let _ = refresh_ps(r, sh).await;
     sh.busy.lock().unwrap().remove(&key);
     let msg = match res {
         Ok(o) if o.code == 0 && prune => {
@@ -1808,7 +2110,11 @@ async fn run_action(r: &Runner, sh: &Shared, a: Action) {
         Err(e) => format!("{}失败:{e}", a.verb()),
     };
     logs::push(logs::Level::Info, "Docker", msg.clone());
-    *sh.notice.lock().unwrap() = Some(msg);
+    // 容器的启动/停止/重启/删除成功时,按钮上的动画和列表变化已经说明了结果,不再弹提示;失败仍提示
+    let quiet_ok = matches!(a, Action::Start(_) | Action::Stop(_) | Action::Restart(_) | Action::Remove(_)) && msg.starts_with('已');
+    if !quiet_ok {
+        *sh.notice.lock().unwrap() = Some(msg);
+    }
     sh.bump();
     if matches!(a, Action::Logout(_)) {
         load_registries(r, sh).await;
@@ -1944,6 +2250,8 @@ mod tests {
     #[::core::prelude::v1::test]
     fn classifies_errors() {
         assert_eq!(classify("sh: 1: docker: not found"), Problem::NoDocker);
+        assert_eq!(classify("bash: 行 1: docker: 未找到命令"), Problem::NoDocker);
+        assert_eq!(classify("bash: docker: 找不到命令"), Problem::NoDocker);
         assert!(matches!(classify("permission denied while trying to connect to the Docker daemon socket"), Problem::NoPermission(_)));
         assert!(matches!(classify("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"), Problem::DaemonDown(_)));
         assert!(matches!(classify("weird"), Problem::Other(_)));

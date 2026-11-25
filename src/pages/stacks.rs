@@ -504,7 +504,8 @@ impl Home {
                             this.ask(super::dockerpages::DockAsk { title: "删除容器", tile: IconName::Box, name: n.clone(), detail: "Docker 容器", body: "强制删除,容器内未保存到存储卷的数据会丢失", label: "删除容器", action: crate::docker::Action::Remove(n), list: Vec::new() }, cx);
                         }
                     });
-                    r = r.child(service_card(ix * 1000 + ri * 10 + ci, svc, svc_h, self.svc_w, hide, on_files, on_term, on_logs, on_toggle, on_restart, on_remove));
+                    let busy = self.ct_busy(&s.name, &svc.name);
+                    r = r.child(service_card(ix * 1000 + ri * 10 + ci, svc, svc_h, self.svc_w, hide, busy, on_files, on_term, on_logs, on_toggle, on_restart, on_remove));
                 }
                 for _ in row.len()..self.cols {
                     r = r.child(div().flex_1());
@@ -551,6 +552,7 @@ pub(crate) fn service_card(
     h: f32,
     w: f32,
     hide_charts: bool,
+    busy: Option<&'static str>,
     on_files: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_term: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_logs: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -678,11 +680,12 @@ pub(crate) fn service_card(
             )
         });
 
-    let action = |id: usize, ic: IconName, color: Rgba, tip: &'static str| {
+    let action = |id: usize, ic: IconName, color: Rgba, tip: &'static str, verb: &'static str| {
         div()
             .id(("act", key * 10 + id))
             .h(px(24.0))
-            .px(px(7.0))
+            .w(px(24.0))
+            .justify_center()
             .flex()
             .flex_row()
             .items_center()
@@ -692,7 +695,7 @@ pub(crate) fn service_card(
             .text_size(px(t::TYPE_CAPTION))
             .text_color(c::muted())
             .hover(|s| s.bg(c::hover()).text_color(c::text()))
-            .child(icon(ic, 14.0, color))
+            .child(if busy == Some(verb) { dot_spinner(("act-spin", key * 10 + id), color).into_any_element() } else { icon(ic, 14.0, color).into_any_element() })
             .tooltip(move |_, cx| cx.new(|_| crate::files::Tip(tip.into())).into())
     };
 
@@ -705,14 +708,13 @@ pub(crate) fn service_card(
         .border_t_1()
         .border_color(c::border())
         .child(ports)
-        .child(action(0, IconName::SquareTerminal, c::muted(), "终端").on_click(on_term))
-        .child(action(1, IconName::ScrollText, c::muted(), "日志").on_click(on_logs))
-        .child(action(6, IconName::FolderOpen, c::muted(), "文件").on_click(on_files))
-        .child(action(2, IconName::ExternalLink, c::muted(), "打开"))
+        .child(action(0, IconName::SquareTerminal, c::muted(), "终端", "").on_click(on_term))
+        .child(action(1, IconName::ScrollText, c::muted(), "日志", "").on_click(on_logs))
+        .child(action(6, IconName::FolderOpen, c::muted(), "文件", "").on_click(on_files))
         .child(div().w(px(1.0)).h(px(14.0)).mx(px(4.0)).bg(c::border()))
-        .child(action(3, if up { IconName::Square } else { IconName::Play }, c::muted(), if up { "停止" } else { "启动" }).on_click(on_toggle))
-        .child(action(4, IconName::RefreshCw, c::muted(), "重启").on_click(on_restart))
-        .child(action(5, IconName::Trash, c::danger().opacity(0.85), "删除").on_click(on_remove));
+        .child(action(3, if up { IconName::Square } else { IconName::Play }, c::muted(), if up { "停止" } else { "启动" }, if up { "停止" } else { "启动" }).on_click(on_toggle))
+        .child(action(4, IconName::RefreshCw, c::muted(), "重启", "重启").on_click(on_restart))
+        .child(action(5, IconName::Trash, c::danger().opacity(0.85), "删除", "删除").on_click(on_remove));
 
     div()
         .flex_1()

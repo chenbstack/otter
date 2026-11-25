@@ -880,6 +880,11 @@ pub fn empty_state(ic: IconName, title: &'static str, sub: &'static str) -> Div 
 }
 
 pub fn button(id: &'static str, ic: IconName, label: &'static str) -> Stateful<Div> {
+    button_busy(id, ic, label, false)
+}
+
+/// 带文字的按钮;`busy` 时图标换成加载动画(这时不要再挂点击)。
+pub fn button_busy(id: &'static str, ic: IconName, label: &'static str, busy: bool) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -893,6 +898,28 @@ pub fn button(id: &'static str, ic: IconName, label: &'static str) -> Stateful<D
         .text_size(px(t::TYPE_CONTROL))
         .text_color(c::secondary())
         .hover(|s| s.text_color(c::text()))
-        .child(icon(ic, 13.0, c::muted()))
+        .child(if busy { dot_spinner((id, 0), c::muted()).into_any_element() } else { icon(ic, 13.0, c::muted()).into_any_element() })
         .child(label)
+}
+
+/// 3×3 小方格,一个亮点沿外圈 8 格转圈,用作按钮的加载动画
+pub fn dot_spinner(id: (&'static str, usize), color: Rgba) -> impl IntoElement {
+    const CELL: f32 = 4.0;
+    const GAP: f32 = 1.0;
+    // 外圈顺时针的 8 个格子 (行, 列)
+    const RING: [(usize, usize); 8] = [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2), (2, 1), (2, 0), (1, 0)];
+    div().size(px(14.0)).flex().items_center().justify_center().child(
+        div().with_animation(id, Animation::new(std::time::Duration::from_millis(900)).repeat(), move |d, t| {
+            let lit = RING[((t * 8.0) as usize).min(7)];
+            let mut grid = d.flex().flex_col().gap(px(GAP));
+            for r in 0..3 {
+                let mut row = div().flex().flex_row().gap(px(GAP));
+                for col in 0..3 {
+                    row = row.child(div().size(px(CELL)).rounded(px(1.0)).bg(if (r, col) == lit { color } else { color.opacity(0.18) }));
+                }
+                grid = grid.child(row);
+            }
+            grid
+        }),
+    )
 }

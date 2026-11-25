@@ -678,6 +678,8 @@ impl Home {
             ],
             ok_label: "删除分组",
             compact: false,
+            kind: crate::confirm::ConfirmKind::Danger,
+            extra: None,
         };
         Some(self.delete_confirm("group-del-dialog", spec, |this| this.group_delete = None, move |this, cx| this.delete_group_now(gid, cx), cx))
     }
@@ -699,6 +701,8 @@ impl Home {
             ],
             ok_label: "删除节点",
             compact: false,
+            kind: crate::confirm::ConfirmKind::Danger,
+            extra: None,
         };
         Some(self.delete_confirm(
             "node-del-dialog",

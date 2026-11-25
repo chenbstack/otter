@@ -102,6 +102,31 @@ impl Home {
         cs.iter().find(|c| c.project.as_deref() == Some(stack) && c.service.as_deref() == Some(svc)).or_else(|| cs.iter().find(|c| c.name == svc)).map(|c| (c.name.clone(), c.running(), c.panel.is_some()))
     }
 
+    /// 容器上正在进行的操作动词(启动/停止/重启/删除),卡片按钮据此显示加载动画
+    pub(crate) fn ct_busy(&self, stack: &str, svc: &str) -> Option<&'static str> {
+        let (n, _, _) = self.ct_lookup(stack, svc)?;
+        self.ct_busy_name(&n)
+    }
+
+    /// 目标上正在进行的操作动词:刚点下的(界面记的)优先,否则看后台
+    pub(crate) fn op_busy(&self, target: &str) -> Option<String> {
+        if let Some(p) = self.dock.pending.iter().find(|p| p.0 == target) {
+            return Some(p.1.clone());
+        }
+        self.workspace.active.and_then(|a| self.workspace.tabs.get(a)).and_then(|t| t.docker.as_ref())?.busy_label(target)
+    }
+
+    /// 是否有任何目标在执行这个动词(拉取、清理镜像……):刚点下的优先,否则看后台
+    pub(crate) fn verb_busy(&self, verb: &str) -> bool {
+        self.dock.pending.iter().any(|p| p.1 == verb) || self.workspace.active.and_then(|a| self.workspace.tabs.get(a)).and_then(|t| t.docker.as_ref()).is_some_and(|d| d.any_busy_verb(verb))
+    }
+
+    /// 同上,按容器名查(容器列表用),只认启动/停止/重启/删除
+    pub(crate) fn ct_busy_name(&self, n: &str) -> Option<&'static str> {
+        let v = self.op_busy(n)?;
+        ["启动", "停止", "重启", "删除"].into_iter().find(|x| *x == v)
+    }
+
     /// 堆栈卡片上的「文件」「终端」:找到对应的容器,在抽屉的对应页打开
     pub(crate) fn ct_open_stack(&mut self, stack: &str, svc: &str, target: &Target, tab: CtTab, window: &mut Window, cx: &mut Context<Self>) {
         match self.ct_lookup(stack, svc) {

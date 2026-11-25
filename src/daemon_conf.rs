@@ -128,11 +128,34 @@ pub fn add_insecure(text: &str, host: &str) -> Result<String, String> {
     render(&base, &f)
 }
 
+/// 把镜像加速地址并进 registry-mirrors(已有的保留,重复的不加),其他键保持不变
+pub fn add_mirrors(text: &str, urls: &[&str]) -> Result<String, String> {
+    let (base, mut f) = parse(text)?;
+    let mut cur = items(&f.mirrors);
+    for u in urls {
+        if !cur.iter().any(|x| x == u) {
+            cur.push((*u).to_string());
+        }
+    }
+    f.mirrors = cur.join("\n");
+    render(&base, &f)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const SAMPLE: &str = r#"{"registry-mirrors":["https://a.example","https://b.example"],"log-driver":"json-file","log-opts":{"max-size":"10m","max-file":"3","labels":"env"},"live-restore":true,"features":{"buildkit":true}}"#;
+
+    #[test]
+    fn add_mirrors_merges_and_keeps_other_keys() {
+        let out = add_mirrors(r#"{"registry-mirrors":["https://a.example"],"log-driver":"json-file"}"#, &["https://a.example", "https://b.example"]).unwrap();
+        let (_, f) = parse(&out).unwrap();
+        assert_eq!(f.mirrors, "https://a.example\nhttps://b.example");
+        assert_eq!(f.driver, "json-file");
+        let fresh = add_mirrors("", &["https://b.example"]).unwrap();
+        assert_eq!(parse(&fresh).unwrap().1.mirrors, "https://b.example");
+    }
 
     #[test]
     fn parses_form_fields() {

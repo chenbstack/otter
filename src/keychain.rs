@@ -555,6 +555,8 @@ impl Home {
                     points,
                     ok_label: "删除密钥",
                     compact: false,
+                    kind: crate::confirm::ConfirmKind::Danger,
+                    extra: None,
                 };
                 return Some(self.delete_confirm("key-del-dialog", spec, |this| this.key_modal = None, |this, cx| this.confirm_delete_key(cx), cx));
             }

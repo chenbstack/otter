@@ -17,6 +17,7 @@ mod daemon_conf;
 mod sysops;
 mod ctfiles;
 mod docker;
+mod docker_install;
 mod json_hl;
 mod group_form;
 mod import;

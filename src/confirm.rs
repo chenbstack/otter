@@ -18,6 +18,16 @@ pub(crate) struct Confirm {
     pub ok_label: &'static str,
     /// 紧凑模式:图标和标题同一行、不显示对象卡片、清单行更矮,用于清单较长的确认框
     pub compact: bool,
+    /// 危险操作(红色、垃圾桶、「无法撤销」)还是普通操作(强调色、对勾、无副标题警告)
+    pub kind: ConfirmKind,
+    /// 清单下面的额外内容(比如一个勾选项);没有就 None
+    pub extra: Option<AnyElement>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum ConfirmKind {
+    Danger,
+    Action,
 }
 
 /// 删除确认框宽度(比表单弹窗窄:内容少,居中排版)
@@ -25,7 +35,8 @@ pub(crate) const CONFIRM_W: f32 = 400.0;
 
 
 /// 危险色的确认按钮(撑满剩余宽度,和取消按钮等宽)
-fn danger_btn(id: &'static str, label: &'static str) -> Stateful<Div> {
+fn danger_btn(id: &'static str, label: &'static str, kind: ConfirmKind) -> Stateful<Div> {
+    let (bg, ic) = if kind == ConfirmKind::Danger { (c::danger(), IconName::Trash) } else { (c::accent(), IconName::Check) };
     div()
         .id(id)
         .flex_1()
@@ -36,13 +47,13 @@ fn danger_btn(id: &'static str, label: &'static str) -> Stateful<Div> {
         .gap(px(6.0))
         .h(px(38.0))
         .rounded(px(t::RADIUS_MD))
-        .bg(c::danger())
+        .bg(bg)
         .text_color(c::on_accent())
         .text_size(px(t::TYPE_CONTROL))
         .font_weight(FontWeight::SEMIBOLD)
         .cursor_pointer()
         .hover(|s| s.opacity(0.88))
-        .child(icon(IconName::Trash, 13.0, c::on_accent()))
+        .child(icon(ic, 13.0, c::on_accent()))
         .child(label)
 }
 
@@ -84,14 +95,15 @@ impl Home {
         if spec.compact {
             return self.confirm_compact(spec, cancel_fn, ok_fn, cx);
         }
-        let hero = alert_hero(IconName::Trash, c::danger(), spec.title.to_string(), "此操作无法撤销");
+        let (hic, tone, sub) = if spec.kind == ConfirmKind::Danger { (IconName::Trash, c::danger(), "此操作无法撤销") } else { (IconName::Check, c::accent(), "") };
+        let hero = alert_hero(hic, tone, spec.title.to_string(), sub);
         let target = alert_target(spec.tile, spec.name, spec.detail);
         let rows = alert_rows(spec.points.into_iter().map(|(ic, color, text)| (ic, color, text.to_string())).collect());
         let cancel = crate::node_form::ctl_btn(spec.ids[0], None, "取消", 38.0).flex_1().justify_center().on_click(cx.listener(move |this, _, _, cx| {
             cancel_fn(this);
             cx.notify();
         }));
-        let ok = danger_btn(spec.ids[1], spec.ok_label).on_click(cx.listener(move |this, _, _, cx| ok_fn(this, cx)));
+        let ok = danger_btn(spec.ids[1], spec.ok_label, spec.kind).on_click(cx.listener(move |this, _, _, cx| ok_fn(this, cx)));
         let buttons = div().w_full().flex().flex_row().gap(px(10.0)).child(cancel).child(ok);
         vec![alert_body(hero, Some(target), rows, buttons).into_any_element()]
     }
@@ -104,7 +116,8 @@ impl Home {
         ok_fn: impl Fn(&mut Self, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let tone = c::danger();
+        let danger = spec.kind == ConfirmKind::Danger;
+        let (tone, hic, sub, gap) = if danger { (c::danger(), IconName::Trash, "此操作无法撤销", 12.0) } else { (c::accent(), IconName::Download, "", 16.0) };
         let head = div()
             .w_full()
             .flex()
@@ -122,7 +135,7 @@ impl Home {
                     .bg(tone.opacity(0.16))
                     .border_1()
                     .border_color(tone.opacity(0.36))
-                    .child(icon(IconName::Trash, 18.0, tone)),
+                    .child(icon(hic, 18.0, tone)),
             )
             .child(
                 div()
@@ -132,28 +145,28 @@ impl Home {
                     .flex_col()
                     .gap(px(1.0))
                     .child(div().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::BOLD).text_color(c::text()).child(SharedString::from(format!("{} · {}", spec.title, spec.name))))
-                    .child(div().text_size(px(t::TYPE_MICRO)).text_color(c::muted()).child("此操作无法撤销")),
+                    .children((!sub.is_empty()).then(|| div().text_size(px(t::TYPE_MICRO)).text_color(c::muted()).child(sub))),
             );
         let n = spec.points.len();
         let rows = div().w_full().flex().flex_col().rounded(px(t::RADIUS_MD)).border_1().border_color(c::field_border()).bg(c::field()).children(spec.points.into_iter().enumerate().map(|(i, (ic, color, text))| {
             div()
-                .min_h(px(28.0))
-                .px(px(10.0))
-                .py(px(4.0))
+                .min_h(px(if danger { 28.0 } else { 40.0 }))
+                .px(px(if danger { 10.0 } else { 14.0 }))
+                .py(px(if danger { 4.0 } else { 10.0 }))
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(8.0))
+                .gap(px(if danger { 8.0 } else { 10.0 }))
                 .when(i + 1 < n, |d| d.border_b_1().border_color(c::line()))
                 .child(icon(ic, 13.0, color))
-                .child(div().flex_1().min_w_0().text_size(px(t::TYPE_MICRO + 1.0)).text_color(c::secondary()).child(text))
+                .child(div().flex_1().min_w_0().when(!danger, |d| d.line_height(relative(1.5))).text_size(px(t::TYPE_MICRO + 1.0)).text_color(c::secondary()).child(text))
         }));
         let cancel = crate::node_form::ctl_btn(spec.ids[0], None, "取消", 32.0).flex_1().justify_center().on_click(cx.listener(move |this, _, _, cx| {
             cancel_fn(this);
             cx.notify();
         }));
-        let ok = danger_btn(spec.ids[1], spec.ok_label).h(px(32.0)).on_click(cx.listener(move |this, _, _, cx| ok_fn(this, cx)));
+        let ok = danger_btn(spec.ids[1], spec.ok_label, spec.kind).h(px(32.0)).on_click(cx.listener(move |this, _, _, cx| ok_fn(this, cx)));
         let buttons = div().w_full().flex().flex_row().gap(px(10.0)).child(cancel).child(ok);
-        vec![div().flex().flex_col().gap(px(12.0)).px(px(20.0)).pt(px(20.0)).pb(px(18.0)).child(head).child(rows).child(buttons).into_any_element()]
+        vec![div().flex().flex_col().gap(px(gap)).px(px(20.0)).pt(px(20.0)).pb(px(20.0)).child(head).child(rows).children(spec.extra).child(buttons).into_any_element()]
     }
 }

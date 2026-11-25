@@ -80,6 +80,10 @@ pub struct Takeover {
     pub lease: Option<String>,
     /// 用户同意过的提权授权:到期前,屏幕上出现 sudo 密码提示时 agent 可以不再询问直接请 Otter 代填
     pub sudo: Option<SudoGrant>,
+    /// Otter 代为输入过的密码(只在内存里):返回给 agent 的屏幕内容里要把它们抹掉
+    typed: Vec<Zeroizing<String>>,
+    /// agent 最近一次执行(send_input 带 execute)的命令。提权确认框里给用户看,免得屏幕上的「密码提示」是 agent 自己造的
+    last_cmd: String,
 }
 
 /// 一次「N 分钟内同意」的提权授权。随接管结束而消失,不落盘。
@@ -121,6 +125,8 @@ pub struct SudoPrompt {
     reason: String,
     /// 屏幕上的 sudo 提示行,给用户看
     line: String,
+    /// agent 最近执行的命令,给用户看
+    cmd: String,
     /// 节点没保存密码时,让用户输入
     input: Option<Entity<InputState>>,
     reply: Reply,
@@ -172,6 +178,72 @@ fn clip(s: &str, n: usize) -> String {
     let mut out: String = s.chars().take(n).collect();
     if s.chars().count() > n {
         out.push('…');
+    }
+    out
+}
+
+/// 在远端(经同一条 SSH 连接另开一个 exec 通道)列出进程,供 `sudo_at_prompt` 判断终端前台是不是真的 sudo。
+/// 第一行 `ME=` 是这条 exec 的父进程(sshd 为这条连接开的会话进程),交互终端里的 shell 也是它的子进程。
+pub const SUDO_FG_SCRIPT: &str = "echo \"ME=$PPID\"; ps -eo pid=,ppid=,pgid=,tpgid=,tty=,user=,comm= 2>/dev/null || ps -axo pid=,ppid=,pgid=,tpgid=,tty=,user=,comm= 2>/dev/null";
+
+/// 终端的前台进程组里是不是有一个 root 身份、还没起子进程的 `sudo`(也就是真的停在 sudo 的密码提示上)。
+/// 屏幕上的「密码提示」可以被 agent 的脚本伪造,这是不看屏幕、从服务器进程表里验证的办法:
+/// - 伪造提示的脚本以普通用户身份运行,不是 root;
+/// - sudo 已经认证通过(缓存、免密)并起了命令时有子进程,这时输入会被交给那个命令而不是 sudo。
+/// 看不懂输出(没有 ps、格式不同)一律当作验证失败,不填。
+pub fn sudo_at_prompt(out: &str) -> Result<(), String> {
+    struct P {
+        pid: String,
+        ppid: String,
+        pgid: String,
+        tpgid: String,
+        tty: String,
+        user: String,
+        comm: String,
+    }
+    let mut me = None;
+    let mut rows: Vec<P> = Vec::new();
+    for l in out.lines() {
+        if let Some(v) = l.strip_prefix("ME=") {
+            me = Some(v.trim().to_string());
+            continue;
+        }
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() < 7 {
+            continue;
+        }
+        rows.push(P { pid: f[0].into(), ppid: f[1].into(), pgid: f[2].into(), tpgid: f[3].into(), tty: f[4].into(), user: f[5].into(), comm: f[6..].join(" ") });
+    }
+    let me = me.filter(|m| !m.is_empty()).ok_or("没能读到远端进程信息")?;
+    if rows.is_empty() {
+        return Err("远端没有可用的 ps,没法确认终端前台是 sudo".into());
+    }
+    let has_tty = |t: &str| !matches!(t, "?" | "??" | "-" | "");
+    // 这条连接上带终端的 shell,它们所在终端的前台进程组
+    let ttys: Vec<(&str, &str)> = rows.iter().filter(|r| r.ppid == me && has_tty(&r.tty)).map(|r| (r.tty.as_str(), r.tpgid.as_str())).collect();
+    if ttys.is_empty() {
+        return Err("没找到这条连接上的终端".into());
+    }
+    for (tty, fg) in ttys {
+        for r in rows.iter().filter(|r| r.tty == tty && r.pgid == fg) {
+            let is_sudo = r.comm == "sudo" && r.user == "root";
+            if is_sudo && !rows.iter().any(|c| c.ppid == r.pid) {
+                return Ok(());
+            }
+        }
+    }
+    Err("终端前台不是正在等密码的 sudo".into())
+}
+
+/// 把 Otter 代为输入过的密码从要交给 agent 的文本里抹掉(换成 `••••`)。
+/// 密码可能因为终端换行被拆成两行,所以字符之间允许夹一个换行。agent 无论如何都不该看到密码。
+pub fn redact_secrets(secrets: &[Zeroizing<String>], text: String) -> String {
+    let mut out = text;
+    for sec in secrets.iter().filter(|s| !s.is_empty()) {
+        let pat = sec.chars().map(|c| regex::escape(&c.to_string())).collect::<Vec<_>>().join("\n?");
+        if let Ok(re) = regex::Regex::new(&pat) {
+            out = re.replace_all(&out, "••••").into_owned();
+        }
     }
     out
 }
@@ -355,6 +427,8 @@ impl Home {
     /// 开始接管;`lease` 为真时返回令牌。
     fn start_takeover(&mut self, ix: usize, client: &Arc<Client>, reason: &str, lease: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<String> {
         let now = Instant::now();
+        // 节点保存的登录密码:agent 不该看到,先记下来供脱敏用(没有节点或没保存就空)
+        let saved_pw: Vec<Zeroizing<String>> = self.workspace.tabs[ix].node().and_then(|n| self.conn_for(n).auth.password).into_iter().collect();
         let token = lease.then(new_lease);
         let node = self.workspace.tabs[ix].node();
         self.workspace.tabs[ix].takeover = Some(Takeover {
@@ -366,6 +440,8 @@ impl Home {
             waiting: false,
             lease: token.clone(),
             sudo: None,
+            typed: saved_pw,
+            last_cmd: String::new(),
         });
         alog(format!("{} 开始接管 {}{}", client.name, self.node_name(node), if reason.is_empty() { String::new() } else { format!("(原因:{reason})") }));
         let fh = self.takeover_focus.get_or_insert_with(|| cx.focus_handle()).clone();
@@ -543,11 +619,20 @@ impl Home {
                     bytes.push(b'\r');
                 }
                 let _ = term.handle.inputter().send(bytes);
+                if execute {
+                    if let Some(t) = self.workspace.tabs[ix].takeover.as_mut() {
+                        t.last_cmd = clip(&text.replace(['\n', '\r'], " "), 200);
+                    }
+                }
                 let shown = clip(&text.replace(['\n', '\r'], "⏎"), LOG_TEXT_MAX);
                 alog(format!("→ {node} 输入:{shown}{}", if execute { " ⏎" } else { "" }));
                 set_action(self, format!("{}:{}", if execute { "执行" } else { "输入" }, clip(&text.replace(['\n', '\r'], " "), 40)));
                 let mut r = json!({ "sent": text.len(), "executed": execute });
-                if let Some(m) = mark {
+                if let Some(mut m) = mark {
+                    // 锚点是光标行的原文,可能含刚输入的密码:返回给 agent 前先抹掉
+                    if let Some(a) = m.get("anchor").and_then(Value::as_str).map(String::from) {
+                        m["anchor"] = json!(self.redact_for(ix, a));
+                    }
                     r["mark"] = m;
                 }
                 let _ = reply.send(Ok(r));
@@ -570,10 +655,14 @@ impl Home {
             "read_screen" => {
                 let snap = term.view.read(cx).text_snapshot(0);
                 let (cols, rows) = term.view.read(cx).dimensions();
-                let lines = trim_trailing_blank(snap.lines[snap.screen_start..].to_vec());
+                // 整份(含滚动历史)先抹密码再取屏幕那一段,密码被换行拆在屏幕上沿时也抹得掉
+                let redacted: Vec<String> = self.redact_for(ix, snap.lines.join("\n")).split('\n').map(String::from).collect();
+                let screen_start = snap.screen_start.saturating_sub(snap.lines.len().saturating_sub(redacted.len()));
+                let lines = trim_trailing_blank(redacted[screen_start.min(redacted.len())..].to_vec());
+                let text = lines.join("\n");
                 set_action(self, "读取屏幕".into());
                 let _ = reply.send(Ok(json!({
-                    "text": limit_output(lines.join("\n")),
+                    "text": limit_output(text),
                     "cursor": { "line": snap.cursor_line, "col": snap.cursor_col },
                     "cols": cols, "rows": rows,
                 })));
@@ -582,6 +671,8 @@ impl Home {
                 let n = params.get("lines").and_then(Value::as_u64).unwrap_or(100).clamp(1, SCROLLBACK_MAX as u64) as usize;
                 let snap = term.view.read(cx).text_snapshot(SCROLLBACK_MAX);
                 let all = trim_trailing_blank(snap.lines);
+                // 先对整段历史抹密码再截取最近 n 行:密码被换行拆在截取边界两侧时才抹得掉
+                let all: Vec<String> = self.redact_for(ix, all.join("\n")).split('\n').map(String::from).collect();
                 let from = all.len().saturating_sub(n);
                 set_action(self, format!("读取最近 {n} 行"));
                 let _ = reply.send(Ok(json!({ "text": limit_output(all[from..].join("\n")), "lines": all.len() - from })));
@@ -631,13 +722,13 @@ impl Home {
                     }
                     let term = this.workspace.tabs[ix].term.as_ref()?;
                     let snap = term.view.read(cx).text_snapshot(200);
-                    let text = trim_trailing_blank(snap.lines).join("\n");
+                    let text = this.redact_for(ix, trim_trailing_blank(snap.lines).join("\n"));
                     if text != last_text {
                         last_text = text.clone();
                         last_change = Instant::now();
                     }
                     // 给了 since 就只看这条命令之后的新输出:正则也只在新输出里匹配,免得被屏幕上旧的提示符骗过去
-                    let new_out = since.as_ref().and_then(|m| output_since(&term.view.read(cx).text_snapshot(SCROLLBACK_MAX), m));
+                    let new_out = since.as_ref().and_then(|m| output_since(&term.view.read(cx).text_snapshot(SCROLLBACK_MAX), m)).map(|o| this.redact_for(ix, o));
                     let out = |key: &str, text: String| {
                         let mut r = json!({ key: true, "screen": limit_output(text) });
                         if let Some(o) = &new_out {
@@ -719,7 +810,7 @@ impl Home {
             let (reply, _rx) = tokio::sync::oneshot::channel();
             let tab_id = self.workspace.tabs[a].id;
             let input = (mode == "sudo").then(|| cx.new(|cx| InputState::new(window, cx).placeholder("sudo 密码").masked(true)));
-            self.sudo_prompt = Some(SudoPrompt { tab_id, client, reason: "清理 /var/log 下的旧日志".into(), line: "[sudo] password for chen:".into(), input, reply });
+            self.sudo_prompt = Some(SudoPrompt { tab_id, client, reason: "清理 /var/log 下的旧日志".into(), line: "[sudo] password for chen:".into(), cmd: "sudo rm -rf /var/log/old".into(), input, reply });
         } else if mode.starts_with("prompt") {
             let client = if mode == "prompt-unverified" { Arc::new(Client { id: 0, name: "Claude Code".into(), parent_exe: String::new() }) } else { client };
             let (reply, _rx) = tokio::sync::oneshot::channel();
@@ -894,6 +985,16 @@ impl Home {
 }
 
 impl Home {
+    /// 这个标签上不能让 agent 看到的密码:接管开始时记下的节点登录密码,加上 Otter 代为输入过的。
+    fn agent_secrets(&self, ix: usize) -> Vec<Zeroizing<String>> {
+        self.workspace.tabs[ix].takeover.as_ref().map(|t| t.typed.clone()).unwrap_or_default()
+    }
+
+    /// 交给 agent 的文本一律先过这里。
+    fn redact_for(&self, ix: usize, text: String) -> String {
+        redact_secrets(&self.agent_secrets(ix), text)
+    }
+
     /// 屏幕上(光标所在的最后一行)现在是不是 sudo 密码提示;是就返回这一行。
     fn sudo_prompt_line(&self, ix: usize, cx: &App) -> Option<String> {
         let term = self.workspace.tabs[ix].term.as_ref()?;
@@ -937,17 +1038,21 @@ impl Home {
         };
         // 授权窗口内:屏幕确实是 sudo 提示,直接代填
         let remaining = self.workspace.tabs[ix].takeover.as_ref().and_then(|t| t.sudo.as_ref()).map(|g| g.until.saturating_duration_since(Instant::now()));
-        if remaining.is_some_and(|r| !r.is_zero()) {
+        // 免确认代填只在 agent 最近执行的命令里确实有 sudo 时才用:屏幕上的「密码提示」可以被 agent 的脚本伪造,
+        // 命令里没有 sudo 就还是弹确认框,让用户看着命令和提示行决定
+        let cmd = self.workspace.tabs[ix].takeover.as_ref().map(|t| t.last_cmd.clone()).unwrap_or_default();
+        let has_sudo = regex::Regex::new(r"\bsudo\b").is_ok_and(|r| r.is_match(&cmd));
+        if remaining.is_some_and(|r| !r.is_zero()) && has_sudo {
             let typed = self.workspace.tabs[ix].takeover.as_ref().and_then(|t| t.sudo.as_ref()).and_then(|g| g.password.clone());
-            match self.sudo_fill(ix, typed, cx) {
+            let left = remaining.map_or(0, |r| r.as_secs());
+            self.sudo_fill_verified(ix, typed, cx, move |_, res, _| match res {
                 Ok(()) => {
-                    let _ = reply.send(Ok(json!({ "filled": true, "granted": "window", "remaining_s": remaining.map_or(0, |r| r.as_secs()) })));
+                    let _ = reply.send(Ok(json!({ "filled": true, "granted": "window", "remaining_s": left })));
                 }
                 Err(e) => {
                     let _ = reply.send(Err(RpcError::new("sudo_failed", e)));
                 }
-            }
-            cx.notify();
+            });
             return;
         }
         // 节点没保存密码:确认框里让用户输入
@@ -959,10 +1064,42 @@ impl Home {
         }
         let reason = clip(params.get("reason").and_then(Value::as_str).unwrap_or("").trim(), 200);
         alog(format!("{} 申请在 {} 提权(sudo)", client.name, self.node_name(Some(node))));
-        self.sudo_prompt = Some(SudoPrompt { tab_id: sid, client: client.clone(), reason, line, input, reply });
+        self.sudo_prompt = Some(SudoPrompt { tab_id: sid, client: client.clone(), reason, line, cmd, input, reply });
         cx.activate(true);
         self.activate(ix);
         cx.notify();
+    }
+
+    /// 先在远端验证终端前台确实是等密码的 sudo(`sudo_at_prompt`),通过了才把密码写进终端,结果交给 `then`。
+    /// 验证用同一条 SSH 连接另开的 exec 通道,不碰终端里的内容。
+    fn sudo_fill_verified(&mut self, ix: usize, typed: Option<Zeroizing<String>>, cx: &mut Context<Self>, then: impl FnOnce(&mut Self, Result<(), String>, &mut Context<Self>) + 'static) {
+        let tab_id = self.workspace.tabs[ix].id;
+        let Some(session) = self.workspace.tabs[ix].term.as_ref().and_then(|t| t.handle.session()) else {
+            then(self, Err("终端还没有连上".into()), cx);
+            return;
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        crate::terminal::ssh::runtime().spawn(async move {
+            let r = crate::docker::exec(&session, SUDO_FG_SCRIPT, None, Duration::from_secs(8)).await;
+            let _ = tx.send(r.map(|o| o.stdout));
+        });
+        cx.spawn(async move |this, cx| {
+            let out = rx.await.unwrap_or_else(|_| Err("验证被中断".into()));
+            let _ = this.update(cx, |this, cx| {
+                let checked = out.and_then(|o| sudo_at_prompt(&o));
+                let res = match (checked, this.tab_ix_by_id(tab_id)) {
+                    (Err(e), _) => {
+                        alog(format!("没有代填 sudo 密码:{e}"));
+                        Err(format!("没有填密码:{e}。屏幕上的提示可能不是 sudo 发出的"))
+                    }
+                    (Ok(()), None) => Err("标签已关闭".into()),
+                    (Ok(()), Some(ix)) => this.sudo_fill(ix, typed, cx),
+                };
+                then(this, res, cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 把密码写进终端并回车。优先级:用户刚输入的 > 授权里记着的(同样是用户输入的) > 节点保存的。
@@ -985,6 +1122,9 @@ impl Home {
         let _ = term.handle.inputter().send(bytes.to_vec());
         let name = self.node_name(Some(node));
         if let Some(t) = self.workspace.tabs[ix].takeover.as_mut() {
+            if !t.typed.iter().any(|x| **x == *pw) {
+                t.typed.push(pw.clone());
+            }
             t.last_action = "提权:已代为输入 sudo 密码".into();
         }
         alog(format!("→ {name} 已代为输入 sudo 密码"));
@@ -1014,21 +1154,25 @@ impl Home {
             cx.notify();
             return;
         };
-        match self.sudo_fill(ix, typed.clone(), cx) {
-            Ok(()) => {
-                if let Some(d) = scope.window() {
-                    if let Some(t) = self.workspace.tabs[ix].takeover.as_mut() {
-                        t.sudo = Some(SudoGrant { until: Instant::now() + d, password: typed });
+        let (client_name, reply, tab_id) = (p.client.name.clone(), p.reply, p.tab_id);
+        let typed2 = typed.clone();
+        self.sudo_fill_verified(ix, typed, cx, move |this, res, cx| {
+            match res {
+                Ok(()) => {
+                    if let (Some(d), Some(ix)) = (scope.window(), this.tab_ix_by_id(tab_id)) {
+                        if let Some(t) = this.workspace.tabs[ix].takeover.as_mut() {
+                            t.sudo = Some(SudoGrant { until: Instant::now() + d, password: typed2 });
+                        }
                     }
+                    alog(format!("用户允许 {} 在 {} 提权({})", client_name, node_name, scope.label()));
+                    let _ = reply.send(Ok(json!({ "filled": true, "granted": scope.label() })));
                 }
-                alog(format!("用户允许 {} 在 {} 提权({})", p.client.name, node_name, scope.label()));
-                let _ = p.reply.send(Ok(json!({ "filled": true, "granted": scope.label() })));
+                Err(e) => {
+                    let _ = reply.send(Err(RpcError::new("sudo_failed", e)));
+                }
             }
-            Err(e) => {
-                let _ = p.reply.send(Err(RpcError::new("sudo_failed", e)));
-            }
-        }
-        cx.notify();
+            cx.notify();
+        });
     }
 
     /// 撤销这个标签上的提权授权。
@@ -1064,7 +1208,10 @@ impl Home {
         if !p.reason.is_empty() {
             rows.push((IconName::Sparkles, c::accent(), format!("原因:{}", p.reason)));
         }
-        rows.push((IconName::Terminal, c::muted(), p.line.clone()));
+        if !p.cmd.is_empty() {
+            rows.push((IconName::Terminal, c::accent(), format!("agent 刚执行的命令:{}", p.cmd)));
+        }
+        rows.push((IconName::Terminal, c::muted(), format!("屏幕上的提示:{}", p.line)));
         rows.push((IconName::KeyRound, c::warn(), if p.input.is_some() { "这个节点没有保存密码,请在下面输入".into() } else { "将使用节点里保存的密码".into() }));
         rows.push((IconName::OctagonX, c::online(), "随时可以在遮罩上撤销授权或停止接管".into()));
         let points = crate::ui::alert_rows(rows);
@@ -1133,7 +1280,8 @@ fn revoke_label(r: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_sudo_prompt, OUTPUT_MAX, Takeover, key_bytes, limit_output, new_lease, trim_trailing_blank};
+    use super::{is_sudo_prompt, redact_secrets, sudo_at_prompt, OUTPUT_MAX, Takeover, key_bytes, limit_output, new_lease, trim_trailing_blank};
+    use zeroize::Zeroizing;
     use crate::ctl::Client;
     use serde_json::json;
     use std::time::Instant;
@@ -1144,7 +1292,7 @@ mod tests {
 
     fn takeover(client_id: u64, lease: Option<&str>) -> Takeover {
         let now = Instant::now();
-        Takeover { client_id, client_name: "c".into(), started: now, last_call: now, last_action: String::new(), waiting: false, lease: lease.map(String::from), sudo: None }
+        Takeover { client_id, client_name: "c".into(), started: now, last_call: now, last_action: String::new(), waiting: false, lease: lease.map(String::from), sudo: None, typed: Vec::new(), last_cmd: String::new() }
     }
 
     fn snap(lines: &[&str], screen_start: usize, cursor_line: usize, history_total: usize) -> gpui_xterm::TextSnapshot {
@@ -1198,6 +1346,35 @@ mod tests {
         assert_eq!(key_bytes("ctrl+1"), None);
         assert_eq!(key_bytes("ctrl+ab"), None);
         assert_eq!(key_bytes("f13"), None);
+    }
+
+    #[test]
+    fn sudo_must_be_the_foreground_process_as_root() {
+        // 列:pid ppid pgid tpgid tty user comm
+        let head = "ME=500\n  500 1 500 500 ? chen sshd\n  600 500 600 700 pts/0 chen bash\n";
+        // 真的停在 sudo 提示上:前台进程组 700 里有 root 的 sudo,没有子进程
+        assert!(sudo_at_prompt(&format!("{head}  700 600 700 700 pts/0 root sudo\n")).is_ok());
+        // agent 自己的脚本在前台(普通用户):拒绝
+        assert!(sudo_at_prompt(&format!("{head}  700 600 700 700 pts/0 chen sh\n")).is_err());
+        // 普通用户自己拷了一份叫 sudo 的程序:不是 root,拒绝
+        assert!(sudo_at_prompt(&format!("{head}  700 600 700 700 pts/0 chen sudo\n")).is_err());
+        // sudo 已经认证通过并起了命令(有子进程):输入会交给那个命令,拒绝
+        assert!(sudo_at_prompt(&format!("{head}  700 600 700 700 pts/0 root sudo\n  701 700 700 700 pts/1 root sh\n")).is_err());
+        // 别的连接(ppid 不同)上的终端不算
+        assert!(sudo_at_prompt("ME=999\n  600 500 600 700 pts/0 chen bash\n  700 600 700 700 pts/0 root sudo\n").is_err());
+        // 看不懂输出:拒绝
+        assert!(sudo_at_prompt("").is_err());
+        assert!(sudo_at_prompt("ME=500\n").is_err());
+    }
+
+    #[test]
+    fn typed_passwords_are_redacted_for_agents() {
+        let sec = vec![Zeroizing::new("Yi#2026@".to_string())];
+        assert_eq!(redact_secrets(&sec, "[sudo] 密码:\nYi#2026@\nok".into()), "[sudo] 密码:\n••••\nok");
+        // 被终端换行拆开的密码也要抹掉
+        assert_eq!(redact_secrets(&sec, "x Yi#20\n26@ y".into()), "x •••• y");
+        assert_eq!(redact_secrets(&[], "abc".into()), "abc");
+        assert_eq!(redact_secrets(&[Zeroizing::new(String::new())], "abc".into()), "abc");
     }
 
     #[test]

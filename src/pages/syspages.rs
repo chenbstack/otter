@@ -12,7 +12,7 @@ use gpui_kit::component::input::{Input, InputState};
 use super::daemonpage::field;
 
 use super::super::*;
-use super::dockerpages::{DockAsk, head, icon_btn, row, small, table_flow};
+use super::dockerpages::{DockAsk, head, icon_btn, icon_btn_busy, row, small, table_flow};
 use crate::docker::Action;
 use crate::sysops::{self, CronInfo, DirSize, Job, Kind, Mount, Proc, Service};
 
@@ -62,6 +62,8 @@ pub(crate) struct SysUi {
     demo_filled: bool,
     /// 已经发出「结束」的进程和发出的时间;过 1 秒还在,就把「结束」换成「强制结束」
     killed: HashMap<u32, Instant>,
+    /// 刚点删除的计划任务所在行(crontab 行号),让转圈出现在这一行
+    cron_row: Option<usize>,
 }
 
 fn spec(p: Page) -> Option<(Kind, &'static str)> {
@@ -373,8 +375,8 @@ impl Home {
             let target = p.pid.to_string();
             let mut act = div().w(px(60.0)).flex_shrink_0().flex().flex_row().justify_end().gap(px(2.0));
             let pending = self.dock.sys.killed.get(&p.pid).map(|t| t.elapsed());
-            if self.is_busy(&target) || pending.is_some_and(|e| e < FORCE_AFTER) {
-                act = act.child(small("结束中…", c::muted()));
+            if self.op_busy(&target).is_some() || pending.is_some_and(|e| e < FORCE_AFTER) {
+                act = act.child(tip(icon_btn_busy(("pk", i), IconName::Square, c::danger(), true), "结束中"));
             } else if pending.is_some() {
                 // 发出结束 1 秒后进程还在:换成强制结束
                 let (pid, n2) = (p.pid, name.clone());
@@ -464,41 +466,50 @@ impl Home {
                 _ => ("其他", c::ghost()),
             };
             let mut act = div().w(px(92.0)).flex_shrink_0().flex().flex_row().justify_end().gap(px(2.0));
-            if self.is_busy(&s.name) {
-                act = act.child(small("…", c::muted()));
-            } else if sysops::safe_unit(&unit) {
+            if sysops::safe_unit(&unit) {
                 let name = s.name.clone();
+                let busy = self.op_busy(&name).unwrap_or_default();
                 match s.enabled.as_str() {
                     "enabled" => {
                         let n = name.clone();
-                        act = act.child(tip(icon_btn(("sv-en", i), IconName::Power, c::online()), "关闭开机自启").on_click(cx.listener(move |this, _, _, cx| {
+                        let spin = busy == "关闭自启";
+                        let b = tip(icon_btn_busy(("sv-en", i), IconName::Power, c::online(), spin), "关闭开机自启");
+                        act = act.child(if spin { b } else { b.on_click(cx.listener(move |this, _, _, cx| {
                             this.ask(svc_ask("关闭开机自启", "服务当前的运行状态不变,下次开机时不再自动启动", "关闭自启", "disable", IconName::Power, n.clone()), cx);
-                        })));
+                        })) });
                     }
                     "disabled" => {
                         let n = name.clone();
-                        act = act.child(tip(icon_btn(("sv-en", i), IconName::Power, c::ghost()), "设为开机自启").on_click(cx.listener(move |this, _, _, cx| {
+                        let spin = busy == "启用自启";
+                        let b = tip(icon_btn_busy(("sv-en", i), IconName::Power, c::ghost(), spin), "设为开机自启");
+                        act = act.child(if spin { b } else { b.on_click(cx.listener(move |this, _, _, cx| {
                             let j = job("启用自启", &n, format!("systemctl enable {n}.service"), reload);
                             this.sys_run(j, cx);
-                        })));
+                        })) });
                     }
                     _ => {}
                 }
                 if s.running() || s.active == "activating" {
                     let n = name.clone();
-                    act = act.child(tip(icon_btn(("sv-rs", i), IconName::RotateCw, c::secondary()), "重启").on_click(cx.listener(move |this, _, _, cx| {
+                    let spin = busy == "重启服务";
+                    let b = tip(icon_btn_busy(("sv-rs", i), IconName::RotateCw, c::secondary(), spin), "重启");
+                    act = act.child(if spin { b } else { b.on_click(cx.listener(move |this, _, _, cx| {
                         this.ask(svc_ask("重启服务", "服务会短暂中断,正在处理的请求可能失败", "重启服务", "restart", IconName::RotateCw, n.clone()), cx);
-                    })));
+                    })) });
                     let n = name.clone();
-                    act = act.child(tip(icon_btn(("sv-st", i), IconName::Square, c::danger()), "停止").on_click(cx.listener(move |this, _, _, cx| {
+                    let spin = busy == "停止服务";
+                    let b = tip(icon_btn_busy(("sv-st", i), IconName::Square, c::danger(), spin), "停止");
+                    act = act.child(if spin { b } else { b.on_click(cx.listener(move |this, _, _, cx| {
                         this.ask(svc_ask("停止服务", "服务会停止运行,依赖它的程序可能受影响", "停止服务", "stop", IconName::Square, n.clone()), cx);
-                    })));
+                    })) });
                 } else {
                     let n = name.clone();
-                    act = act.child(tip(icon_btn(("sv-go", i), IconName::Play, c::online()), "启动").on_click(cx.listener(move |this, _, _, cx| {
+                    let spin = busy == "启动服务";
+                    let b = tip(icon_btn_busy(("sv-go", i), IconName::Play, c::online(), spin), "启动");
+                    act = act.child(if spin { b } else { b.on_click(cx.listener(move |this, _, _, cx| {
                         let j = job("启动服务", &n, format!("systemctl start {n}.service"), reload);
                         this.sys_run(j, cx);
-                    })));
+                    })) });
                 }
             }
             let mut r = row(("sv", i)).child(div().w(px(230.0)).flex_shrink_0().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::MEDIUM).child(s.name.clone())).child(div().w(px(80.0)).flex_shrink_0().flex().flex_row().child(pill(label, fg, bg))).child(cell(72.0, en_text).text_color(en_color));
@@ -660,6 +671,7 @@ impl Home {
     }
 
     fn cron_write(&mut self, label: &str, text: String, cx: &mut Context<Self>) {
+        self.dock.sys.cron_row = None;
         let j = Job { label: label.into(), target: "crontab".into(), script: "crontab -".into(), root: false, input: Some(text), reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)) };
         self.sys_run(j, cx);
     }
@@ -775,7 +787,8 @@ impl Home {
                 )
         };
         let jobs_header = div().child(head("来源").w(px(170.0))).child(head("计划").w(px(190.0))).child(head("用户").w(px(72.0))).child(head("命令").flex_1().min_w_0()).child(div().w(px(60.0)));
-        let busy = self.is_busy("crontab");
+        let busy = self.op_busy("crontab").is_some();
+        let busy_row = self.dock.sys.cron_row;
         let job_rows: Vec<Stateful<Div>> = info
             .jobs
             .iter()
@@ -784,13 +797,16 @@ impl Home {
                 let mut act = div().w(px(60.0)).flex_shrink_0().flex().flex_row().justify_end().gap(px(2.0));
                 if let Some(line) = j.line {
                     if busy {
-                        act = act.child(small("…", c::muted()));
+                        if busy_row == Some(line) {
+                            act = act.child(icon_btn_busy(("cj-del", i), IconName::Trash, c::danger(), true));
+                        }
                     } else {
                         let (sc, cm) = (j.schedule.clone(), j.cmd.clone());
                         act = act.child(tip(icon_btn(("cj-edit", i), IconName::Pencil, c::secondary()), "编辑").on_click(cx.listener(move |this, _, window, cx| this.cron_open(Some(line), &sc, &cm, window, cx))));
                         let cm = j.cmd.clone();
                         act = act.child(tip(icon_btn(("cj-del", i), IconName::Trash, c::danger()), "删除").on_click(cx.listener(move |this, _, _, cx| {
                             let Some(Ok(info)) = &this.dock.sys.cron else { return };
+                            this.dock.sys.cron_row = Some(line);
                             let text = sysops::crontab_replace(&info.user_text, Some(line), None);
                             let j = Job { label: "删除任务".into(), target: "crontab".into(), script: "crontab -".into(), root: false, input: Some(text), reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)) };
                             this.ask(DockAsk { title: "删除计划任务", tile: IconName::CalendarClock, name: cm.chars().take(40).collect(), detail: "我的 crontab", body: "从 crontab 里删除这一行,之后不会再自动执行", label: "删除任务", action: Action::Sys(j), list: Vec::new() }, cx);

@@ -312,6 +312,8 @@ impl Home {
             ],
             ok_label: "清空日志",
             compact: false,
+            kind: crate::confirm::ConfirmKind::Danger,
+            extra: None,
         };
         Some(self.delete_confirm("logs-clear-dialog", spec, |this| this.logs_clear_ask = false, |this, cx| {
             this.logs_clear_ask = false;

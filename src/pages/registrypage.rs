@@ -50,7 +50,8 @@ impl Home {
                 cx,
             );
         }
-        if self.page != Page::Registry {
+        // 镜像页展开「拉取镜像」时也要读已登录的仓库,给仓库选择用
+        if self.page != Page::Registry && !(self.page == Page::Images && self.dock.pull_open) {
             return;
         }
         if self.dock.reg.inputs.is_none() {
@@ -90,6 +91,12 @@ impl Home {
             self.dock.reg.list = Some(r);
             cx.notify();
         }
+    }
+
+    /// 已登录的仓库地址(不含 Docker Hub,它是默认),去掉协议头;拉取镜像时给用户选
+    pub(crate) fn reg_hosts(&self) -> Vec<String> {
+        let Some(Ok(l)) = &self.dock.reg.list else { return Vec::new() };
+        l.iter().filter(|r| !host_name(&r.host).1).map(|r| r.host.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').to_string()).collect()
     }
 
     /// 重新读一遍(刷新按钮)
@@ -229,10 +236,10 @@ impl Home {
         let mut rows = Vec::new();
         for (i, r) in list.iter().enumerate() {
             let (name, hub) = host_name(&r.host);
-            let busy = self.is_busy(&r.host);
+            let busy = self.op_busy(&r.host).is_some();
             let mut act = div().w(px(40.0)).flex().justify_end();
             if busy {
-                act = act.child(small("…", c::muted()));
+                act = act.child(super::dockerpages::icon_btn_busy(("reg-out", i), IconName::Trash, c::danger(), true));
             } else {
                 let (host, nm) = (r.host.clone(), name.clone());
                 act = act.child(icon_btn(("reg-out", i), IconName::Trash, c::danger()).on_click(cx.listener(move |this, _, _, cx| {
