@@ -243,6 +243,18 @@ mod tests {
     }
 
     #[test]
+    fn dump_composes_for_real_node() {
+        let Ok(dir) = std::env::var("OTTER_DUMP_SCRIPTS") else { return };
+        let vers = [(DbKind::Postgres, "16", 15441u16), (DbKind::Mysql, "8.4", 15442), (DbKind::Mariadb, "11", 15443), (DbKind::Redis, "7", 15444)];
+        for (k, v, port) in vers {
+            let name = format!("otgi-{}", k.label().to_lowercase());
+            let s = Spec { kind: k, version: v, project: &name, container: &name, port, public: false, password: "abcDEF123xyz", cpus: "", memory: "" };
+            std::fs::write(format!("{dir}/{name}.yml"), s.compose()).unwrap();
+            std::fs::write(format!("{dir}/{name}.env"), s.env()).unwrap();
+        }
+    }
+
+    #[test]
     fn password_never_appears_in_compose() {
         for k in KINDS {
             let s = spec(k, false);

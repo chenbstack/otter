@@ -52,6 +52,8 @@ pub(crate) struct DbInstallUi {
     done: Option<(String, DbKind, u16, String)>,
     /// 正在创建的实例,等结果回来再决定展示什么
     pending: Option<(String, DbKind, u16, String)>,
+    /// 装完要跳到并选中的实例名;容器出现在列表里后由数据库页取走
+    pub(super) jump: Option<String>,
 }
 
 const DEFAULT_ROOT: &str = "/opt/otter/docker/compose";
@@ -317,6 +319,7 @@ impl Home {
             u.creating = false;
             u.open = false;
             if let Some((name, kind, port, pw)) = u.pending.take() {
+                u.jump = Some(name.clone());
                 u.done = Some((name, kind, port, pw));
             }
             cx.notify();
