@@ -2472,6 +2472,48 @@ mod tests {
         assert_eq!(names, vec!["demo-exited"]);
     }
 
+    /// 真机:经 SSH 流式下载远端文件并核对内容。OTTER_TEST_FETCH=<容器名>@<主机:端口>,OTTER_TEST_KEY=<私钥文件>,OTTER_TEST_FETCH_REMOTE=<远端文件>,OTTER_TEST_FETCH_LOCAL=<本地路径>
+    #[::core::prelude::v1::test]
+    fn fetch_against_real_node() {
+        let (Ok(spec), Ok(key), Ok(remote), Ok(local)) = (std::env::var("OTTER_TEST_FETCH"), std::env::var("OTTER_TEST_KEY"), std::env::var("OTTER_TEST_FETCH_REMOTE"), std::env::var("OTTER_TEST_FETCH_LOCAL")) else { return };
+        let mut conn = Conn::parse(&spec);
+        conn.auth.agent = false;
+        conn.auth.key = Some(crate::terminal::ssh::KeyAuth { pem: zeroize::Zeroizing::new(std::fs::read_to_string(key).unwrap()), passphrase: None, label: "test".into() });
+        let d = Docker::connect(conn, None);
+        for _ in 0..300 {
+            if let Status::HostPrompt(_) = d.status() {
+                d.answer_host(true);
+            }
+            if matches!(d.status(), Status::Ready) {
+                break;
+            }
+            if let Status::Failed(e) = d.status() {
+                panic!("连接失败:{e}");
+            }
+            d.touch();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let local = std::path::PathBuf::from(local);
+        let _ = std::fs::remove_file(&local);
+        d.fetch("t:fetch", &remote, local.clone());
+        let mut seen = Vec::new();
+        let res = loop {
+            if let Some(r) = d.db_take("t:fetch") {
+                break r;
+            }
+            if let Some(p) = d.fetch_progress("t:fetch") {
+                if seen.last() != Some(&p.0) {
+                    seen.push(p.0);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        println!("result={res:?} progress_samples={} last={:?}", seen.len(), seen.last());
+        assert!(res.is_ok());
+        assert!(local.exists());
+        assert!(!local.with_extension("otter-part").exists());
+    }
+
     /// 真机端到端:OTTER_TEST_DOCKER=user:password@host(可选 OTTER_TEST_DOCKER_SKIP_ACTIONS=1)
     #[::core::prelude::v1::test]
     fn end_to_end_against_real_docker() {
