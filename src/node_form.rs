@@ -132,10 +132,8 @@ impl Home {
                 return conn;
             }
         };
-        // 还没保存过任何认证信息的旧节点保持原来的行为:SSH Agent
-        if !row.use_agent && row.secrets.is_empty() && row.key_label.is_empty() && row.key_id.is_none() {
-            return conn;
-        }
+        // 没保存过任何认证方式(没密码、没私钥、没勾 SSH Agent)的节点不再默认走 SSH Agent:
+        // 下面得到的 Auth 是空的,连接时在终端里手动输入密码
         if !row.secrets.is_empty() || row.key_id.is_some() {
             if let Err(e) = self.ensure_vault() {
                 conn.auth_error = Some(e);
@@ -461,22 +459,79 @@ impl Home {
         cx.notify();
     }
 
-    /// 模拟测试连接:等一会儿,主机为空或以 "bad" 开头则失败。
+    /// 用表单里当前填的主机、端口、用户和认证方式真连一次:连上、认证通过就断开(不开 shell)。
+    /// 没配置任何认证方式时无法在这里问密码,如实说明连接时会让用户输入。
     fn test_connection(&mut self, cx: &mut Context<Self>) {
-        let Some(f) = &mut self.form else { return };
+        use crate::terminal::ssh::{Auth, Conn, Io, KeyAuth, open_authenticated, runtime};
+        let Some(f) = &self.form else { return };
         let host = NodeForm::val(&f.host, cx);
-        f.test = TestState::Running;
+        if host.is_empty() {
+            self.form_error("请先填写主机地址".into(), cx);
+            return;
+        }
+        let user = NodeForm::val(&f.user, cx);
+        let port = NodeForm::val(&f.port, cx).parse::<u16>().unwrap_or(22);
+        let pw = f.password.read(cx).value().to_string();
+        let (use_key, key_path_mode, key_id, use_agent) = (f.use_key, f.key_path_mode, f.key_id, f.use_agent);
+        let path = NodeForm::val(&f.key_path, cx);
+        let pass = f.passphrase.read(cx).value().to_string();
+        // 私钥:钥匙串里的,或本机文件;读不出来就直接报
+        let key = if !use_key {
+            Ok(None)
+        } else if !key_path_mode {
+            match key_id {
+                Some(kid) => self.ensure_vault().and_then(|_| self.load_key_auth(kid)).map(Some),
+                None => Err("请选择一把私钥".to_string()),
+            }
+        } else if path.is_empty() {
+            Err("请填写私钥路径".to_string())
+        } else {
+            std::fs::read_to_string(crate::terminal::ssh::expand(&path))
+                .map_err(|e| format!("读取私钥 {path} 失败:{e}"))
+                .map(|pem| Some(KeyAuth { pem: Zeroizing::new(pem), passphrase: (!pass.is_empty()).then(|| Zeroizing::new(pass.clone())), label: path.clone() }))
+        };
+        let key = match key {
+            Ok(k) => k,
+            Err(e) => {
+                self.form_error(e, cx);
+                return;
+            }
+        };
+        let auth = Auth { key, agent: use_agent, password: (!pw.is_empty()).then(|| Zeroizing::new(pw)) };
+        if auth.key.is_none() && !auth.agent && auth.password.is_none() {
+            // 没有可用的登录方式:只能验证到网络和主机密钥这一步,密码连接时再问
+            if let Some(f) = &mut self.form {
+                f.test = TestState::Err("还没有配置登录方式:连接时会让你输入密码".into());
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(f) = &mut self.form {
+            f.test = TestState::Running;
+        }
         cx.notify();
+        let conn = Conn { host, port, user: if user.is_empty() { "root".into() } else { user }, auth, auth_error: None, exec: None };
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(800)).await;
+            let started = std::time::Instant::now();
+            let job = runtime().spawn(async move {
+                let io = Io::probe(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+                let r = tokio::time::timeout(Duration::from_secs(20), open_authenticated(&conn, &io)).await;
+                match r {
+                    Ok(Ok(session)) => {
+                        let _ = session.disconnect(russh::Disconnect::ByApplication, "", "en").await;
+                        Ok(())
+                    }
+                    Ok(Err(e)) => Err(io.failure().filter(|m| !e.contains(m.as_str())).map(|m| format!("{e}({m})")).unwrap_or(e)),
+                    Err(_) => Err("连接超时".to_string()),
+                }
+            });
+            let res = job.await.unwrap_or_else(|e| Err(format!("内部错误:{e}")));
+            let ms = started.elapsed().as_millis() as u32;
             let _ = this.update(cx, |this, cx| {
                 if let Some(f) = &mut this.form {
-                    f.test = if host.is_empty() {
-                        TestState::Err("请先填写主机地址".into())
-                    } else if host.starts_with("bad") {
-                        TestState::Err("连接超时".into())
-                    } else {
-                        TestState::Ok(30 + (host.len() as u32 * 17) % 200)
+                    f.test = match res {
+                        Ok(()) => TestState::Ok(ms),
+                        Err(e) => TestState::Err(e.into()),
                     };
                     cx.notify();
                 }

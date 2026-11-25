@@ -401,7 +401,7 @@ fn net_panel(m: &MonSnapshot) -> Div {
 impl Home {
     pub(crate) fn overview_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(m) = self.dock.mon.clone() else {
-            let msg = self.dock.mon_err.clone().unwrap_or_else(|| "正在读取系统信息…".into());
+            let Some(msg) = self.dock.mon_err.clone() else { return crate::ui::loading("正在读取系统信息…").into_any_element() };
             return div().flex_1().flex().items_center().justify_center().text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child(msg).into_any_element();
         };
         let h = &m.now.host;

@@ -1,9 +1,10 @@
 //! 「连接中」页:点节点卡片后先显示它,逐步展示连接过程;失败时留在这页显示原因,可重试。
 //! 没有卡片:整页居中排版,大图标 + 标题 + 横向步骤条 + 失败原因 + 操作。
-//! 首次连接的主机指纹确认以卡片形式显示在本页(信任并继续 / 取消);密码、口令仍在终端里输入,进入等待时自动切到终端画布。
+//! 首次连接的主机指纹确认、密码/口令输入都以卡片形式显示在本页(不在终端里问)。
 
 use ::gpui::{Animation, AnimationExt as _, ease_in_out, ease_out_quint, linear};
 use std::time::Duration;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 
 use super::ssh::{STEP_LABELS, Step, StepState};
@@ -202,6 +203,12 @@ impl Home {
             )
         });
 
+        // 密码/口令输入卡片(只有终端连接有):替代日志和操作按钮
+        let secret_card = match target {
+            ConnTarget::Terminal(a) if prompt.is_none() => self.workspace.tabs.get(a).and_then(|t| t.term.as_ref()).and_then(|t| t.handle.secret_prompt()).zip(self.conn_secret.as_ref()).map(|(sp, (_, input))| self.secret_card(&sp, input, cx)),
+            _ => None,
+        };
+        let has_secret = secret_card.is_some();
         let title = if failed { format!("无法连接 {name}") } else { format!("正在连接 {name}") };
         let actions = div()
             .flex()
@@ -308,7 +315,8 @@ impl Home {
                 .child(div().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::ghost()).child(conn))
                 .child(div().w_full().mt(px(32.0)).flex().flex_row().children((0..n).map(col)))
                 .children(confirm)
-                .when(prompt.is_none(), |d| d.child(div().mt(px(28.0)).child(actions)).child(log_area))
+                .children(secret_card)
+                .when(prompt.is_none() && !has_secret, |d| d.child(div().mt(px(28.0)).child(actions)).child(log_area))
                 // 页面进入:淡入并从下方轻轻升起
                 .with_animation("conn-enter", Animation::new(Duration::from_millis(420)).with_easing(ease_out_quint()), |d, t| d.opacity(t).mt(px(16.0 * (1.0 - t)))),
         )
@@ -316,6 +324,120 @@ impl Home {
 }
 
 impl Home {
+    /// 终端正在等密码/口令时,准备(或换新)输入框并聚焦;没有提示就清掉。
+    pub(crate) fn sync_conn_secret(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let want = self.workspace.active.and_then(|a| self.workspace.tabs.get(a)).and_then(|t| t.term.as_ref()).and_then(|t| t.handle.secret_prompt());
+        match (want, self.conn_secret.as_ref().map(|(id, _)| *id)) {
+            (None, None) => {}
+            (None, Some(_)) => self.conn_secret = None,
+            (Some(p), cur) if cur != Some(p.id) => {
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder(p.hint.clone()).masked(true));
+                cx.subscribe_in(&input, window, |this: &mut Home, _, ev: &InputEvent, _w, cx| {
+                    if matches!(ev, InputEvent::PressEnter { .. }) {
+                        this.answer_conn_secret(true, cx);
+                    }
+                })
+                .detach();
+                let fh = input.focus_handle(cx);
+                window.focus(&fh, cx);
+                self.conn_secret = Some((p.id, input));
+                self.conn_save = false;
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    fn answer_conn_secret(&mut self, ok: bool, cx: &mut Context<Self>) {
+        let Some(a) = self.workspace.active else { return };
+        let Some((_, input)) = self.conn_secret.as_ref() else { return };
+        let text = zeroize::Zeroizing::new(input.read(cx).value().to_string());
+        if ok && text.is_empty() {
+            return;
+        }
+        if let Some(t) = self.workspace.tabs.get(a).and_then(|t| t.term.as_ref()) {
+            t.handle.answer_secret(ok.then(|| (text, self.conn_save)));
+        }
+        self.conn_secret = None;
+        cx.notify();
+    }
+
+    fn secret_card(&self, sp: &super::ssh::SecretPrompt, input: &Entity<InputState>, cx: &mut Context<Self>) -> Div {
+        let empty = input.read(cx).value().is_empty();
+        let save = self.conn_save;
+        div()
+            .w_full()
+            .mt(px(28.0))
+            .p(px(18.0))
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .rounded(px(t::RADIUS_LG))
+            .bg(c::dialog())
+            .border_1()
+            .border_color(c::dialog_border())
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(div().size(px(36.0)).flex_shrink_0().flex().items_center().justify_center().rounded(px(t::RADIUS_MD)).bg(c::accent_soft()).child(icon(IconName::KeyRound, 18.0, c::accent())))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(sp.title.clone()))
+                            .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(sp.hint.clone())),
+                    ),
+            )
+            .children(sp.error.clone().map(|e| div().text_size(px(t::TYPE_CAPTION)).text_color(c::danger()).child(e)))
+            .child(div().w_full().child(crate::ui::field(IconName::Lock, false, false, crate::node_form::input_cell(input, false))))
+            .when(sp.offer_save, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(Home::pill_switch("conn-save", save).on_click(cx.listener(|this, _, _, cx| {
+                            this.conn_save = !this.conn_save;
+                            cx.notify();
+                        })))
+                        .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::text()).child("把新密码保存到这个节点")),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(button("secret-deny", IconName::X, "取消").on_click(cx.listener(|this, _, _, cx| this.answer_conn_secret(false, cx))))
+                    .child(
+                        div()
+                            .id("secret-ok")
+                            .h(px(30.0))
+                            .px(px(14.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .rounded(px(t::RADIUS_MD))
+                            .bg(c::accent())
+                            .text_color(c::on_accent())
+                            .text_size(px(t::TYPE_CONTROL))
+                            .font_weight(FontWeight::MEDIUM)
+                            .cursor_pointer()
+                            .when(empty, |d| d.opacity(0.4))
+                            .hover(|s| s.opacity(0.88))
+                            .child(icon(IconName::Check, 13.0, c::on_accent()))
+                            .child("继续")
+                            .on_click(cx.listener(|this, _, _, cx| this.answer_conn_secret(true, cx))),
+                    ),
+            )
+    }
+
     fn answer_host_for(&mut self, target: ConnTarget, yes: bool) {
         match target {
             ConnTarget::Terminal(a) => {

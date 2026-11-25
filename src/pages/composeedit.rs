@@ -280,6 +280,7 @@ impl Home {
     /// 每次渲染前调用:收后台读到的文件位置和内容
     pub(crate) fn comp_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.create_sync(window, cx);
+        self.dbi_sync(window, cx);
         let Some(stack) = self.dock.comp.open.clone() else { return };
         self.env_sync(window, cx);
         if self.demo || !matches!(self.dock.comp.phase, Phase::Loading) {
@@ -463,7 +464,7 @@ impl Home {
                 .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(h))
         });
         let body: AnyElement = match phase {
-            Phase::Loading => div().flex_1().flex().items_center().justify_center().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child("正在读取…").into_any_element(),
+            Phase::Loading => crate::ui::loading("正在读取…").into_any_element(),
             Phase::Err(e) => div()
                 .flex_1()
                 .px(px(32.0))
@@ -569,7 +570,12 @@ impl Home {
 }
 
 /// 表单里「标签 + 一个框」的一列;`w` 为空时占满剩余宽度
-fn field_col(label: &'static str, w: Option<f32>, inner: AnyElement, mono: bool, dim: bool) -> Div {
+pub(super) fn field_col(label: &'static str, w: Option<f32>, inner: AnyElement, mono: bool, dim: bool) -> Div {
+    field_col_with(label, w, inner, mono, dim, None)
+}
+
+/// 同 `field_col`,框内右侧可以再放一个后缀(单位、小按钮等),不占框外的宽度
+pub(super) fn field_col_with(label: &'static str, w: Option<f32>, inner: AnyElement, mono: bool, dim: bool, suffix: Option<AnyElement>) -> Div {
     div()
         .flex_shrink_0()
         .when(w.is_none(), |d| d.flex_1().min_w_0())
@@ -584,7 +590,9 @@ fn field_col(label: &'static str, w: Option<f32>, inner: AnyElement, mono: bool,
                 .flex()
                 .flex_row()
                 .items_center()
-                .px(px(12.0))
+                // 输入组件自带左右各约 8px 的内边距,这里只补足到 12px,不再叠加
+                .pl(px(4.0))
+                .pr(px(6.0))
                 .rounded(px(t::RADIUS_MD))
                 .bg(c::field())
                 .border_1()
@@ -592,7 +600,8 @@ fn field_col(label: &'static str, w: Option<f32>, inner: AnyElement, mono: bool,
                 .text_size(px(t::TYPE_CONTROL))
                 .when(mono, |d| d.font_family(MONO))
                 .when(dim, |d| d.text_color(c::muted()).opacity(0.8))
-                .child(inner),
+                .child(inner)
+                .children(suffix.map(|x| div().flex_shrink_0().child(x))),
         )
 }
 

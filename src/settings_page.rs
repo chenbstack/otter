@@ -149,7 +149,7 @@ impl Home {
             .child(card)
     }
 
-    fn pill_switch(id: &'static str, on: bool) -> Stateful<Div> {
+    pub(crate) fn pill_switch(id: &'static str, on: bool) -> Stateful<Div> {
         div()
             .id(id)
             .w(px(36.0))

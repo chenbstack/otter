@@ -177,7 +177,7 @@ impl Home {
 
     pub(crate) fn registry_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let list = match &self.dock.reg.list {
-            None => return empty_state(IconName::LoaderCircle, "正在读取", "读取服务器上登录过的镜像仓库").into_any_element(),
+            None => return crate::ui::loading("正在读取登录信息…").into_any_element(),
             Some(Err(e)) => {
                 return div()
                     .flex_1()

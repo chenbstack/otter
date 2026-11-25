@@ -582,6 +582,10 @@ enum Cmd {
     Sys { kind: crate::sysops::Kind, script: String, root: bool },
     /// 容器抽屉读一份数据(日志、目录列表、文件内容),结果用 `ct_take` 取;`tag` 原样带回,界面靠它认出这是哪次请求
     Ct { kind: crate::ctfiles::CtKind, tag: String, args: Vec<String>, merge: bool },
+    /// 数据库页:在数据库容器里 `docker exec` 一段脚本,SQL 等从 stdin 传入(密码只放在这里,不进命令行);结果用 `db_take` 按 `tag` 取
+    Db { tag: String, args: Vec<String>, input: Option<zeroize::Zeroizing<String>> },
+    /// 在服务器上跑一段无需 root 的只读脚本(如查镜像 tag),结果存进 `Shared.db[tag]`
+    Shell { tag: String, script: String },
     /// 容器里的文件操作:界面是 SFTP 那套文件管理,命令在这里换成 docker exec / docker cp
     CtFs { name: String, sh: Arc<crate::sftp::Shared>, cmd: crate::sftp::Cmd },
 }
@@ -606,6 +610,8 @@ struct Shared {
     sys: Mutex<HashMap<crate::sysops::Kind, Result<String, String>>>,
     /// 容器抽屉读到的内容:(请求的标签, 输出),按种类存放;界面取走后清空
     ct: Mutex<HashMap<crate::ctfiles::CtKind, (String, Result<String, String>)>>,
+    /// 数据库页执行的结果,键是请求的 `tag`;界面取走后清空
+    db: Mutex<HashMap<String, Result<String, String>>>,
     /// 等用户确认的 HTTP 仓库登录:(仓库, 用户名, 密码),确认或取消后清掉
     pending_login: Mutex<Option<(String, String, zeroize::Zeroizing<String>)>>,
     /// 需要向用户确认的 HTTP 仓库地址;界面取走后清空
@@ -676,6 +682,7 @@ impl Docker {
             registries: Mutex::new(None),
             sys: Mutex::new(HashMap::new()),
             ct: Mutex::new(HashMap::new()),
+            db: Mutex::new(HashMap::new()),
             pending_login: Mutex::new(None),
             insecure_ask: Mutex::new(None),
             version: AtomicU64::new(1),
@@ -810,6 +817,20 @@ impl Docker {
     /// 请求读一份运维数据;结果用 `sys_take` 取
     pub fn sys_load(&self, kind: crate::sysops::Kind, script: &str, root: bool) {
         let _ = self.cmd.send(Cmd::Sys { kind, script: script.to_string(), root });
+    }
+
+    /// 在数据库容器里执行(`args` 是 `docker` 的参数,如 `exec -i <容器> sh -c <脚本>`),`input` 走 stdin;结果用 `db_take(tag)` 取
+    pub fn db_run(&self, tag: &str, args: Vec<String>, input: Option<String>) {
+        let _ = self.cmd.send(Cmd::Db { tag: tag.to_string(), args, input: input.map(zeroize::Zeroizing::new) });
+    }
+
+    /// 在服务器上跑一段脚本(普通用户),结果用 `db_take(tag)` 取
+    pub fn shell_run(&self, tag: &str, script: &str) {
+        let _ = self.cmd.send(Cmd::Shell { tag: tag.to_string(), script: script.to_string() });
+    }
+
+    pub fn db_take(&self, tag: &str) -> Option<Result<String, String>> {
+        self.sh.db.lock().ok().and_then(|mut m| m.remove(tag))
     }
 
     pub fn sys_take(&self, kind: crate::sysops::Kind) -> Option<Result<String, String>> {
@@ -1273,6 +1294,21 @@ async fn ct_load(r: &Runner, sh: &Shared, kind: crate::ctfiles::CtKind, tag: Str
         Err(e) => Err(e),
     };
     sh.ct.lock().unwrap().insert(kind, (tag, res));
+    sh.bump();
+}
+
+/// 数据库页:在容器里跑一段脚本。成功返回 stdout;失败返回 stderr(没有就 stdout)的最后一行。
+/// `input` 里可能有密码,用完即清零;结果和日志里都不带它。
+async fn db_exec(r: &Runner, sh: &Shared, tag: String, args: Vec<String>, input: Option<zeroize::Zeroizing<String>>) {
+    let res = match r.docker_raw(&args, input.as_ref().map(|i| i.as_bytes()), false, Duration::from_secs(60)).await {
+        Ok(o) if o.code == 0 => Ok(String::from_utf8_lossy(&o.out).into_owned()),
+        Ok(o) => {
+            let t = if o.err.iter().any(|b| !b.is_ascii_whitespace()) { &o.err } else { &o.out };
+            Err(String::from_utf8_lossy(t).trim().lines().last().unwrap_or("未知错误").to_string())
+        }
+        Err(e) => Err(e),
+    };
+    sh.db.lock().unwrap().insert(tag, res);
     sh.bump();
 }
 
@@ -1926,6 +1962,24 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
                         tokio::spawn(async move { ct_load(&r, &sh2, kind, tag, args, merge).await });
                         continue;
                     }
+                    Cmd::Db { tag, args, input } => {
+                        let (r, sh2) = (runner.clone(), sh.clone());
+                        tokio::spawn(async move { db_exec(&r, &sh2, tag, args, input).await });
+                        continue;
+                    }
+                    Cmd::Shell { tag, script } => {
+                        let (r, sh2) = (runner.clone(), sh.clone());
+                        tokio::spawn(async move {
+                            let res = match sys_exec(&r, &script, false, None, Duration::from_secs(20)).await {
+                                Ok(o) if o.code == 0 => Ok(o.stdout),
+                                Ok(o) => Err(last_line(&o)),
+                                Err(e) => Err(e),
+                            };
+                            sh2.db.lock().unwrap().insert(tag, res);
+                            sh2.bump();
+                        });
+                        continue;
+                    }
                     Cmd::CtFs { name, sh: fsh, cmd } => {
                         let r = runner.clone();
                         tokio::spawn(async move { ctfs_run(&r, &name, &fsh, cmd).await });
@@ -2048,7 +2102,8 @@ async fn run_create(r: &Runner, sh: &Shared, project: &str, dir: &str, text: &st
     // 有 .env 内容就一起写(和 compose 文件同一个身份,这样两个文件属主一致)
     if !env.is_empty() && matches!(&res, Ok(o) if o.code == 0) {
         let envq = shell_quote(&format!("{dir}/.env"));
-        res = sys_exec(r, &format!("cat > {envq}"), root, Some(env), Duration::from_secs(30)).await;
+        // .env 里常放密码:只有属主能读写
+        res = sys_exec(r, &format!("umask 077; cat > {envq}"), root, Some(env), Duration::from_secs(30)).await;
     }
     let msg = match res {
         Ok(o) if o.code == 0 => {

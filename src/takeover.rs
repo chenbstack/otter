@@ -84,6 +84,10 @@ pub struct Takeover {
     typed: Vec<Zeroizing<String>>,
     /// agent 最近一次执行(send_input 带 execute)的命令。提权确认框里给用户看,免得屏幕上的「密码提示」是 agent 自己造的
     last_cmd: String,
+    /// 终端前台现在是不是 root shell(定时在服务器上查,遮罩上提示)
+    root_shell: bool,
+    rs_checked: Instant,
+    rs_busy: bool,
 }
 
 /// 一次「N 分钟内同意」的提权授权。随接管结束而消失,不落盘。
@@ -127,7 +131,9 @@ pub struct SudoPrompt {
     line: String,
     /// agent 最近执行的命令,给用户看
     cmd: String,
-    /// 节点没保存密码时,让用户输入
+    /// 是 sudo 还是 su:su 要的是 root 密码,Otter 没有,必须让用户输入,而且只代填这一次
+    kind: Fg,
+    /// 节点没保存密码、或者是 su 时,让用户输入
     input: Option<Entity<InputState>>,
     reply: Reply,
 }
@@ -186,23 +192,40 @@ fn clip(s: &str, n: usize) -> String {
 /// 第一行 `ME=` 是这条 exec 的父进程(sshd 为这条连接开的会话进程),交互终端里的 shell 也是它的子进程。
 pub const SUDO_FG_SCRIPT: &str = "echo \"ME=$PPID\"; ps -eo pid=,ppid=,pgid=,tpgid=,tty=,user=,comm= 2>/dev/null || ps -axo pid=,ppid=,pgid=,tpgid=,tty=,user=,comm= 2>/dev/null";
 
-/// 终端的前台进程组里是不是有一个 root 身份、还没起子进程的 `sudo`(也就是真的停在 sudo 的密码提示上)。
+/// 终端的前台进程组里是不是有一个 root 身份、还没起子进程的 `sudo` 或 `su`(也就是真的停在它们的密码提示上),返回是哪一个。
 /// 屏幕上的「密码提示」可以被 agent 的脚本伪造,这是不看屏幕、从服务器进程表里验证的办法:
 /// - 伪造提示的脚本以普通用户身份运行,不是 root;
 /// - sudo 已经认证通过(缓存、免密)并起了命令时有子进程,这时输入会被交给那个命令而不是 sudo。
 /// 看不懂输出(没有 ps、格式不同)一律当作验证失败,不填。
-pub fn sudo_at_prompt(out: &str) -> Result<(), String> {
-    struct P {
-        pid: String,
-        ppid: String,
-        pgid: String,
-        tpgid: String,
-        tty: String,
-        user: String,
-        comm: String,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fg {
+    Sudo,
+    Su,
+}
+
+impl Fg {
+    fn name(self) -> &'static str {
+        match self {
+            Fg::Sudo => "sudo",
+            Fg::Su => "su",
+        }
     }
+}
+
+struct Proc {
+    pid: String,
+    ppid: String,
+    pgid: String,
+    tpgid: String,
+    tty: String,
+    user: String,
+    comm: String,
+}
+
+/// 解析 `SUDO_FG_SCRIPT` 的输出:(这条连接 sshd 会话进程的 pid, 所有进程, 这条连接上带终端的 shell 所在终端的 (终端, 前台进程组, shell 的用户))
+fn parse_ps(out: &str) -> Result<(Vec<Proc>, Vec<(String, String, String)>), String> {
     let mut me = None;
-    let mut rows: Vec<P> = Vec::new();
+    let mut rows: Vec<Proc> = Vec::new();
     for l in out.lines() {
         if let Some(v) = l.strip_prefix("ME=") {
             me = Some(v.trim().to_string());
@@ -212,27 +235,79 @@ pub fn sudo_at_prompt(out: &str) -> Result<(), String> {
         if f.len() < 7 {
             continue;
         }
-        rows.push(P { pid: f[0].into(), ppid: f[1].into(), pgid: f[2].into(), tpgid: f[3].into(), tty: f[4].into(), user: f[5].into(), comm: f[6..].join(" ") });
+        rows.push(Proc { pid: f[0].into(), ppid: f[1].into(), pgid: f[2].into(), tpgid: f[3].into(), tty: f[4].into(), user: f[5].into(), comm: f[6..].join(" ") });
     }
     let me = me.filter(|m| !m.is_empty()).ok_or("没能读到远端进程信息")?;
     if rows.is_empty() {
         return Err("远端没有可用的 ps,没法确认终端前台是 sudo".into());
     }
     let has_tty = |t: &str| !matches!(t, "?" | "??" | "-" | "");
-    // 这条连接上带终端的 shell,它们所在终端的前台进程组
-    let ttys: Vec<(&str, &str)> = rows.iter().filter(|r| r.ppid == me && has_tty(&r.tty)).map(|r| (r.tty.as_str(), r.tpgid.as_str())).collect();
+    let ttys: Vec<(String, String, String)> = rows.iter().filter(|r| r.ppid == me && has_tty(&r.tty)).map(|r| (r.tty.clone(), r.tpgid.clone(), r.user.clone())).collect();
     if ttys.is_empty() {
         return Err("没找到这条连接上的终端".into());
     }
-    for (tty, fg) in ttys {
+    Ok((rows, ttys))
+}
+
+pub fn sudo_at_prompt(out: &str) -> Result<Fg, String> {
+    let (rows, ttys) = parse_ps(out)?;
+    for (tty, fg, _) in ttys {
         for r in rows.iter().filter(|r| r.tty == tty && r.pgid == fg) {
-            let is_sudo = r.comm == "sudo" && r.user == "root";
-            if is_sudo && !rows.iter().any(|c| c.ppid == r.pid) {
-                return Ok(());
+            let kind = match r.comm.as_str() {
+                "sudo" => Fg::Sudo,
+                "su" => Fg::Su,
+                _ => continue,
+            };
+            if r.user == "root" && !rows.iter().any(|c| c.ppid == r.pid) {
+                return Ok(kind);
             }
         }
     }
-    Err("终端前台不是正在等密码的 sudo".into())
+    Err("终端前台不是正在等密码的 sudo 或 su".into())
+}
+
+/// 终端前台现在是不是一个 root 的 shell,而登录用户不是 root(也就是 `su` / `sudo -i` 之后 agent 的命令都以 root 运行)。
+/// 读不到进程表按「不是」处理,这只是给用户看的提示,不影响放行。
+pub fn root_shell_active(out: &str) -> bool {
+    const SHELLS: [&str; 9] = ["bash", "sh", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash"];
+    let Ok((rows, ttys)) = parse_ps(out) else { return false };
+    ttys.iter().any(|(tty, fg, login)| login != "root" && rows.iter().any(|r| &r.tty == tty && &r.pgid == fg && r.user == "root" && SHELLS.contains(&r.comm.as_str())))
+}
+
+/// agent 最近的命令会不会打开一个 root shell(之后的命令都以 root 运行、不再询问):
+/// `su`、`su -`、`su root`(没有 -c);`sudo -i`、`sudo -s`、`sudo su`、`sudo bash` 等。`su -c '…'`、`sudo <命令>` 只提权这一条,不算。
+pub fn opens_root_shell(cmd: &str) -> bool {
+    const SHELLS: [&str; 9] = ["bash", "sh", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "ash"];
+    // 带参数值的 sudo 选项:值要跳过,免得把用户名当成命令
+    const SUDO_ARG: [&str; 9] = ["-u", "-g", "-h", "-p", "-C", "-r", "-t", "-U", "-D"];
+    fn su_opens(args: &[&str]) -> bool {
+        !args.iter().any(|a| *a == "--command" || a.starts_with("--command=") || (a.starts_with('-') && !a.starts_with("--") && a.contains('c')))
+    }
+    cmd.split(['&', ';', '|', '\n']).any(|seg| {
+        let toks: Vec<&str> = seg.split_whitespace().collect();
+        let Some(i) = toks.iter().position(|t| *t == "su" || *t == "sudo") else { return false };
+        if toks[i] == "su" {
+            return su_opens(&toks[i + 1..]);
+        }
+        let mut k = i + 1;
+        while k < toks.len() {
+            let t = toks[k];
+            if t == "--login" || t == "--shell" || (t.starts_with('-') && !t.starts_with("--") && (t.contains('i') || t.contains('s'))) {
+                return true;
+            }
+            if SUDO_ARG.contains(&t) {
+                k += 2;
+                continue;
+            }
+            if t.starts_with('-') {
+                k += 1;
+                continue;
+            }
+            // 第一个不是选项的词就是要执行的命令
+            return if t == "su" { su_opens(&toks[k + 1..]) } else { SHELLS.contains(&t) };
+        }
+        false
+    })
 }
 
 /// 把 Otter 代为输入过的密码从要交给 agent 的文本里抹掉(换成 `••••`)。
@@ -442,6 +517,9 @@ impl Home {
             sudo: None,
             typed: saved_pw,
             last_cmd: String::new(),
+            root_shell: false,
+            rs_checked: now,
+            rs_busy: false,
         });
         alog(format!("{} 开始接管 {}{}", client.name, self.node_name(node), if reason.is_empty() { String::new() } else { format!("(原因:{reason})") }));
         let fh = self.takeover_focus.get_or_insert_with(|| cx.focus_handle()).clone();
@@ -786,6 +864,45 @@ impl Home {
                 k.sudo = None;
             }
         }
+        // 每 5 秒在服务器上看一眼终端前台是不是 root shell
+        let due: Vec<u64> = self.workspace.tabs.iter().filter(|t| t.takeover.as_ref().is_some_and(|k| !k.rs_busy && k.rs_checked.elapsed() >= Duration::from_secs(5))).map(|t| t.id).collect();
+        for id in due {
+            self.check_root_shell(id, cx);
+        }
+    }
+
+    /// 经同一条 SSH 连接的 exec 通道查前台进程,结果记在 `Takeover.root_shell`
+    fn check_root_shell(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        let Some(ix) = self.tab_ix_by_id(tab_id) else { return };
+        if let Some(k) = self.workspace.tabs[ix].takeover.as_mut() {
+            k.rs_checked = Instant::now();
+        }
+        let Some(session) = self.workspace.tabs[ix].term.as_ref().and_then(|t| t.handle.session()) else { return };
+        if let Some(k) = self.workspace.tabs[ix].takeover.as_mut() {
+            k.rs_busy = true;
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        crate::terminal::ssh::runtime().spawn(async move {
+            let r = crate::docker::exec(&session, SUDO_FG_SCRIPT, None, Duration::from_secs(8)).await;
+            let _ = tx.send(r.map(|o| o.stdout));
+        });
+        cx.spawn(async move |this, cx| {
+            let out = rx.await.unwrap_or_else(|_| Err("中断".into()));
+            let _ = this.update(cx, |this, cx| {
+                if let Some(ix) = this.tab_ix_by_id(tab_id) {
+                    if let Some(k) = this.workspace.tabs[ix].takeover.as_mut() {
+                        k.rs_busy = false;
+                        let now = out.map(|o| root_shell_active(&o)).unwrap_or(false);
+                        if k.root_shell != now {
+                            k.root_shell = now;
+                            alog(if now { "终端进入了 root shell".to_string() } else { "终端退出了 root shell".to_string() });
+                            cx.notify();
+                        }
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     /// ⌘. :停止当前标签上的接管。返回是否处理了这次按键。
@@ -810,7 +927,7 @@ impl Home {
             let (reply, _rx) = tokio::sync::oneshot::channel();
             let tab_id = self.workspace.tabs[a].id;
             let input = (mode == "sudo").then(|| cx.new(|cx| InputState::new(window, cx).placeholder("sudo 密码").masked(true)));
-            self.sudo_prompt = Some(SudoPrompt { tab_id, client, reason: "清理 /var/log 下的旧日志".into(), line: "[sudo] password for chen:".into(), cmd: "sudo rm -rf /var/log/old".into(), input, reply });
+            self.sudo_prompt = Some(SudoPrompt { tab_id, client, reason: "清理 /var/log 下的旧日志".into(), line: "[sudo] password for chen:".into(), cmd: "sudo rm -rf /var/log/old".into(), kind: Fg::Sudo, input, reply });
         } else if mode.starts_with("prompt") {
             let client = if mode == "prompt-unverified" { Arc::new(Client { id: 0, name: "Claude Code".into(), parent_exe: String::new() }) } else { client };
             let (reply, _rx) = tokio::sync::oneshot::channel();
@@ -902,10 +1019,25 @@ impl Home {
                         .flex_col()
                         .items_center()
                         .gap(px(6.0))
+                        .rounded(px(t::RADIUS_2XL))
+                        .shadow(crate::ui::shadow_overlay_content())
                         .child(glyph)
                         .child(div().mt(px(10.0)).text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).text_color(c::text()).child("Agent 接管中"))
                         .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(k.client_name.clone()))
                         .child(div().max_w(px(360.0)).truncate().text_size(px(t::TYPE_MICRO)).font_family(crate::MONO).text_color(c::ghost()).child(k.last_action.clone()))
+                        .children(k.root_shell.then(|| {
+                            div()
+                                .id("takeover-root-shell")
+                                .mt(px(10.0))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .text_size(px(t::TYPE_MICRO))
+                                .text_color(c::warn())
+                                .child(icon(IconName::TriangleAlert, 12.0, c::warn()))
+                                .child("终端当前是 root shell,agent 的命令以 root 运行")
+                        }))
                         .children(k.sudo.as_ref().map(|g| {
                             let mins = g.until.saturating_duration_since(Instant::now()).as_secs().div_ceil(60);
                             div()
@@ -1025,7 +1157,7 @@ impl Home {
             return;
         }
         let Some(line) = self.sudo_prompt_line(ix, cx) else {
-            let _ = reply.send(Err(RpcError::new("no_sudo_prompt", "屏幕上没有 sudo 密码提示。先 send_input 执行带 sudo 的命令,等屏幕出现「[sudo] password for …」再调用")));
+            let _ = reply.send(Err(RpcError::new("no_sudo_prompt", "屏幕上没有 sudo/su 密码提示。先 send_input 执行带 sudo 或 su 的命令,等屏幕出现「[sudo] password for …」或「Password:」再调用")));
             return;
         };
         if self.sudo_prompt.is_some() {
@@ -1042,10 +1174,12 @@ impl Home {
         // 命令里没有 sudo 就还是弹确认框,让用户看着命令和提示行决定
         let cmd = self.workspace.tabs[ix].takeover.as_ref().map(|t| t.last_cmd.clone()).unwrap_or_default();
         let has_sudo = regex::Regex::new(r"\bsudo\b").is_ok_and(|r| r.is_match(&cmd));
-        if remaining.is_some_and(|r| !r.is_zero()) && has_sudo {
+        // 命令里是 su(没有 sudo)就按 su 处理:要 root 密码,只能让用户输入,不走授权窗口;弄错了的话填写前的远端校验会拒绝
+        let kind = if !has_sudo && regex::Regex::new(r"\bsu\b").is_ok_and(|r| r.is_match(&cmd)) { Fg::Su } else { Fg::Sudo };
+        if kind == Fg::Sudo && remaining.is_some_and(|r| !r.is_zero()) && has_sudo {
             let typed = self.workspace.tabs[ix].takeover.as_ref().and_then(|t| t.sudo.as_ref()).and_then(|g| g.password.clone());
             let left = remaining.map_or(0, |r| r.as_secs());
-            self.sudo_fill_verified(ix, typed, cx, move |_, res, _| match res {
+            self.sudo_fill_verified(ix, Fg::Sudo, typed, cx, move |_, res, _| match res {
                 Ok(()) => {
                     let _ = reply.send(Ok(json!({ "filled": true, "granted": "window", "remaining_s": left })));
                 }
@@ -1057,14 +1191,14 @@ impl Home {
         }
         // 节点没保存密码:确认框里让用户输入
         let saved = self.conn_for(node).auth.password.is_some();
-        let input = (!saved).then(|| cx.new(|cx| InputState::new(window, cx).placeholder("sudo 密码").masked(true)));
+        let input = (!saved || kind == Fg::Su).then(|| cx.new(|cx| InputState::new(window, cx).placeholder(if kind == Fg::Su { "root 密码" } else { "sudo 密码" }).masked(true)));
         if let Some(i) = &input {
             let fh = i.focus_handle(cx);
             window.focus(&fh, cx);
         }
         let reason = clip(params.get("reason").and_then(Value::as_str).unwrap_or("").trim(), 200);
-        alog(format!("{} 申请在 {} 提权(sudo)", client.name, self.node_name(Some(node))));
-        self.sudo_prompt = Some(SudoPrompt { tab_id: sid, client: client.clone(), reason, line, cmd, input, reply });
+        alog(format!("{} 申请在 {} 提权({})", client.name, self.node_name(Some(node)), kind.name()));
+        self.sudo_prompt = Some(SudoPrompt { tab_id: sid, client: client.clone(), reason, line, cmd, kind, input, reply });
         cx.activate(true);
         self.activate(ix);
         cx.notify();
@@ -1072,8 +1206,13 @@ impl Home {
 
     /// 先在远端验证终端前台确实是等密码的 sudo(`sudo_at_prompt`),通过了才把密码写进终端,结果交给 `then`。
     /// 验证用同一条 SSH 连接另开的 exec 通道,不碰终端里的内容。
-    fn sudo_fill_verified(&mut self, ix: usize, typed: Option<Zeroizing<String>>, cx: &mut Context<Self>, then: impl FnOnce(&mut Self, Result<(), String>, &mut Context<Self>) + 'static) {
+    fn sudo_fill_verified(&mut self, ix: usize, expect: Fg, typed: Option<Zeroizing<String>>, cx: &mut Context<Self>, then: impl FnOnce(&mut Self, Result<(), String>, &mut Context<Self>) + 'static) {
         let tab_id = self.workspace.tabs[ix].id;
+        // su 要的是 root 密码,不能拿节点保存的登录密码去填
+        if expect == Fg::Su && typed.is_none() {
+            then(self, Err("su 需要 root 密码".into()), cx);
+            return;
+        }
         let Some(session) = self.workspace.tabs[ix].term.as_ref().and_then(|t| t.handle.session()) else {
             then(self, Err("终端还没有连上".into()), cx);
             return;
@@ -1086,11 +1225,11 @@ impl Home {
         cx.spawn(async move |this, cx| {
             let out = rx.await.unwrap_or_else(|_| Err("验证被中断".into()));
             let _ = this.update(cx, |this, cx| {
-                let checked = out.and_then(|o| sudo_at_prompt(&o));
+                let checked = out.and_then(|o| sudo_at_prompt(&o)).and_then(|fg| if fg == expect { Ok(()) } else { Err(format!("终端前台是 {},不是申请时说的 {}", fg.name(), expect.name())) });
                 let res = match (checked, this.tab_ix_by_id(tab_id)) {
                     (Err(e), _) => {
                         alog(format!("没有代填 sudo 密码:{e}"));
-                        Err(format!("没有填密码:{e}。屏幕上的提示可能不是 sudo 发出的"))
+                        Err(format!("没有填密码:{e}。屏幕上的提示可能不是 sudo/su 发出的"))
                     }
                     (Ok(()), None) => Err("标签已关闭".into()),
                     (Ok(()), Some(ix)) => this.sudo_fill(ix, typed, cx),
@@ -1125,9 +1264,9 @@ impl Home {
             if !t.typed.iter().any(|x| **x == *pw) {
                 t.typed.push(pw.clone());
             }
-            t.last_action = "提权:已代为输入 sudo 密码".into();
+            t.last_action = "提权:已代为输入密码".into();
         }
-        alog(format!("→ {name} 已代为输入 sudo 密码"));
+        alog(format!("→ {name} 已代为输入密码"));
         Ok(())
     }
 
@@ -1154,12 +1293,12 @@ impl Home {
             cx.notify();
             return;
         };
-        let (client_name, reply, tab_id) = (p.client.name.clone(), p.reply, p.tab_id);
+        let (client_name, reply, tab_id, kind) = (p.client.name.clone(), p.reply, p.tab_id, p.kind);
         let typed2 = typed.clone();
-        self.sudo_fill_verified(ix, typed, cx, move |this, res, cx| {
+        self.sudo_fill_verified(ix, kind, typed, cx, move |this, res, cx| {
             match res {
                 Ok(()) => {
-                    if let (Some(d), Some(ix)) = (scope.window(), this.tab_ix_by_id(tab_id)) {
+                    if let (Some(d), Some(ix), Fg::Sudo) = (scope.window(), this.tab_ix_by_id(tab_id), kind) {
                         if let Some(t) = this.workspace.tabs[ix].takeover.as_mut() {
                             t.sudo = Some(SudoGrant { until: Instant::now() + d, password: typed2 });
                         }
@@ -1202,7 +1341,7 @@ impl Home {
         let ix = self.tab_ix_by_id(p.tab_id)?;
         let node_id = self.workspace.tabs[ix].node()?;
         let node = self.all_nodes().find(|n| n.id == node_id)?;
-        let hero = crate::ui::alert_hero(IconName::KeyRound, c::warn(), format!("允许 {} 提权？", p.client.name), "由 Otter 代为输入 sudo 密码,agent 看不到密码");
+        let hero = crate::ui::alert_hero(IconName::KeyRound, c::warn(), format!("允许 {} 提权？", p.client.name), if p.kind == Fg::Su { "由 Otter 代为输入你填的 root 密码,agent 看不到密码" } else { "由 Otter 代为输入 sudo 密码,agent 看不到密码" });
         let target = Self::node_target_card(node);
         let mut rows: Vec<(IconName, Rgba, String)> = vec![];
         if !p.reason.is_empty() {
@@ -1212,7 +1351,10 @@ impl Home {
             rows.push((IconName::Terminal, c::accent(), format!("agent 刚执行的命令:{}", p.cmd)));
         }
         rows.push((IconName::Terminal, c::muted(), format!("屏幕上的提示:{}", p.line)));
-        rows.push((IconName::KeyRound, c::warn(), if p.input.is_some() { "这个节点没有保存密码,请在下面输入".into() } else { "将使用节点里保存的密码".into() }));
+        if opens_root_shell(&p.cmd) {
+            rows.push((IconName::TriangleAlert, c::danger(), "这会打开 root shell:同意后 agent 之后的所有命令都以 root 运行,不会再询问,直到它退出。只想授权一条命令的话,请拒绝并让它改用 su -c '…' 或 sudo <命令>".into()));
+        }
+        rows.push((IconName::KeyRound, c::warn(), if p.kind == Fg::Su { "su 要的是 root 密码,请在下面输入;只用这一次,不会保存".into() } else if p.input.is_some() { "这个节点没有保存密码,请在下面输入".into() } else { "将使用节点里保存的密码".into() }));
         rows.push((IconName::OctagonX, c::online(), "随时可以在遮罩上撤销授权或停止接管".into()));
         let points = crate::ui::alert_rows(rows);
         let needs_pw = p.input.is_some();
@@ -1242,7 +1384,7 @@ impl Home {
             .flex_col()
             .gap(px(10.0))
             .children(pw_field)
-            .child(if crate::prefs::sudo_allow_window() {
+            .child(if crate::prefs::sudo_allow_window() && p.kind == Fg::Sudo {
                 div().w_full().flex().flex_row().gap(px(10.0)).child(m30).child(m10).child(once)
             } else {
                 // 设置里关了「允许一段时间内免确认」:每次都要确认,只留「仅这一次」
@@ -1280,7 +1422,7 @@ fn revoke_label(r: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_sudo_prompt, redact_secrets, sudo_at_prompt, OUTPUT_MAX, Takeover, key_bytes, limit_output, new_lease, trim_trailing_blank};
+    use super::{is_sudo_prompt, opens_root_shell, redact_secrets, root_shell_active, sudo_at_prompt, Fg, OUTPUT_MAX, Takeover, key_bytes, limit_output, new_lease, trim_trailing_blank};
     use zeroize::Zeroizing;
     use crate::ctl::Client;
     use serde_json::json;
@@ -1292,7 +1434,7 @@ mod tests {
 
     fn takeover(client_id: u64, lease: Option<&str>) -> Takeover {
         let now = Instant::now();
-        Takeover { client_id, client_name: "c".into(), started: now, last_call: now, last_action: String::new(), waiting: false, lease: lease.map(String::from), sudo: None, typed: Vec::new(), last_cmd: String::new() }
+        Takeover { client_id, client_name: "c".into(), started: now, last_call: now, last_action: String::new(), waiting: false, lease: lease.map(String::from), sudo: None, typed: Vec::new(), last_cmd: String::new(), root_shell: false, rs_checked: now, rs_busy: false }
     }
 
     fn snap(lines: &[&str], screen_start: usize, cursor_line: usize, history_total: usize) -> gpui_xterm::TextSnapshot {
@@ -1362,9 +1504,37 @@ mod tests {
         assert!(sudo_at_prompt(&format!("{head}  700 600 700 700 pts/0 root sudo\n  701 700 700 700 pts/1 root sh\n")).is_err());
         // 别的连接(ppid 不同)上的终端不算
         assert!(sudo_at_prompt("ME=999\n  600 500 600 700 pts/0 chen bash\n  700 600 700 700 pts/0 root sudo\n").is_err());
+        // su 停在密码提示上也认,并告诉调用方是 su
+        assert_eq!(sudo_at_prompt(&format!("{head}  700 600 700 700 pts/0 root su\n")), Ok(Fg::Su));
+        assert_eq!(sudo_at_prompt(&format!("{head}  700 600 700 700 pts/0 root sudo\n")), Ok(Fg::Sudo));
+        assert!(sudo_at_prompt(&format!("{head}  700 600 700 700 pts/0 chen su\n")).is_err());
         // 看不懂输出:拒绝
         assert!(sudo_at_prompt("").is_err());
         assert!(sudo_at_prompt("ME=500\n").is_err());
+    }
+
+    #[test]
+    fn detects_commands_that_open_a_root_shell() {
+        for c in ["su", "su -", "su root", "su - root", "sudo -i", "sudo -s", "sudo su", "sudo su -", "sudo bash", "sudo -u root -i", "sudo -iu postgres", "cd /x && su", "sudo --login", "sudo -u app bash"] {
+            assert!(opens_root_shell(c), "{c}");
+        }
+        for c in ["su -c 'apt-get update'", "su root -c ls", "su -lc 'id'", "sudo apt-get update", "sudo -u postgres psql", "sudo systemctl restart nginx", "echo hi", "sudo -n true", "su --command=id", "ls /usr/bin/sudoku"] {
+            assert!(!opens_root_shell(c), "{c}");
+        }
+    }
+
+    #[test]
+    fn root_shell_shown_only_after_login_user_became_root() {
+        let head = "ME=500\n  500 1 500 500 ? chen sshd\n  600 500 600 700 pts/0 chen bash\n";
+        // 前台进程组里是 root 的 bash:登录用户是 chen,说明 su/sudo -i 之后
+        assert!(root_shell_active(&format!("{head}  700 600 700 700 pts/0 root bash\n")));
+        // 前台是普通命令或还在等密码的 su:不算
+        assert!(!root_shell_active(&format!("{head}  700 600 700 700 pts/0 root su\n")));
+        assert!(!root_shell_active(&format!("{head}  700 600 700 700 pts/0 chen vim\n")));
+        assert!(!root_shell_active(head));
+        // 本来就是 root 登录:不提示
+        assert!(!root_shell_active("ME=500\n  500 1 500 500 ? root sshd\n  600 500 600 600 pts/0 root bash\n"));
+        assert!(!root_shell_active(""));
     }
 
     #[test]

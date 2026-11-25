@@ -1,13 +1,13 @@
 //! SSH 会话:russh 跑在后台 tokio 运行时里,和界面之间用 channel 传字节。
 //!
 //! 对外是一对阻塞的 `Read`/`Write`(喂给 `gpui_xterm::TerminalView::new`)、
-//! 一个调整行列的句柄和一个状态。密码、口令在终端里以提示行的形式输入;主机密钥确认由「连接中」页的卡片完成(`Handle::host_prompt/answer_host`)。
+//! 一个调整行列的句柄和一个状态。密码、口令和主机密钥确认都在「连接中」页的卡片里完成(`Handle::secret_prompt/answer_secret`、`host_prompt/answer_host`)。
 
 use crate::logs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use zeroize::Zeroizing;
@@ -169,6 +169,23 @@ pub fn restore_prefs(st: &crate::store::Store) {
 /// 自动重连的最多次数和每次之前等待的秒数
 const RECONNECT_DELAYS: [u64; 5] = [1, 2, 4, 8, 15];
 
+/// 连接过程中需要用户输入的密码/口令,界面的「连接中」页据此显示输入卡片(不在终端里问)。
+#[derive(Clone, Debug, PartialEq)]
+pub struct SecretPrompt {
+    /// 每次提示唯一,界面据此重建输入框
+    pub id: u64,
+    pub title: String,
+    pub hint: String,
+    /// 上一次输入不对时的提示
+    pub error: Option<String>,
+    /// 是否提供「保存到节点」选项(只有保存的密码被拒、重新输入时才有)
+    pub offer_save: bool,
+}
+
+/// 用户的回答:(输入, 是否保存到节点);取消为 None。
+pub(crate) type SecretAnswer = Option<(Zeroizing<String>, bool)>;
+pub(crate) type PendingSecret = Arc<Mutex<Option<(SecretPrompt, Option<tokio::sync::oneshot::Sender<SecretAnswer>>)>>>;
+
 /// 待确认的主机密钥 + 回复通道。
 pub(crate) type PendingHost = Arc<Mutex<Option<(HostKeyPrompt, Option<tokio::sync::oneshot::Sender<bool>>)>>>;
 
@@ -239,6 +256,7 @@ pub struct Handle {
     pub status: Arc<Mutex<Status>>,
     pub steps: Arc<Mutex<Vec<Step>>>,
     host_prompt: PendingHost,
+    secret: PendingSecret,
     ever: Arc<AtomicBool>,
     epoch: Arc<AtomicU32>,
     link: Link,
@@ -286,6 +304,18 @@ impl Handle {
             }
         }
     }
+    /// 正在等用户输入的密码/口令
+    pub fn secret_prompt(&self) -> Option<SecretPrompt> {
+        self.secret.lock().ok().and_then(|g| g.as_ref().map(|(p, _)| p.clone()))
+    }
+    /// 回答密码/口令输入:None 取消连接
+    pub(crate) fn answer_secret(&self, a: SecretAnswer) {
+        if let Ok(mut g) = self.secret.lock() {
+            if let Some(tx) = g.as_mut().and_then(|(_, tx)| tx.take()) {
+                let _ = tx.send(a);
+            }
+        }
+    }
     pub fn steps(&self) -> Vec<Step> {
         self.steps.lock().map(|s| s.clone()).unwrap_or_default()
     }
@@ -311,6 +341,8 @@ pub fn connect(conn: Conn, cols: usize, rows: usize, activity: Arc<super::Activi
     let st = status.clone();
     let steps_io = steps.clone();
     let hp_io = host_prompt.clone();
+    let secret: PendingSecret = Arc::default();
+    let secret_io = secret.clone();
     let ever = Arc::new(AtomicBool::new(false));
     let epoch = Arc::new(AtomicU32::new(0));
     let link: Link = Arc::new(Mutex::new(None));
@@ -318,7 +350,7 @@ pub fn connect(conn: Conn, cols: usize, rows: usize, activity: Arc<super::Activi
     let new_password: PwSlot = Arc::new(Mutex::new(None));
     let new_pw_io = new_password.clone();
     let join = runtime().spawn(async move {
-        let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone(), steps: steps_io, host_prompt: hp_io, ever: ever_io, epoch: epoch_io, link: link_io, activity, pw_override: Arc::new(Mutex::new(None)), save_pw: new_pw_io };
+        let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone(), steps: steps_io, host_prompt: hp_io, secret: secret_io, interactive: true, probe: false, ever: ever_io, epoch: epoch_io, link: link_io, activity, pw_override: Arc::new(Mutex::new(None)), save_pw: new_pw_io };
         let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
         logs::push(logs::Level::Debug, &label, "开始连接");
         let size = Arc::new(Mutex::new((cols as u16, rows as u16)));
@@ -370,7 +402,7 @@ pub fn connect(conn: Conn, cols: usize, rows: usize, activity: Arc<super::Activi
         set(&st, Status::Closed(reason));
         // io 在这里释放,Output 读到 0
     });
-    (Input(in_tx.clone()), Output { rx: out_rx, left: Vec::new() }, Handle { input: in_tx, resize: rs_tx, status, steps, host_prompt, ever, epoch, link, new_password, abort: join.abort_handle() })
+    (Input(in_tx.clone()), Output { rx: out_rx, left: Vec::new() }, Handle { input: in_tx, resize: rs_tx, status, steps, host_prompt, secret, ever, epoch, link, new_password, abort: join.abort_handle() })
 }
 
 /// 重连也没有用的错误:主机指纹问题、认证被拒。
@@ -391,6 +423,11 @@ pub(crate) struct Io {
     status: Arc<Mutex<Status>>,
     steps: Arc<Mutex<Vec<Step>>>,
     host_prompt: PendingHost,
+    secret: PendingSecret,
+    /// 有界面可以回答密码输入(终端会话);SFTP/docker 的后台连接没有
+    interactive: bool,
+    /// 只测试能不能连上(编辑节点的「测试连接」):遇到没见过的主机密钥直接放行、不记录
+    probe: bool,
     ever: Arc<AtomicBool>,
     epoch: Arc<AtomicU32>,
     link: Link,
@@ -407,7 +444,17 @@ impl Io {
     pub(crate) fn headless(host_prompt: PendingHost, steps: Arc<Mutex<Vec<Step>>>) -> Io {
         let (out, _) = std_mpsc::channel();
         let (_, inp) = tokio_mpsc::unbounded_channel();
-        Io { out, inp: Arc::new(tokio::sync::Mutex::new(inp)), status: Arc::new(Mutex::new(Status::Connecting)), steps, host_prompt, ever: Arc::new(AtomicBool::new(false)), epoch: Arc::new(AtomicU32::new(0)), link: Arc::new(Mutex::new(None)), activity: Arc::default(), pw_override: Arc::new(Mutex::new(None)), save_pw: Arc::new(Mutex::new(None)) }
+        Io { out, inp: Arc::new(tokio::sync::Mutex::new(inp)), status: Arc::new(Mutex::new(Status::Connecting)), steps, host_prompt, secret: Arc::default(), interactive: false, probe: false, ever: Arc::new(AtomicBool::new(false)), epoch: Arc::new(AtomicU32::new(0)), link: Arc::new(Mutex::new(None)), activity: Arc::default(), pw_override: Arc::new(Mutex::new(None)), save_pw: Arc::new(Mutex::new(None)) }
+    }
+
+    /// 测试连接用的无界面会话:不问指纹、不记录新主机
+    pub(crate) fn probe(steps: Arc<Mutex<Vec<Step>>>) -> Io {
+        Io { probe: true, ..Io::headless(Arc::new(Mutex::new(None)), steps) }
+    }
+
+    /// 步骤里最近一条失败原因(比连接库返回的笼统错误更具体)
+    pub(crate) fn failure(&self) -> Option<String> {
+        self.steps.lock().ok().and_then(|g| g.iter().rev().find_map(|s| if let StepState::Failed(m) = &s.state { Some(m.clone()) } else { None }))
     }
 
     /// 挂出主机指纹确认,等界面回答(取消、会话被丢弃都算拒绝)
@@ -459,6 +506,24 @@ impl Io {
 
     fn say(&self, text: &str) {
         let _ = self.out.send(text.as_bytes().to_vec());
+    }
+
+    /// 挂出密码/口令输入,等「连接中」页回答(取消、会话被丢弃返回 None)。没有界面的连接(SFTP、docker)直接返回 None。
+    async fn ask_secret(&self, title: String, hint: String, error: Option<String>, offer_save: bool) -> SecretAnswer {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        if !self.interactive {
+            return None;
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let prompt = SecretPrompt { id: NEXT.fetch_add(1, Ordering::Relaxed), title, hint, error, offer_save };
+        if let Ok(mut g) = self.secret.lock() {
+            *g = Some((prompt, Some(tx)));
+        }
+        let ans = rx.await.unwrap_or(None);
+        if let Ok(mut g) = self.secret.lock() {
+            *g = None;
+        }
+        ans
     }
 
     /// 在终端里问一行。`echo=false` 不回显(密码)。Ctrl-C 或输入通道关闭返回 None。
@@ -533,6 +598,7 @@ async fn verify_host(io: &Io, host: &str, port: u16, key: &PublicKey) -> Result<
     let fp = key.fingerprint(HashAlg::Sha256);
     match keys::known_hosts::check_known_hosts_path(host, port, key, &path) {
         Ok(true) => Ok(true),
+        Ok(false) if io.probe => Ok(true),
         Ok(false) => {
             logs::push(logs::Level::Info, &format!("{host}:{port}"), format!("首次连接,等待确认指纹 {fp}"));
             let prompt = HostKeyPrompt { host: host.to_string(), port, algo: key.algorithm().to_string(), fingerprint: fp.to_string() };
@@ -680,29 +746,27 @@ async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, resize: &mut tokio_mpsc:
     end
 }
 
-/// 保存的密码被服务器拒绝后,在终端里最多问 3 次新密码。登录成功返回 true,并问是否保存到节点(`save_pw` 交给界面写回)。
-/// 没有交互通道(sftp、docker 等后台连接)时 `ask` 直接返回 None,这里就什么都不做。
+/// 保存的密码被服务器拒绝后,在「连接中」页最多问 3 次新密码。登录成功返回 true,用户勾选保存时 `save_pw` 交给界面写回节点。
+/// 没有界面的连接(sftp、docker 等后台连接)`ask_secret` 直接返回 None,这里就什么都不做。
 async fn retype_password(conn: &Conn, io: &Io, session: &mut client::Handle<Client>) -> Result<bool, String> {
     let target = format!("{}@{}", conn.user, conn.host);
-    io.say("\r\n\x1b[33m保存的密码被服务器拒绝了,可能已经修改。\x1b[0m\r\n");
+    let mut error = Some("保存的密码被服务器拒绝了,可能已经修改".to_string());
     for _ in 0..3 {
-        let Some(p) = io.ask(&format!("{target} 的新密码(直接回车取消):"), false).await else { break };
+        let Some((p, save)) = io.ask_secret(format!("{target} 的新密码"), "输入服务器上现在的密码".into(), error.take(), true).await else { break };
         if p.is_empty() {
             break;
         }
-        let r = session.authenticate_password(conn.user.clone(), p.clone()).await.map_err(|e| e.to_string())?;
+        let r = session.authenticate_password(conn.user.clone(), p.as_str().to_string()).await.map_err(|e| e.to_string())?;
         if !r.success() {
-            io.say("\x1b[31m密码不对,请重试\x1b[0m\r\n");
+            error = Some("密码不对,请重试".into());
             continue;
         }
-        let pw = Zeroizing::new(p);
         if let Ok(mut g) = io.pw_override.lock() {
-            *g = Some(pw.clone());
+            *g = Some(p.clone());
         }
-        let yes = io.ask("把新密码保存到这个节点? [y/N] ", true).await.is_some_and(|a| matches!(a.trim().to_lowercase().as_str(), "y" | "yes" | "是"));
-        if yes {
+        if save {
             if let Ok(mut g) = io.save_pw.lock() {
-                *g = Some(pw);
+                *g = Some(p);
             }
         }
         return Ok(true);
@@ -744,7 +808,7 @@ async fn authenticate(conn: &Conn, io: &Io, session: &mut client::Handle<Client>
     let password = match overridden.or_else(|| auth.password.clone()) {
         Some(p) => Some(p),
         // 什么都没配置:在终端里问密码
-        None if auth.key.is_none() && !auth.agent => Some(Zeroizing::new(io.ask(&format!("{}@{} 的密码:", conn.user, conn.host), false).await.ok_or("已取消")?)),
+        None if auth.key.is_none() && !auth.agent => Some(io.ask_secret(format!("{}@{} 的密码", conn.user, conn.host), "这个节点没有保存登录方式,请输入密码".into(), None, false).await.ok_or("已取消")?.0),
         None => None,
     };
     if let Some(pw) = password {
@@ -766,7 +830,7 @@ async fn try_key(conn: &Conn, io: &Io, session: &mut client::Handle<Client>, k: 
     let key = match keys::decode_secret_key(&k.pem, pass.as_deref()) {
         Ok(key) => key,
         Err(keys::Error::KeyIsEncrypted) => {
-            let p = Zeroizing::new(io.ask(&format!("私钥 {} 的口令:", k.label), false).await.ok_or("已取消")?);
+            let p = io.ask_secret(format!("私钥 {} 的口令", k.label), "这把私钥有口令保护".into(), None, false).await.ok_or("已取消")?.0;
             keys::decode_secret_key(&k.pem, Some(p.as_str())).map_err(|e| format!("私钥口令不对或私钥无法读取:{e}"))?
         }
         Err(e) => return Err(format!("读取私钥 {} 失败:{e}", k.label)),

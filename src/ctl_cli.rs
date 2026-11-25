@@ -171,7 +171,7 @@ fn tools() -> Value {
         tool("takeover_begin", "接管一个已连上的终端会话。每次都会弹窗请用户确认;用户随时能中止。之后才能输入、读屏幕", json!({ "session": sid, "reason": { "type": "string", "description": "必填:告诉用户你要做什么" } }), &["session", "reason"]),
         tool("takeover_end", "交还接管。不会向终端发送任何按键", json!({ "session": sid }), &["session"]),
         tool("send_input", "向被接管的终端输入文本。单次最多 8KB。execute 为 true 时在末尾自动按回车执行,不要在 text 里自己带换行,并返回 mark(命令开始的位置,交给 wait_for 的 since)", json!({ "session": sid, "text": { "type": "string" }, "execute": { "type": "boolean", "description": "输入后自动回车执行,默认 false" } }), &["session", "text"]),
-        tool("request_sudo", "屏幕上出现 sudo 的密码提示(「[sudo] password for …」「[sudo: authenticate] Password:」之类)后调用。命令行里 `otter run --sudo '<命令>'` 会自动完成这一步:请用户同意由 Otter 代为输入 sudo 密码,你拿不到密码。用户可选「仅这一次 / 10 分钟 / 30 分钟」;授权期内再遇到 sudo 提示,调用即直接代填不再弹窗。屏幕上不是 sudo 提示会被拒绝(no_sudo_prompt);用户拒绝返回 sudo_denied。成功后用 wait_for 等命令继续", json!({ "session": sid, "reason": { "type": "string", "description": "必填:告诉用户为什么需要提权、要执行什么" } }), &["session", "reason"]),
+        tool("request_sudo", "屏幕上出现 sudo 或 su 的密码提示(「[sudo] password for …」「[sudo: authenticate] Password:」之类)后调用。命令行里 `otter run --sudo '<命令>'` 会自动完成这一步:请用户同意由 Otter 代为输入 sudo 密码,你拿不到密码。用户可选「仅这一次 / 10 分钟 / 30 分钟」;授权期内再遇到 sudo 提示,调用即直接代填不再弹窗。屏幕上不是 sudo/su 提示会被拒绝(no_sudo_prompt);su 要 root 密码,由用户在确认框里自己输入(只用一次);用户拒绝返回 sudo_denied。成功后用 wait_for 等命令继续", json!({ "session": sid, "reason": { "type": "string", "description": "必填:告诉用户为什么需要提权、要执行什么" } }), &["session", "reason"]),
         tool("send_key", "向被接管的终端发送一个按键:enter、tab、esc、up、down、left、right、home、end、pageup、pagedown、backspace、delete、space、ctrl+<字母>", json!({ "session": sid, "key": { "type": "string" } }), &["session", "key"]),
         tool("read_screen", "读取被接管终端当前屏幕的文本和光标位置", json!({ "session": sid }), &["session"]),
         tool("read_scrollback", "读取被接管终端最近的 N 行(含已滚出屏幕的),最多 500", json!({ "session": sid, "lines": { "type": "integer" } }), &["session"]),
@@ -268,6 +268,8 @@ mod tests {
         assert_eq!(super::with_sudo("sudo ls /root"), "sudo ls /root");
         assert_eq!(super::with_sudo("cd /x && sudo ls"), "cd /x && sudo ls");
         assert_eq!(super::with_sudo("echo pseudo-sudoku"), "sudo echo pseudo-sudoku");
+        // su 自己就是提权,不再补 sudo
+        assert_eq!(super::with_sudo("su -c 'apt-get update'"), "su -c 'apt-get update'");
     }
 
     use super::{CallError, tool_result, tools};
@@ -352,7 +354,7 @@ fn lease_clear(sid: u64) {
 
 /// `--sudo` 时命令里没有 sudo 就在最前面补一个;已经带了就原样用(用户/agent 自己写的位置优先)。
 fn with_sudo(cmd: &str) -> String {
-    let has = cmd.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-')).any(|w| w == "sudo");
+    let has = cmd.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-')).any(|w| w == "sudo" || w == "su");
     if has { cmd.to_string() } else { format!("sudo {}", cmd.trim_start()) }
 }
 

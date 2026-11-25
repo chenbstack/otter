@@ -18,6 +18,8 @@ mod sysops;
 mod ctfiles;
 mod docker;
 mod docker_install;
+mod dbinst;
+mod dbinstall;
 mod json_hl;
 mod group_form;
 mod import;
@@ -59,6 +61,7 @@ use mock::{Group, Node, NodeId, Running, SPARK_N, Service, Stack};
 enum Page {
     Overview,
     Containers,
+    Database,
     Stacks,
     Images,
     Volumes,
@@ -71,9 +74,10 @@ enum Page {
 }
 
 impl Page {
-    const ALL: [Page; 11] = [
+    const ALL: [Page; 12] = [
         Page::Overview,
         Page::Containers,
+        Page::Database,
         Page::Stacks,
         Page::Images,
         Page::Volumes,
@@ -90,7 +94,7 @@ impl Page {
     }
     /// 整页(页头 + 内容)一起滚动的列表页;配置页有定高的编辑器、堆栈页是虚拟列表,不在其中
     fn scrolls_whole(self) -> bool {
-        matches!(self, Page::Containers | Page::Images | Page::Volumes | Page::Registry | Page::Processes | Page::Services | Page::Storage | Page::Cron)
+        matches!(self, Page::Containers | Page::Images | Page::Volumes | Page::Registry | Page::Database | Page::Processes | Page::Services | Page::Storage | Page::Cron)
     }
     /// 服务器运维页:读 SSH 命令的输出,不依赖 Docker
     fn is_sys(self) -> bool {
@@ -100,6 +104,7 @@ impl Page {
         match self {
             Page::Overview => "概览",
             Page::Containers => "容器",
+            Page::Database => "数据库",
             Page::Stacks => "堆栈",
             Page::Images => "镜像",
             Page::Volumes => "存储卷",
@@ -115,6 +120,7 @@ impl Page {
         match self {
             Page::Overview => IconName::Activity,
             Page::Containers => IconName::Box,
+            Page::Database => IconName::Database,
             Page::Stacks => IconName::Layers,
             Page::Images => IconName::Image,
             Page::Volumes => IconName::HardDrive,
@@ -178,6 +184,11 @@ struct Home {
     scroll: VirtualListScrollHandle,
     /// 整页滚动的页面(容器、镜像等)的滚动句柄,页头滚走后页签吸顶
     page_scroll: ScrollHandle,
+    /// 数据库页当前的类型页签:0 PostgreSQL、1 MySQL/MariaDB、2 Redis
+    db_tab: usize,
+    /// 「连接中」页的密码/口令输入框(提示 id, 输入框)和「保存到节点」勾选
+    conn_secret: Option<(u64, Entity<gpui_kit::component::input::InputState>)>,
+    conn_save: bool,
     /// `page_scroll` 上次属于哪个标签的哪一页;换了就把滚动位置归零(不然别的页滚到哪,这页一进来就是哪)
     page_scroll_key: Option<(u64, Page)>,
     /// 离屏截图:(输出路径, 已渲染帧数)。仅用于 `--shot`。
@@ -294,6 +305,9 @@ impl Home {
             svc_w: SVC_MIN_W,
             scroll: VirtualListScrollHandle::new(),
             page_scroll: ScrollHandle::new(),
+            db_tab: 0,
+            conn_secret: None,
+            conn_save: false,
             page_scroll_key: None,
             shot: None,
             form: None,
@@ -379,6 +393,7 @@ impl Render for Home {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.track_window(window, cx);
         self.track_tabs();
+        self.sync_conn_secret(window, cx);
         if let Some((path, frames)) = &mut self.shot {
             *frames += 1;
             let target: u32 = std::env::var("OTTER_SHOT_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
@@ -425,6 +440,7 @@ impl Render for Home {
         let dialog = self.leave_dialog(cx).or_else(|| self.sudo_prompt_dialog(window, cx)).or_else(|| self.takeover_prompt_dialog(cx)).or_else(|| self.node_dialog(window, cx)).or_else(|| self.key_modal_view(window, cx)).or_else(|| self.import_dialog(cx)).or_else(|| self.group_delete_dialog(cx)).or_else(|| self.node_delete_dialog(cx)).or_else(|| self.logs_clear_dialog(cx)).or_else(|| self.group_form_dialog(window, cx));
         // 容器页的抽屉、确认框、提示盖在整个窗口上(含标题栏)
         let dock_layer = if self.dock_visible() { self.dock_overlays(window, cx) } else { Vec::new() };
+        let term_body = on_node_tab && self.active_term().is_some();
         div()
             .size_full()
             .relative()
@@ -432,6 +448,7 @@ impl Render for Home {
             .flex_col()
             .bg(c::bg())
             .text_color(c::text())
+            .child(crate::ui::blur_on_click(term_body))
             .child(backdrop())
             .child(titlebar)
             .child(body)

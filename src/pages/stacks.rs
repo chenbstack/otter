@@ -6,6 +6,7 @@ pub(crate) fn menu_count(node: &Node, snap: &crate::docker::Snapshot, page: Page
     match page {
         Page::Overview | Page::Registry | Page::Config | Page::Processes | Page::Services | Page::Storage | Page::Cron => None,
         Page::Containers => Some(snap.containers.len()),
+        Page::Database => Some(crate::dbinst::detect(&snap.containers).len()),
         Page::Stacks => Some(node.stacks.len()),
         Page::Images => Some(snap.images.len()),
         Page::Volumes => Some(snap.volumes.len()),
@@ -92,7 +93,7 @@ impl Home {
                     .child("节点详情"),
             );
         // 侧边栏:概览,把容器/堆栈/镜像/存储卷合在一起的「容器」(里面用页签切换),以及服务器的运维页
-        for (i, p) in [Page::Overview, Page::Containers, Page::Processes, Page::Services, Page::Storage, Page::Cron].into_iter().enumerate() {
+        for (i, p) in [Page::Overview, Page::Containers, Page::Database, Page::Processes, Page::Services, Page::Storage, Page::Cron].into_iter().enumerate() {
             let active = if p == Page::Containers { self.page.is_docker() } else { self.page == p };
             let count = menu_count(node, &self.dock.snap, p);
             col = col.child(
@@ -190,7 +191,7 @@ impl Home {
         let head_in_list = self.page == Page::Stacks && !gated && !self.node().stacks.is_empty();
         let scroll_header = !gated && (self.page == Page::Overview || self.page.scrolls_whole() || self.conf_scrolls_whole());
 
-        let tabs = (self.page.is_docker() && !gated).then(|| self.docker_tabs_slot(cx).into_any_element());
+        let tabs = ((self.page.is_docker() || self.page == Page::Database) && !gated).then(|| self.docker_tabs_slot(cx).into_any_element());
         let sticky = (!gated && self.dock_stuck()).then(|| self.dock_sticky_bar(window, cx));
         let inner: Vec<AnyElement> = if head_in_list {
             vec![body]
@@ -244,11 +245,12 @@ impl Home {
                     .flex_col()
                     .gap(px(2.0))
                     .child(div().text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).child(self.page.label()))
+                    // 副标题行定高:数据库页这里是带标签的实例信息,比纯文字高,不定高的话切页签时页头会跳
                     .child(
-                        div()
-                            .text_size(px(t::TYPE_CONTROL))
-                            .text_color(c::muted())
-                            .child(self.dock_subtitle()),
+                        div().h(px(24.0)).flex().items_center().child(match (self.page == Page::Database && !gated).then(|| self.dbm_header_info()).flatten() {
+                            Some(info) => info.into_any_element(),
+                            None => div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(self.dock_subtitle()).into_any_element(),
+                        }),
                     ),
             )
             .child(div().flex_1())
@@ -279,7 +281,7 @@ impl Home {
 
     /// 页头(图标、标题、副标题)已经滚出去、页签/按钮该吸在顶部了吗。整页滚动的容器、镜像、存储卷、仓库、进程、服务、存储、定时任务页和堆栈页有
     pub(crate) fn dock_stuck(&self) -> bool {
-        if !(self.page.is_docker() || self.page.is_sys()) || (self.page == Page::Config && !self.conf_scrolls_whole()) {
+        if !(self.page.is_docker() || self.page == Page::Database || self.page.is_sys()) || (self.page == Page::Config && !self.conf_scrolls_whole()) {
             return false;
         }
         let h = if self.page == Page::Stacks { self.scroll.base_handle() } else { &self.page_scroll };
@@ -309,7 +311,7 @@ impl Home {
                     .gap(px(8.0))
                     .px(px(CONTENT_PAD))
                     .pt(px(10.0))
-                    .child(if self.page.is_docker() {
+                    .child(if self.page.is_docker() || self.page == Page::Database {
                         self.docker_tabs(cx)
                     } else {
                         // 没有页签的页面(进程、服务等):吸顶条左边放页面图标和名字
@@ -322,6 +324,9 @@ impl Home {
 
     /// 容器相关四个页面的页签:容器 / 堆栈 / 镜像 / 存储卷
     fn docker_tabs(&self, cx: &mut Context<Self>) -> Div {
+        if self.page == Page::Database {
+            return self.db_tabs(cx);
+        }
         let node = self.node();
         let mut row = div().flex().flex_row().items_center().gap(px(4.0)).pb(px(10.0)).flex_shrink_0();
         for (i, p) in [Page::Containers, Page::Stacks, Page::Images, Page::Volumes, Page::Registry, Page::Config].into_iter().enumerate() {

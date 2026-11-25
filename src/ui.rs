@@ -405,7 +405,7 @@ pub fn drawer(
             div()
                 .id((id, 1usize))
                 .occlude()
-                .relative()
+                        .relative()
                 .overflow_hidden()
                 .h_full()
                 .w(px(width))
@@ -498,7 +498,7 @@ pub fn dropdown_menu(
     on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
     on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Deferred {
-    dropdown_menu_impl(id, items, selected, side, offset, false, on_pick, on_dismiss)
+    dropdown_menu_impl(id, items, selected, side, offset, false, MENU_MAX_H, on_pick, on_dismiss)
 }
 
 /// 紧凑版下拉菜单:行更矮、字号和图标更小,用于工具栏里的「更多」这类操作菜单。
@@ -511,8 +511,11 @@ pub fn dropdown_menu_compact(
     on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
     on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Deferred {
-    dropdown_menu_impl(id, items, selected, side, offset, true, on_pick, on_dismiss)
+    dropdown_menu_impl(id, items, selected, side, offset, true, MENU_MAX_H, on_pick, on_dismiss)
 }
+
+/// 下拉菜单的最大高度:选项再多也不超过它,超出的在菜单里滚动
+pub const MENU_MAX_H: f32 = 360.0;
 
 fn dropdown_menu_impl(
     id: &'static str,
@@ -521,6 +524,7 @@ fn dropdown_menu_impl(
     side: MenuSide,
     offset: f32,
     compact: bool,
+    max_h: f32,
     on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
     on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Deferred {
@@ -533,8 +537,11 @@ fn dropdown_menu_impl(
         .when(matches!(side, MenuSide::Below), |d| d.top(px(offset)))
         .when(matches!(side, MenuSide::Above), |d| d.bottom(px(offset)))
         .p(px(if compact { 3.0 } else { 4.0 }))
+        .max_h(px(max_h))
+        .overflow_y_scroll()
         .flex()
         .flex_col()
+        .gap(px(2.0))
         .rounded(px(if compact { t::RADIUS_MD } else { t::RADIUS_LG }))
         .bg(c::dialog())
         .border_1()
@@ -555,6 +562,8 @@ fn dropdown_menu_impl(
                 .rounded(px(if compact { t::RADIUS_SM } else { t::RADIUS_MD }))
                 .cursor_pointer()
                 .hover(|s| s.bg(c::field_hover()))
+                // 当前项:底色 + 强调色文字,一眼能找到
+                .when(selected == Some(i), |d| d.bg(c::field_hover()))
                 .when_some(it.color, |d, col| d.child(div().size(px(8.0)).flex_shrink_0().rounded(px(2.0)).bg(rgb(col))))
                 .when_some(it.icon, |d, ic| d.child(icon(ic, if compact { 14.0 } else { 18.0 }, c::muted())))
                 .child(
@@ -564,10 +573,10 @@ fn dropdown_menu_impl(
                         .flex()
                         .flex_col()
                         .gap(px(1.0))
-                        .child(div().text_size(px(if compact { t::TYPE_CONTROL } else { t::TYPE_BODY })).text_color(c::text()).child(it.label))
+                        .child(div().text_size(px(if compact { t::TYPE_CONTROL } else { t::TYPE_BODY })).text_color(if selected == Some(i) { c::accent() } else { c::text() }).when(selected == Some(i), |d| d.font_weight(FontWeight::MEDIUM)).child(it.label))
                         .when_some(it.sub, |d, sub| d.child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(sub))),
                 )
-                .when(selected == Some(i), |d| d.child(icon(IconName::Check, 14.0, c::accent())))
+                .when(selected == Some(i), |d| d.child(icon(IconName::Check, 13.0, c::accent())))
                 .on_click(move |_, window, cx| pick(i, window, cx))
         }));
     deferred(menu).with_priority(1)
@@ -652,7 +661,12 @@ pub fn select_sized(
             .size_full(),
         )
         .child(field_h(h, ic, open, false, div().flex_1().min_w_0().flex().flex_row().items_center().gap(px(6.0)).child(trigger).children(trailing)))
-        .when(open, |d| d.child(dropdown_menu(id, items, Some(selected), side, h + 4.0, on_pick, on_dismiss)))
+        // 菜单高度不超过所在方向剩余的空间(留 16 边距),再多的选项在菜单里滚动
+        .when(open, |d| {
+            let room = if matches!(side, MenuSide::Below) { below } else { above };
+            let max_h = (room - (h + 4.0) - 16.0).clamp(120.0, MENU_MAX_H);
+            d.child(dropdown_menu_impl(id, items, Some(selected), side, h + 4.0, true, max_h, on_pick, on_dismiss))
+        })
 }
 
 thread_local! {
@@ -767,6 +781,11 @@ pub fn icon(name: IconName, size: f32, color: Rgba) -> Icon {
     Icon::new(name).size(px(size)).text_color(color)
 }
 
+/// 接管遮罩中间图标和文字区域的柔和暗影(token `shadow.overlay_content`):遮罩是半透明的,底下终端内容会透出来干扰阅读。
+pub fn shadow_overlay_content() -> Vec<::gpui::BoxShadow> {
+    vec![::gpui::BoxShadow { color: ::gpui::Hsla::from(rgba(0x0000008C)), offset: point(px(0.0), px(2.0)), blur_radius: px(64.0), spread_radius: px(14.0), inset: false }]
+}
+
 /// 状态药丸:带圆点的软底色标签。
 pub fn pill(label: impl Into<SharedString>, fg: Rgba, bg: Rgba) -> Div {
     div()
@@ -835,6 +854,62 @@ impl IntoElement for Tag {
     }
 }
 
+/// 空状态组件:图标块 + 标题 + 说明 + 可选操作。**新页面的空/失败/不可用状态用它,不要手写。**
+/// 自动高度:撑满父容器剩下的空间,内容水平居中、垂直偏上(顶部留 96px,不在正中);父容器要是 flex 列。
+/// 图标颜色表达语气:默认灰(没有数据),`.warn()` 黄(不可用),`.danger()` 红(失败)。
+/// 例:`empty(IconName::Database, "还没有业务数据库").desc("点右上角新建").action(button(..))`
+pub struct Empty {
+    icon: IconName,
+    title: SharedString,
+    desc: Option<SharedString>,
+    tone: Rgba,
+    action: Option<AnyElement>,
+}
+
+pub fn empty(ic: IconName, title: impl Into<SharedString>) -> Empty {
+    Empty { icon: ic, title: title.into(), desc: None, tone: c::ghost(), action: None }
+}
+
+impl Empty {
+    pub fn desc(mut self, d: impl Into<SharedString>) -> Self {
+        self.desc = Some(d.into());
+        self
+    }
+    pub fn warn(mut self) -> Self {
+        self.tone = c::warn();
+        self
+    }
+    pub fn danger(mut self) -> Self {
+        self.tone = c::danger();
+        self
+    }
+    pub fn action(mut self, a: impl IntoElement) -> Self {
+        self.action = Some(a.into_any_element());
+        self
+    }
+}
+
+impl IntoElement for Empty {
+    type Element = Div;
+
+    fn into_element(self) -> Div {
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_start()
+            .gap(px(10.0))
+            .flex_1()
+            .pt(px(96.0))
+            .pb(px(40.0))
+            .child(div().size(px(52.0)).flex().items_center().justify_center().rounded(px(t::RADIUS_2XL)).border_1().border_color(c::border()).bg(c::raised()).child(icon(self.icon, 22.0, self.tone)))
+            .child(div().mt(px(4.0)).text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::SEMIBOLD).text_color(c::secondary()).child(self.title))
+            .children(self.desc.map(|d| div().max_w(px(520.0)).text_center().text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child(d)))
+            .children(self.action.map(|a| div().mt(px(6.0)).child(a)))
+    }
+}
+
 /// 迷你柱状图:越旧越淡,最新一根满色,读起来有"时间往右走"的方向感。
 pub fn spark(values: &[f32; SPARK_N], color: Rgba, h: f32, gap: f32) -> Div {
     let n = values.len() as f32;
@@ -854,29 +929,9 @@ pub fn spark(values: &[f32; SPARK_N], color: Rgba, h: f32, gap: f32) -> Div {
         }))
 }
 
-pub fn empty_state(ic: IconName, title: &'static str, sub: &'static str) -> Div {
-    div()
-        .flex_1()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(10.0))
-        .pb(px(80.0))
-        .child(
-            div()
-                .size(px(52.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(t::RADIUS_2XL))
-                .border_1()
-                .border_color(c::border())
-                .bg(c::raised())
-                .child(icon(ic, 22.0, c::ghost())),
-        )
-        .child(div().mt(px(4.0)).text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::SEMIBOLD).text_color(c::secondary()).child(title))
-        .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child(sub))
+/// 旧名字,等价于 `empty(图标, 标题).desc(说明)`;新代码直接用 `empty`。
+pub fn empty_state(ic: IconName, title: &'static str, sub: &'static str) -> Empty {
+    empty(ic, title).desc(sub)
 }
 
 pub fn button(id: &'static str, ic: IconName, label: &'static str) -> Stateful<Div> {
@@ -904,22 +959,63 @@ pub fn button_busy(id: &'static str, ic: IconName, label: &'static str, busy: bo
 
 /// 3×3 小方格,一个亮点沿外圈 8 格转圈,用作按钮的加载动画
 pub fn dot_spinner(id: (&'static str, usize), color: Rgba) -> impl IntoElement {
-    const CELL: f32 = 4.0;
-    const GAP: f32 = 1.0;
+    dot_spinner_scaled(id, color, 1.0)
+}
+
+/// 放大版点阵加载图标(`scale` 倍,1.0 就是 14px 的标准尺寸)
+pub fn dot_spinner_scaled(id: (&'static str, usize), color: Rgba, scale: f32) -> impl IntoElement {
+    let cell = 4.0 * scale;
+    let gap = 1.0 * scale;
     // 外圈顺时针的 8 个格子 (行, 列)
     const RING: [(usize, usize); 8] = [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2), (2, 1), (2, 0), (1, 0)];
-    div().size(px(14.0)).flex().items_center().justify_center().child(
+    div().size(px(14.0 * scale)).flex().items_center().justify_center().child(
         div().with_animation(id, Animation::new(std::time::Duration::from_millis(900)).repeat(), move |d, t| {
             let lit = RING[((t * 8.0) as usize).min(7)];
-            let mut grid = d.flex().flex_col().gap(px(GAP));
+            let mut grid = d.flex().flex_col().gap(px(gap));
             for r in 0..3 {
-                let mut row = div().flex().flex_row().gap(px(GAP));
+                let mut row = div().flex().flex_row().gap(px(gap));
                 for col in 0..3 {
-                    row = row.child(div().size(px(CELL)).rounded(px(1.0)).bg(if (r, col) == lit { color } else { color.opacity(0.18) }));
+                    row = row.child(div().size(px(cell)).rounded(px(1.0 * scale)).bg(if (r, col) == lit { color } else { color.opacity(0.18) }));
                 }
                 grid = grid.child(row);
             }
             grid
         }),
     )
+}
+
+/// 整页的「正在读取」:放大的点阵加载图标 + 一行说明,位置和 `empty` 一致(水平居中、垂直偏上)。**页面加载状态一律用它。**
+pub fn loading(msg: impl Into<SharedString>) -> Div {
+    div()
+        .w_full()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_start()
+        .gap(px(16.0))
+        .pt(px(96.0))
+        .pb(px(40.0))
+        .child(dot_spinner_scaled(("page-loading", 0), c::accent(), 2.5))
+        .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child(msg.into()))
+}
+
+/// 全局"点击即失焦":在窗口层监听捕获阶段的鼠标按下,不看悬停/遮挡,先清掉当前焦点,
+/// 之后被点的输入框在自己的处理里再抢回焦点。放在根元素最前面一次即可,弹窗、抽屉、菜单都生效。
+/// `skip` 为 true 时不处理(终端内容区要保留键盘焦点)。
+pub fn blur_on_click(skip: bool) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            if !skip {
+                window.on_mouse_event(move |_: &MouseDownEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture {
+                        window.blur(cx);
+                    }
+                });
+            }
+        },
+    )
+    .absolute()
+    .size_0()
 }

@@ -264,6 +264,11 @@ pub fn install_script(srcs: &[Source]) -> String {
         .map(|s| format!("\"{}|{}\"", s.label(), if *s == Source::Official { "" } else { s.base() }))
         .collect::<Vec<_>>()
         .join(" ");
+    // 官方源能用就先试官方地址;选的是国内镜像,说明服务器多半连不上 get.docker.com,先试 jsdelivr,免得白等超时
+    let official = "https://get.docker.com";
+    let cdn = "https://testingcf.jsdelivr.net/gh/docker/docker-install@master/install.sh https://cdn.jsdelivr.net/gh/docker/docker-install@master/install.sh https://fastly.jsdelivr.net/gh/docker/docker-install@master/install.sh https://gcore.jsdelivr.net/gh/docker/docker-install@master/install.sh";
+    let raw = "https://raw.githubusercontent.com/docker/docker-install/master/install.sh";
+    let urls = if srcs.first() == Some(&Source::Official) { format!("{official} {cdn} {raw}") } else { format!("{cdn} {official} {raw}") };
     format!(
         r#"set -e
 d=$(mktemp -d)
@@ -290,15 +295,10 @@ if command -v dpkg >/dev/null 2>&1; then
 fi
 echo "==> 下载 Docker 官方安装脚本"
 dl() {{
-  if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 2 --retry-delay 3 --connect-timeout 5 --max-time 20 "$1" -o "$2"
+  if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 1 --retry-delay 1 --connect-timeout 5 --max-time 20 "$1" -o "$2"
   else wget -q -T 20 -t 2 -O "$2" "$1"; fi
 }}
-for u in https://get.docker.com \
-  https://testingcf.jsdelivr.net/gh/docker/docker-install@master/install.sh \
-  https://cdn.jsdelivr.net/gh/docker/docker-install@master/install.sh \
-  https://fastly.jsdelivr.net/gh/docker/docker-install@master/install.sh \
-  https://gcore.jsdelivr.net/gh/docker/docker-install@master/install.sh \
-  https://raw.githubusercontent.com/docker/docker-install/master/install.sh; do
+for u in {urls}; do
   echo "尝试 $u"
   if dl "$u" get-docker.sh; then break; fi
   rm -f get-docker.sh

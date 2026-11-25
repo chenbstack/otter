@@ -60,6 +60,8 @@ pub(crate) struct DockUi {
     sort: (SortKey, bool),
     confirm: Option<DockAsk>,
     pub(super) comp: super::composeedit::CompUi,
+    pub(super) dbi: super::dbinstallui::DbInstallUi,
+    pub(super) dbm: super::dbmanage::DbMgr,
     pub(super) notice: Option<(SharedString, Instant)>,
     /// 刚点下的容器操作(容器名 → 动词, 点击时刻):后台标记「进行中」前先让按钮转起来
     pub(super) pending: Vec<(String, String, Instant)>,
@@ -81,7 +83,7 @@ const PENDING_MAX_SECS: u64 = 60;
 
 impl DockUi {
     pub fn new() -> Self {
-        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, pull_reg: None, pull_reg_open: false, inst_src: None, inst_src_open: false, inst_accel: false, inst_log_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), comp: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, pending: Vec::new(), polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
+        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, pull_reg: None, pull_reg_open: false, inst_src: None, inst_src_open: false, inst_accel: false, inst_log_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), comp: Default::default(), dbi: Default::default(), dbm: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, pending: Vec::new(), polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
     }
 }
 
@@ -127,7 +129,7 @@ pub(crate) fn row(id: (&'static str, usize)) -> Stateful<Div> {
 }
 
 /// 列表操作列用的窄按钮(24px 正方形,和卡片上的按钮一致)
-fn icon_btn_c(id: (&'static str, usize), ic: IconName, color: Rgba) -> Stateful<Div> {
+pub(crate) fn icon_btn_c(id: (&'static str, usize), ic: IconName, color: Rgba) -> Stateful<Div> {
     icon_btn(id, ic, color).size(px(24.0))
 }
 
@@ -231,6 +233,7 @@ impl Home {
         self.dock.seen = ver;
         if let Some(n) = notice {
             self.comp_applied(&n, cx);
+            self.dbi_applied(&n, cx);
             self.dock.notice = Some((n.into(), Instant::now()));
         }
         if let Some(s) = snap {
@@ -347,6 +350,7 @@ impl Home {
                     return None;
                 }
                 match d.problem() {
+                    Some(p) if self.page == Page::Database => Some(self.db_problem_page(p, cx).into_any_element()),
                     Some(p) => {
                         if p == Problem::NoDocker {
                             d.install_probe();
@@ -553,12 +557,7 @@ impl Home {
     }
 
     fn problem_page(&self, p: Problem, cx: &mut Context<Self>) -> Div {
-        let (ic, title, sub): (IconName, &'static str, String) = match &p {
-            Problem::NoDocker => (IconName::Container, "这台服务器没有安装 Docker", String::new()),
-            Problem::DaemonDown(m) => (IconName::CircleAlert, "Docker 没有在运行", m.clone()),
-            Problem::NoPermission(m) => (IconName::Lock, "没有权限运行 docker", m.clone()),
-            Problem::Other(m) => (IconName::TriangleAlert, "读取 Docker 失败", m.clone()),
-        };
+        let (ic, title, sub) = problem_text(&p);
         // 没装 Docker 时有自己的「重新检测」和安装流程,「重试」只在不能安装、用户去处理后才需要
         let show_retry = p != Problem::NoDocker
             || self.workspace.active.and_then(|a| self.workspace.tabs.get(a)).and_then(|t| t.docker.as_ref()).is_some_and(|d| {
@@ -608,6 +607,35 @@ impl Home {
                         .child(div().flex_1().min_w_0().ml(px(-4.0)).child(Input::new(&s).appearance(false).with_size(px(12.0 / 0.875))))
                         .into_any_element(),
                 );
+            }
+        }
+        if self.page == Page::Database {
+            match self.dbm_current() {
+                // 已经装过:换成卸载(面板管理的只读,不给卸载)
+                Some(inst) => {
+                    if inst.container.panel.is_none() {
+                        let name = inst.container.name.clone();
+                        v.push(
+                            div()
+                                .id("db-uninstall")
+                                .h(px(30.0))
+                                .px(px(12.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(t::RADIUS_MD))
+                                .cursor_pointer()
+                                .text_size(px(t::TYPE_CONTROL))
+                                .text_color(c::danger())
+                                .hover(|s| s.bg(c::field_hover()))
+                                .child("卸载")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.ask(DockAsk { title: "卸载数据库", tile: IconName::Database, name: name.clone(), detail: "数据库容器", body: "会停止并删除这个容器。数据存储卷和 compose 文件、.env 会保留在服务器上,需要时可以到「存储卷」页或服务器上手动删除", label: "卸载", action: Action::Remove(name.clone()), list: Vec::new() }, cx);
+                                }))
+                                .into_any_element(),
+                        );
+                    }
+                }
+                None => v.push(button("db-install", IconName::Plus, "安装数据库").on_click(cx.listener(|this, _, window, cx| this.dbi_open(window, cx))).into_any_element()),
             }
         }
         if self.page == Page::Stacks {
@@ -671,7 +699,12 @@ impl Home {
                     .into_any_element(),
             );
         }
-        v.push(button("dock-refresh", IconName::RefreshCw, "刷新").on_click(cx.listener(|this, _, _, cx| this.dock_refresh(cx))).into_any_element());
+        v.push(div().id("dock-refresh").size(px(30.0)).flex().items_center().justify_center().cursor_pointer().child(icon(IconName::RefreshCw, 15.0, c::muted())).hover(|s| s.opacity(0.7)).on_click(cx.listener(|this, _, _, cx| {
+            if this.page == Page::Database {
+                this.dbm_invalidate();
+            }
+            this.dock_refresh(cx)
+        })).into_any_element());
         v
     }
 
@@ -680,6 +713,7 @@ impl Home {
         match self.page {
             Page::Overview => format!("{n} 的系统资源"),
             Page::Containers => format!("{n} 上的全部容器"),
+            Page::Database => format!("{n} 上的数据库容器"),
             Page::Stacks => format!("{n} 上的 Compose 项目"),
             Page::Images => format!("{n} 上的本地镜像"),
             Page::Volumes => format!("{n} 上的存储卷"),
@@ -693,6 +727,7 @@ impl Home {
         match self.page {
             Page::Overview => self.overview_page(cx),
             Page::Containers => self.containers_page(cx),
+            Page::Database => self.database_page(cx),
             Page::Images => self.images_page(cx),
             Page::Volumes => self.volumes_page(cx),
             Page::Registry => self.registry_page(cx),
@@ -712,6 +747,7 @@ impl Home {
         if let Some(m) = self.create_drawer(window, cx) {
             v.push(m.into_any_element());
         }
+        v.extend(self.dbi_overlays(window, cx));
         if let Some(m) = self.comp_dialog(window, cx) {
             v.push(m.into_any_element());
         }
@@ -1116,6 +1152,16 @@ impl Home {
     // ---- 概览 ----
 }
 
+/// 各种 Docker 问题的图标、标题和说明(容器页和数据库页共用)
+pub(super) fn problem_text(p: &Problem) -> (IconName, &'static str, String) {
+    match p {
+        Problem::NoDocker => (IconName::Container, "这台服务器没有安装 Docker", String::new()),
+        Problem::DaemonDown(m) => (IconName::CircleAlert, "Docker 没有在运行", m.clone()),
+        Problem::NoPermission(m) => (IconName::Lock, "没有权限运行 docker", m.clone()),
+        Problem::Other(m) => (IconName::TriangleAlert, "读取 Docker 失败", m.clone()),
+    }
+}
+
 pub(super) fn loading(msg: &'static str) -> Div {
-    div().flex_1().flex().items_center().justify_center().text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child(msg)
+    crate::ui::loading(msg)
 }

@@ -113,7 +113,7 @@ fn message(icon_name: IconName, title: &'static str, detail: String) -> AnyEleme
 }
 
 fn reading(what: &'static str) -> AnyElement {
-    empty_state(IconName::LoaderCircle, "正在读取", what).into_any_element()
+    crate::ui::loading(format!("正在{what}…")).into_any_element()
 }
 
 fn job(label: &str, target: &str, script: String, reload: (Kind, &str)) -> Job {

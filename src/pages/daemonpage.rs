@@ -66,13 +66,13 @@ impl Home {
                 })
                 .collect();
             self.dock.conf.inputs = Some(v);
-            let area = |ph: &'static str, window: &mut Window, cx: &mut Context<Self>| {
-                let e = cx.new(|cx| TextareaState::new(window, cx).placeholder(ph).rows(3));
+            let area = |window: &mut Window, cx: &mut Context<Self>| {
+                let e = cx.new(|cx| TextareaState::new(window, cx).rows(3));
                 cx.observe(&e, |_, _, cx| cx.notify()).detach();
                 e
             };
-            self.dock.conf.mirrors = Some(area("https://mirror.example.com", window, cx));
-            self.dock.conf.http = Some(area("10.0.0.2:5000", window, cx));
+            self.dock.conf.mirrors = Some(area(window, cx));
+            self.dock.conf.http = Some(area(window, cx));
             let raw = cx.new(|cx| EditorState::new(window, cx).language("json").line_number(false));
             // 键用主色,字符串绿,数字橙,true/false/null 紫
             let colors = [c::accent(), c::online(), c::warn(), gpui::rgba(0xD79BFFFF)];
@@ -212,7 +212,7 @@ impl Home {
                 .into_any_element();
         }
         if !self.dock.conf.loaded {
-            return empty_state(IconName::LoaderCircle, "正在读取配置", "从服务器读取 /etc/docker/daemon.json").into_any_element();
+            return crate::ui::loading("正在读取 daemon.json…").into_any_element();
         }
         let ins = self.dock.conf.inputs.clone().unwrap_or_default();
         let form = self.conf_form(cx);
