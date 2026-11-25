@@ -158,7 +158,7 @@ impl Home {
             .enumerate()
             .map(|(i, e)| {
                 let col = match e.level {
-                    crate::logs::Level::Info => c::muted(),
+                    crate::logs::Level::Debug | crate::logs::Level::Info => c::muted(),
                     crate::logs::Level::Warn => c::warn(),
                     crate::logs::Level::Error => c::danger(),
                 };

@@ -9,7 +9,7 @@ use gpui_kit::component::input::InputState;
 
 use super::super::*;
 use super::daemonpage::field;
-use super::dockerpages::{DockAsk, head, icon_btn, row, small, table};
+use super::dockerpages::{DockAsk, head, icon_btn, row, small, table_flow};
 use crate::docker::{Action, RegAuth};
 
 #[derive(Default)]
@@ -183,7 +183,7 @@ impl Home {
             Some(Ok(l)) => l.clone(),
         };
         let http = self.dock.reg.http;
-        let mut col = div().flex_1().min_h_0().pb(px(14.0)).flex().flex_col().gap(px(12.0));
+        let mut col = div().flex_shrink_0().pb(px(14.0)).flex().flex_col().gap(px(12.0));
         if self.dock.reg.open {
             if let Some(ins) = self.dock.reg.inputs.clone() {
                 col = col.child(
@@ -272,6 +272,6 @@ impl Home {
                     .child(act),
             );
         }
-        col.child(table("reg-list", header, rows)).into_any_element()
+        col.child(table_flow(header, rows)).into_any_element()
     }
 }

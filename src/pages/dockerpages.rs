@@ -93,6 +93,20 @@ pub(crate) fn table(id: &'static str, header: Div, rows: Vec<Stateful<Div>>) -> 
         .child(div().id(id).flex_1().min_h_0().overflow_y_scroll().children(rows))
 }
 
+/// 整页一起滚动时的表格:自己不滚,有多少行就多高(外层页面负责滚动)
+pub(crate) fn table_flow(header: Div, rows: Vec<Stateful<Div>>) -> Div {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .flex_col()
+        .rounded(px(t::RADIUS_XL))
+        .border_1()
+        .border_color(c::dialog_border())
+        .overflow_hidden()
+        .child(header.h(px(34.0)).flex_shrink_0().flex().flex_row().items_center().gap(px(12.0)).px(px(16.0)).border_b_1().border_color(c::border()))
+        .children(rows)
+}
+
 pub(crate) fn row(id: (&'static str, usize)) -> Stateful<Div> {
     div().id(id).h(px(44.0)).flex_shrink_0().flex().flex_row().items_center().gap(px(12.0)).px(px(16.0)).border_b_1().border_color(c::border()).hover(|s| s.bg(c::field_hover()))
 }
@@ -542,7 +556,7 @@ impl Home {
             .child(sorter("h-cpu", "CPU", SortKey::Cpu, cx).w(px(58.0)))
             .child(sorter("h-mem", "内存", SortKey::Mem, cx).w(px(74.0)))
             .child(head("端口").w(px(150.0)))
-            .child(div().w(px(144.0)));
+            .child(div().w(px(172.0)));
 
         let mut rows: Vec<Stateful<Div>> = Vec::new();
         for (i, ct) in list.iter().enumerate() {
@@ -551,12 +565,14 @@ impl Home {
             let (fg, bg) = state_color(ct);
             let busy = self.is_busy(&ct.name);
             let name = ct.name.clone();
-            let mut acts = div().w(px(144.0)).flex().flex_row().justify_end().items_center().gap(px(2.0));
+            let mut acts = div().w(px(172.0)).flex().flex_row().justify_end().items_center().gap(px(2.0));
             if let Some(p) = ct.panel {
                 acts = acts.child(tag(format!("{p} · 只读")));
             } else {
                 let (n, run) = (name.clone(), up);
                 acts = acts.child(icon_btn(("ct-logs", i), IconName::ScrollText, c::muted()).on_click(cx.listener(move |this, _, window, cx| this.ct_open(n.clone(), run, super::ctpanel::CtTab::Logs, window, cx))));
+                let n = name.clone();
+                acts = acts.child(icon_btn(("ct-term", i), IconName::SquareTerminal, c::muted()).on_click(cx.listener(move |this, _, window, cx| this.ct_open(n.clone(), run, super::ctpanel::CtTab::Term, window, cx))));
                 let n = name.clone();
                 acts = acts.child(icon_btn(("ct-files", i), IconName::FolderOpen, c::muted()).on_click(cx.listener(move |this, _, window, cx| this.ct_open(n.clone(), run, super::ctpanel::CtTab::Files, window, cx))));
                 if busy {
@@ -604,14 +620,14 @@ impl Home {
         if rows.is_empty() {
             return empty_state(IconName::Search, "没有匹配的容器", "换个关键字试试").into_any_element();
         }
-        div().flex_1().min_h_0().pb(px(14.0)).flex().flex_col().child(table("ct-list", header, rows)).into_any_element()
+        div().flex_shrink_0().pb(px(14.0)).flex().flex_col().child(table_flow(header, rows)).into_any_element()
     }
 
     // ---- 镜像 ----
 
     fn images_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let snap = self.dock.snap.clone();
-        let mut col = div().flex_1().min_h_0().pb(px(14.0)).flex().flex_col().gap(px(10.0));
+        let mut col = div().flex_shrink_0().pb(px(14.0)).flex().flex_col().gap(px(10.0));
         if self.dock.pull_open {
             if let Some(p) = self.dock.pull.clone() {
                 col = col.child(
@@ -688,7 +704,7 @@ impl Home {
                     .child(act),
             );
         }
-        col.child(table("im-list", header, rows)).into_any_element()
+        col.child(table_flow(header, rows)).into_any_element()
     }
 
     // ---- 存储卷 ----
@@ -732,7 +748,7 @@ impl Home {
                     .child(act),
             );
         }
-        div().flex_1().min_h_0().pb(px(14.0)).flex().flex_col().child(table("vl-list", header, rows)).into_any_element()
+        div().flex_shrink_0().pb(px(14.0)).flex().flex_col().child(table_flow(header, rows)).into_any_element()
     }
 
     // ---- 概览 ----

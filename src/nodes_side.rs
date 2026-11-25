@@ -12,6 +12,7 @@ impl Home {
             NodesView::Keychain => self.keychain_view(cx),
             NodesView::KnownHosts => self.known_hosts_view(cx),
             NodesView::Logs => self.logs_page(cx),
+            NodesView::Settings => self.settings_page(window, cx),
         };
         div().flex_1().min_h_0().flex().flex_row().child(self.nodes_side(cx)).child(body)
     }
@@ -21,7 +22,8 @@ impl Home {
             NodesView::Hosts => self.groups.iter().map(|g| g.nodes.len()).sum(),
             NodesView::Keychain => self.keys.len(),
             NodesView::KnownHosts => self.known_hosts.len() + self.grants.len(),
-            NodesView::Logs => crate::logs::len(),
+            // 日志条数没有参考意义,不显示
+            NodesView::Logs | NodesView::Settings => 0,
         }
     }
 
@@ -31,6 +33,9 @@ impl Home {
             self.known_hosts = crate::known_hosts::load();
             self.reload_grants();
         }
+        if v == NodesView::Settings {
+            self.load_mono_fonts(cx);
+        }
         cx.notify();
     }
 
@@ -39,6 +44,10 @@ impl Home {
         for (i, v) in NodesView::ALL.into_iter().enumerate() {
             let active = self.nodes_view == v;
             let n = self.view_count(v);
+            // 「设置」固定在侧栏最底部
+            if v == NodesView::Settings {
+                col = col.child(div().flex_1());
+            }
             col = col.child(
                 div()
                     .id(("nodes-side", i))
@@ -60,6 +69,7 @@ impl Home {
                     })
                     .child(icon(v.icon(), 15.0, if active { c::accent() } else { c::ghost() }))
                     .child(div().flex_1().child(v.label()))
+                    .when(v == NodesView::Settings, |d| d.child(div().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(if cfg!(target_os = "macos") { "⌘," } else { "Ctrl+," })))
                     .when(n > 0, |d| {
                         d.child(
                             div()
@@ -284,14 +294,46 @@ impl Home {
 
     // ---- 日志 ----
 
-    fn logs_page(&self, cx: &mut Context<Self>) -> Div {
-        let entries = crate::logs::snapshot();
-        let clear = button("logs-clear", IconName::Trash, "清空").on_click(cx.listener(|_, _, _, cx| {
+    /// 清空日志的确认框:内存和本地库里的一起清,Agent 审计也在其中
+    pub(crate) fn logs_clear_dialog(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        if !self.logs_clear_ask {
+            return None;
+        }
+        let spec = crate::confirm::Confirm {
+            ids: ["lc-cancel", "lc-ok"],
+            title: "清空日志",
+            tile: Self::icon_tile(IconName::ScrollText, c::danger(), c::danger().opacity(0.18)).into_any_element(),
+            name: "全部日志".into(),
+            detail: format!("{} 条", crate::logs::len()).into(),
+            points: vec![
+                (IconName::ScrollText, c::danger(), "连接、认证、主机密钥记录一并清除".into()),
+                (IconName::ShieldCheck, c::danger(), "包括 Agent 的授权、接管和 sudo 审计记录".into()),
+                (IconName::Trash, c::danger(), "已保存到本地库的也会删除,无法恢复".into()),
+            ],
+            ok_label: "清空日志",
+            compact: false,
+        };
+        Some(self.delete_confirm("logs-clear-dialog", spec, |this| this.logs_clear_ask = false, |this, cx| {
+            this.logs_clear_ask = false;
             crate::logs::clear();
             cx.notify();
+        }, cx))
+    }
+
+    fn logs_page(&self, cx: &mut Context<Self>) -> Div {
+        let verbose = self.logs_verbose;
+        let entries: Vec<_> = crate::logs::snapshot().into_iter().filter(|e| verbose || e.level != crate::logs::Level::Debug).collect();
+        let clear = button("logs-clear", IconName::Trash, "清空").on_click(cx.listener(|this, _, _, cx| {
+            this.logs_clear_ask = true;
+            cx.notify();
         }));
+        let toggle = button("logs-verbose", if verbose { IconName::EyeOff } else { IconName::Eye }, if verbose { "隐藏详情" } else { "显示详情" }).on_click(cx.listener(|this, _, _, cx| {
+            this.logs_verbose = !this.logs_verbose;
+            cx.notify();
+        }));
+        let actions = div().id("logs-actions").flex().flex_row().gap(px(8.0)).child(toggle).child(clear);
         let body = if entries.is_empty() {
-            empty_state(IconName::ScrollText, "暂无日志", "连接、认证、主机密钥等事件会记录在这里,重启后清空").into_any_element()
+            empty_state(IconName::ScrollText, "暂无日志", "连接、认证、主机密钥等事件会记录在这里,保留 30 天").into_any_element()
         } else {
             use crate::pages::dockerpages::{head, row};
             let rows: Vec<_> = entries
@@ -299,6 +341,7 @@ impl Home {
                 .enumerate()
                 .map(|(i, e)| {
                     let (ic, col) = match e.level {
+                        crate::logs::Level::Debug => (IconName::Circle, c::ghost()),
                         crate::logs::Level::Info => (IconName::CircleCheck, c::online()),
                         crate::logs::Level::Warn => (IconName::TriangleAlert, c::warn()),
                         crate::logs::Level::Error => (IconName::CircleX, c::danger()),
@@ -306,14 +349,14 @@ impl Home {
                     row(("log", i))
                         .h(px(36.0))
                         .child(div().w(px(14.0)).flex_shrink_0().child(icon(ic, 14.0, col)))
-                        .child(div().w(px(64.0)).flex_shrink_0().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(e.time))
+                        .child(div().w(px(88.0)).flex_shrink_0().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(e.time))
                         .child(div().w(px(200.0)).flex_shrink_0().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::muted()).child(e.host))
                         .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CONTROL)).text_color(c::secondary()).child(e.msg))
                 })
                 .collect();
-            let header = div().child(div().w(px(14.0)).flex_shrink_0()).child(head("时间").w(px(64.0)).flex_shrink_0()).child(head("主机").w(px(200.0)).flex_shrink_0()).child(head("事件").flex_1());
+            let header = div().child(div().w(px(14.0)).flex_shrink_0()).child(head("时间").w(px(88.0)).flex_shrink_0()).child(head("主机").w(px(200.0)).flex_shrink_0()).child(head("事件").flex_1());
             Self::list_table("logs-scroll", header, rows).into_any_element()
         };
-        Self::side_view("日志", "连接、认证和主机密钥事件,最新的在上面", Some(clear), body)
+        Self::side_view("日志", "每次连接一条汇总,分步细节点「显示详情」;最新的在上面", Some(actions), body)
     }
 }

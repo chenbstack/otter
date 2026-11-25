@@ -19,10 +19,42 @@ use crate::workspace::{NodeMode, TabKind};
 use crate::ui::*;
 use crate::{Home, icon};
 
-/// 超过这么久没有任何调用,自动释放(`wait_for` 等待期间不算)。目前与 `MAX_DURATION` 相同
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// 空闲超时和单次最长时长(分钟,设置页「AI 接管」可改)
+static IDLE_MIN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(30);
+static MAX_MIN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(30);
+pub const KEY_IDLE_MIN: &str = "takeover_idle_min";
+pub const KEY_MAX_MIN: &str = "takeover_max_min";
+
+pub fn idle_min() -> u64 {
+    IDLE_MIN.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub fn set_idle_min(v: u64) {
+    IDLE_MIN.store(v.clamp(1, 24 * 60), std::sync::atomic::Ordering::Relaxed);
+}
+pub fn max_min() -> u64 {
+    MAX_MIN.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub fn set_max_min(v: u64) {
+    MAX_MIN.store(v.clamp(1, 24 * 60), std::sync::atomic::Ordering::Relaxed);
+}
+/// 超过这么久没有任何调用,自动释放(`wait_for` 等待期间不算)
+pub fn idle_timeout() -> Duration {
+    Duration::from_secs(idle_min() * 60)
+}
 /// 单次接管的最长时长
-pub const MAX_DURATION: Duration = Duration::from_secs(30 * 60);
+pub fn max_duration() -> Duration {
+    Duration::from_secs(max_min() * 60)
+}
+
+/// 启动时按记住的设置恢复
+pub fn restore_prefs(st: &crate::store::Store) {
+    if let Some(v) = st.get_setting(KEY_IDLE_MIN).and_then(|v| v.parse().ok()) {
+        set_idle_min(v);
+    }
+    if let Some(v) = st.get_setting(KEY_MAX_MIN).and_then(|v| v.parse().ok()) {
+        set_max_min(v);
+    }
+}
 /// `send_input` 单次最多字节
 pub const INPUT_MAX: usize = 8 * 1024;
 /// 单次返回给 agent 的文本最多字节
@@ -648,9 +680,9 @@ impl Home {
             let Some(k) = &t.takeover else { continue };
             if t.term.as_ref().is_some_and(|s| matches!(s.handle.status(), Status::Closed(_))) {
                 ending.push((t.id, "tab_closed"));
-            } else if k.started.elapsed() >= MAX_DURATION {
+            } else if k.started.elapsed() >= max_duration() {
                 ending.push((t.id, "max_duration"));
-            } else if !k.waiting && k.last_call.elapsed() >= IDLE_TIMEOUT {
+            } else if !k.waiting && k.last_call.elapsed() >= idle_timeout() {
                 ending.push((t.id, "idle_timeout"));
             }
         }
@@ -1063,7 +1095,12 @@ impl Home {
             .flex_col()
             .gap(px(10.0))
             .children(pw_field)
-            .child(div().w_full().flex().flex_row().gap(px(10.0)).child(m30).child(m10).child(once))
+            .child(if crate::prefs::sudo_allow_window() {
+                div().w_full().flex().flex_row().gap(px(10.0)).child(m30).child(m10).child(once)
+            } else {
+                // 设置里关了「允许一段时间内免确认」:每次都要确认,只留「仅这一次」
+                div().w_full().flex().flex_row().gap(px(10.0)).child(once.w(px(crate::ui::alert_btn_w(1))))
+            })
             .child(deny)
             .child(hint);
         let body = crate::ui::alert_body(hero, Some(target), points, buttons);

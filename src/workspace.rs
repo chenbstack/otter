@@ -40,10 +40,6 @@ pub enum TabKind {
     /// 节点标签:一个标签一条会话,在终端 / SFTP / 容器管理三种模式间切换(`Tab.mode`)。
     /// 同一节点要多个就复制标签。
     Node(NodeId),
-    /// 容器终端标签:可以同一容器开多个。P1 只放占位内容。
-    Terminal { node: NodeId, container: (String, String), n: usize },
-    /// 日志标签:每个容器一个。
-    Logs { node: NodeId, stack: String, svc: String },
 }
 
 pub struct Tab {
@@ -56,8 +52,7 @@ pub struct Tab {
     pub scroll: VirtualListScrollHandle,
     /// 该标签的文件视图状态:节点标签里是抽屉的,文件标签里是主体的。存取方式同 `page`。
     pub files: Files,
-    /// 日志标签:是否跟随最新,以及日志列表的滚动句柄(只在日志标签里用,不随标签切换交换)
-    pub follow: bool,
+    /// 「连接中」页日志列表的滚动句柄(不随标签切换交换)
     pub log_scroll: ScrollHandle,
     /// 节点标签的 SSH 会话;挂在标签上而不是终端模式上,切到别的模式不断开。关闭标签即丢弃,连接随之断开
     pub term: Option<crate::terminal::TermSession>,
@@ -81,7 +76,6 @@ impl Tab {
             page: Page::Overview,
             scroll: VirtualListScrollHandle::new(),
             files,
-            follow: true,
             log_scroll: ScrollHandle::new(),
             term: None,
             mode: NodeMode::Containers,
@@ -118,7 +112,6 @@ impl Tab {
         match &self.kind {
             TabKind::Nodes => None,
             TabKind::Node(id) => Some(*id),
-            TabKind::Terminal { node, .. } | TabKind::Logs { node, .. } => Some(*node),
         }
     }
 }
@@ -145,7 +138,7 @@ impl Home {
             let ix = self.workspace.active.map_or(self.workspace.tabs.len(), |a| a + 1);
             self.workspace.tabs.insert(ix, Tab::node_tab(id));
             self.activate(ix);
-            self.set_mode(mode.unwrap_or(NodeMode::Terminal), window, cx);
+            self.set_mode(mode.unwrap_or_else(crate::prefs::default_node_mode), window, cx);
             return;
         }
         if let Some(m) = mode {
@@ -208,40 +201,6 @@ impl Home {
         self.workspace.tabs[ix + 1].page = page;
         self.activate(ix + 1);
         self.set_mode(mode, window, cx);
-    }
-
-    /// 打开容器终端标签:总是新开一个,编号按同一容器已有的终端数递增。
-    pub(crate) fn open_terminal(&mut self, container: (String, String), cx: &mut Context<Self>) {
-        let node = self.sel;
-        let n = 1 + self
-            .workspace
-            .tabs
-            .iter()
-            .filter(|t| matches!(&t.kind, TabKind::Terminal { node: nn, container: cc, .. } if *nn == node && *cc == container))
-            .count();
-        let ix = self.workspace.active.map_or(self.workspace.tabs.len(), |a| a + 1);
-        self.workspace.tabs.insert(ix, Tab::new(TabKind::Terminal { node, container, n }, Files::new()));
-        self.activate(ix);
-        cx.notify();
-    }
-
-    /// 打开日志标签:每个容器一个,已有就激活。
-    pub(crate) fn open_logs(&mut self, stack: String, svc: String, cx: &mut Context<Self>) {
-        let node = self.sel;
-        let found = self
-            .workspace
-            .tabs
-            .iter()
-            .position(|t| matches!(&t.kind, TabKind::Logs { node: nn, stack: ss, svc: vv } if *nn == node && *ss == stack && *vv == svc));
-        match found {
-            Some(ix) => self.activate(ix),
-            None => {
-                let ix = self.workspace.active.map_or(self.workspace.tabs.len(), |a| a + 1);
-                self.workspace.tabs.insert(ix, Tab::new(TabKind::Logs { node, stack, svc }, Files::new()));
-                self.activate(ix);
-            }
-        }
-        cx.notify();
     }
 
     /// 激活标签:把当前标签的页面状态存回去,载入目标标签的,并让节点选中跟随。

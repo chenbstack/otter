@@ -140,7 +140,21 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE nodes ADD COLUMN last_connected_at INTEGER NOT NULL DEFAULT 0;",
     // v8:接管授权可以有期限(Unix 秒,0 = 永久),「24 小时」授权到期后失效
     "ALTER TABLE agent_grants ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0;",
+    // v9:应用日志(连接、认证、Agent 审计等事件,不含终端内容和秘密);ts 是 Unix 毫秒,level 0 详情 1 信息 2 警告 3 错误
+    "CREATE TABLE logs (
+         id    INTEGER PRIMARY KEY,
+         ts    INTEGER NOT NULL,
+         level INTEGER NOT NULL,
+         host  TEXT NOT NULL,
+         msg   TEXT NOT NULL
+     );
+     CREATE INDEX logs_ts ON logs(ts);",
 ];
+
+/// 日志保留天数
+pub const LOG_KEEP_DAYS: i64 = 30;
+/// 日志最多保留条数(防止异常刷屏撑大库)
+pub const LOG_KEEP_ROWS: i64 = 50_000;
 
 /// 当前 Unix 时间(秒)
 pub fn now_secs() -> i64 {
@@ -249,6 +263,40 @@ impl Store {
             })?;
         }
         Ok(())
+    }
+
+    /// 批量写日志(一个事务):(ts 毫秒, level, host, msg)
+    pub fn log_insert(&mut self, rows: &[(i64, i64, String, String)]) -> Result<(), String> {
+        let e = |e: rusqlite::Error| e.to_string();
+        let tx = self.conn.transaction().map_err(e)?;
+        {
+            let mut st = tx.prepare("INSERT INTO logs (ts, level, host, msg) VALUES (?1, ?2, ?3, ?4)").map_err(e)?;
+            for r in rows {
+                st.execute(params![r.0, r.1, r.2, r.3]).map_err(e)?;
+            }
+        }
+        tx.commit().map_err(e)
+    }
+
+    /// 最近 n 条,旧的在前
+    pub fn log_recent(&self, n: usize) -> Result<Vec<(i64, i64, String, String)>, String> {
+        let e = |e: rusqlite::Error| e.to_string();
+        let mut st = self.conn.prepare("SELECT ts, level, host, msg FROM logs ORDER BY id DESC LIMIT ?1").map_err(e)?;
+        let mut v: Vec<_> = st.query_map([n as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(e)?.collect::<Result<_, _>>().map_err(e)?;
+        v.reverse();
+        Ok(v)
+    }
+
+    /// 删掉早于 `before_ms` 的,并把总数压到 `max_rows` 以内
+    pub fn log_purge(&self, before_ms: i64, max_rows: i64) -> Result<(), String> {
+        let e = |e: rusqlite::Error| e.to_string();
+        self.conn.execute("DELETE FROM logs WHERE ts < ?1", [before_ms]).map_err(e)?;
+        self.conn.execute("DELETE FROM logs WHERE id <= (SELECT id FROM logs ORDER BY id DESC LIMIT 1 OFFSET ?1)", [max_rows]).map_err(e)?;
+        Ok(())
+    }
+
+    pub fn log_clear(&self) -> Result<(), String> {
+        self.conn.execute("DELETE FROM logs", []).map(|_| ()).map_err(|e| e.to_string())
     }
 
     /// 读界面偏好,没有或出错返回 None
@@ -612,6 +660,21 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn logs_insert_recent_purge_clear() {
+        let mut s = Store::open_memory().unwrap();
+        let row = |ts: i64, m: &str| (ts, 1, "h".to_string(), m.to_string());
+        s.log_insert(&[row(100, "a"), row(200, "b"), row(300, "c")]).unwrap();
+        let r = s.log_recent(2).unwrap();
+        assert_eq!(r.iter().map(|x| x.3.as_str()).collect::<Vec<_>>(), ["b", "c"]);
+        s.log_purge(150, 10).unwrap();
+        assert_eq!(s.log_recent(10).unwrap().len(), 2);
+        s.log_purge(0, 1).unwrap();
+        assert_eq!(s.log_recent(10).unwrap().iter().map(|x| x.3.as_str()).collect::<Vec<_>>(), ["c"]);
+        s.log_clear().unwrap();
+        assert!(s.log_recent(10).unwrap().is_empty());
+    }
 
     #[test]
     fn migrates_to_latest_and_has_default_group() {

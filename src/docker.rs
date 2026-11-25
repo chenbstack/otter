@@ -577,6 +577,8 @@ struct Shared {
     touched: AtomicU64,
     want_volume_sizes: AtomicBool,
     closed: AtomicBool,
+    /// 探测出的 docker 调用方式(容器终端照它拼命令);探测完成前是 None
+    sudo: Mutex<Option<Sudo>>,
 }
 
 impl Shared {
@@ -635,6 +637,7 @@ impl Docker {
             touched: AtomicU64::new(now_ms()),
             want_volume_sizes: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            sudo: Mutex::new(None),
         });
         let sh2 = sh.clone();
         let join = runtime().spawn(async move {
@@ -663,6 +666,25 @@ impl Docker {
         crate::sftp::Sftp::via(self.epoch, move |cmd, sh| {
             let _ = tx.send(Cmd::CtFs { name: name.clone(), sh, cmd });
         })
+    }
+
+    /// 在容器里开交互 shell 的终端连接:`docker exec -it`(必要时 sudo),照 Docker 页探测出的方式拼。
+    /// `conn` 是节点的连接信息(新开一条 SSH,不占 Docker 页的连接);Docker 还没探测完或容器名不合法时返回 None。
+    pub fn exec_conn(&self, mut conn: Conn, name: &str) -> Option<Conn> {
+        if !safe_name(name) {
+            return None;
+        }
+        let sudo = (*self.sh.sudo.lock().unwrap())?;
+        let q = shell_quote(name);
+        // 优先 bash,没有再 sh
+        let run = |d: &str| format!("{d} exec -it {q} sh -c 'command -v bash >/dev/null 2>&1 && exec bash || exec sh'");
+        let (command, stdin_first) = match sudo {
+            Sudo::No => (run("docker"), None),
+            Sudo::Passwordless => (run("sudo -n docker"), None),
+            Sudo::WithPassword => (format!("stty -echo; {}", run("sudo -S -p '' docker")), conn.auth.password.clone()),
+        };
+        conn.exec = Some(crate::terminal::ssh::Exec { command, stdin_first });
+        Some(conn)
     }
 
     pub fn status(&self) -> Status {
@@ -1388,12 +1410,15 @@ async fn probe(session: &Arc<SshHandle<Client>>, conn: &Conn) -> Result<Runner, 
         return Err(p);
     }
     r.sudo = Sudo::Passwordless;
+    let mut last = String::new();
     if let Ok(o) = r.docker(&ver, t).await {
         if o.code == 0 {
             logs::push(logs::Level::Info, &conn.host, "Docker:当前用户没有权限,改用 sudo");
             return Ok(r);
         }
+        last = o.stderr;
     }
+    let saved = conn.auth.password.is_some();
     if let Some(pw) = &conn.auth.password {
         r.sudo = Sudo::WithPassword;
         r.password = Some(pw.clone());
@@ -1402,9 +1427,34 @@ async fn probe(session: &Arc<SshHandle<Client>>, conn: &Conn) -> Result<Runner, 
                 logs::push(logs::Level::Info, &conn.host, "Docker:当前用户没有权限,改用 sudo(密码)");
                 return Ok(r);
             }
+            last = o.stderr;
         }
     }
-    Err(Problem::NoPermission("当前用户不能运行 docker,sudo 也不可用(需要免密 sudo,或在节点里保存密码)".into()))
+    let msg = sudo_failure(&last, saved, &conn.user);
+    logs::push(logs::Level::Info, &conn.host, format!("Docker:{msg}"));
+    Err(Problem::NoPermission(msg))
+}
+
+/// 把 sudo 失败的输出翻成能照着做的原因。`saved` 是节点里有没有保存密码
+fn sudo_failure(stderr: &str, saved: bool, user: &str) -> String {
+    let low = stderr.to_lowercase();
+    let fix = format!("在服务器上用 root 执行 usermod -aG docker {user} 并重新登录,即可不用 sudo");
+    if low.contains("command not found") || low.contains("未找到命令") || low.contains("not found") {
+        format!("当前用户不能运行 docker,且服务器没有安装 sudo。{fix}")
+    } else if low.contains("not in the sudoers") || low.contains("不在 sudoers") || low.contains("may not run sudo") {
+        format!("当前用户不能运行 docker,且不在 sudoers 里,不能 sudo。{fix}")
+    } else if saved && (low.contains("incorrect password") || low.contains("try again") || low.contains("sorry") || low.contains("密码")) {
+        "当前用户不能运行 docker;sudo 拒绝了节点里保存的密码,请在节点里更新为正确的 sudo 密码".into()
+    } else if !saved {
+        format!("当前用户不能运行 docker,sudo 需要密码但节点里没有保存。可在节点里保存密码,或配置免密 sudo。{fix}")
+    } else {
+        let tail = stderr.trim().lines().last().unwrap_or("").trim();
+        if tail.is_empty() {
+            format!("当前用户不能运行 docker,sudo 也不可用。{fix}")
+        } else {
+            format!("当前用户不能运行 docker,sudo 也失败了:{tail}。{fix}")
+        }
+    }
 }
 
 struct Pollers {
@@ -1486,12 +1536,12 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
     }
     let session = match shared {
         Some(s) => {
-            logs::push(logs::Level::Info, label, "Docker:复用终端的连接");
+            logs::push(logs::Level::Debug, label, "Docker:复用终端的连接");
             s
         }
         None => {
             let s = Arc::new(open_authenticated(conn, io).await?);
-            logs::push(logs::Level::Info, label, "Docker:认证成功");
+            logs::push(logs::Level::Debug, label, "Docker:认证成功");
             s
         }
     };
@@ -1529,8 +1579,9 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
     io.done_step();
     *sh.status.lock().unwrap() = Status::Ready;
     sh.bump();
-    logs::push(logs::Level::Info, label, "Docker 已就绪");
+    logs::push(logs::Level::Debug, label, "Docker 已就绪");
 
+    *sh.sudo.lock().unwrap() = Some(runner.sudo);
     let runner = Arc::new(runner);
     let mut pol = Pollers { last_ps: None, last_stats: None, last_df: None };
     let mut tick = tokio::time::interval(Duration::from_millis(500));
@@ -1942,6 +1993,14 @@ mod tests {
         assert_eq!(uptime_text(&c("running", "Up 2 hours")), "2小时");
         assert_eq!(uptime_text(&c("running", "Up About an hour (healthy)")), "约 1小时");
         assert_eq!(uptime_text(&c("exited", "Exited (0) 1 day ago")), "已退出");
+    }
+
+    #[::core::prelude::v1::test]
+    fn sudo_failure_reasons() {
+        assert!(sudo_failure("-bash: sudo: 未找到命令", true, "scm").contains("没有安装 sudo"));
+        assert!(sudo_failure("scm is not in the sudoers file.", true, "scm").contains("sudoers"));
+        assert!(sudo_failure("Sorry, try again.", true, "scm").contains("拒绝了节点里保存的密码"));
+        assert!(sudo_failure("sudo: a password is required", false, "scm").contains("没有保存"));
     }
 
     #[::core::prelude::v1::test]

@@ -28,7 +28,15 @@ pub struct TerminalConfig {
 
     pub font_size: Pixels,
 
+    /// 回滚缓冲行数,只在创建时生效
     pub scrollback: usize,
+
+    pub cursor_style: crate::render::CursorStyle,
+
+    pub cursor_blink: bool,
+
+    /// 松开鼠标时自动复制选区
+    pub copy_on_select: bool,
 
     pub line_height_multiplier: f32,
 
@@ -48,6 +56,9 @@ impl Default for TerminalConfig {
             font_family: "monospace".into(),
             font_size: px(14.0),
             scrollback: 10000,
+            cursor_style: crate::render::CursorStyle::Block,
+            cursor_blink: false,
+            copy_on_select: true,
             line_height_multiplier: 1.0,
             padding: Edges::all(px(0.0)),
             colors: ColorPalette::default(),
@@ -91,6 +102,7 @@ pub struct TerminalView {
 
     #[allow(dead_code)]
     _reader_task: Task<()>,
+    _blink_task: Task<()>,
 
     resize_callback: Option<Arc<ResizeCallback>>,
 
@@ -142,7 +154,7 @@ impl TerminalView {
 
         let event_proxy = GpuiEventProxy::new(event_tx);
 
-        let state = TerminalState::new(config.cols, config.rows, event_proxy);
+        let state = TerminalState::with_scrollback(config.cols, config.rows, event_proxy, config.scrollback);
 
         let mut renderer = TerminalRenderer::new(
             config.font_family.clone(),
@@ -151,6 +163,8 @@ impl TerminalView {
             config.colors.clone(),
         );
         renderer.highlighter = config.highlighter.clone();
+        renderer.cursor_style = config.cursor_style;
+        renderer.cursor_blink = config.cursor_blink;
 
         let focus_handle = cx.focus_handle().tab_stop(false);
 
@@ -187,7 +201,22 @@ impl TerminalView {
             }
         });
 
+        // 光标闪烁:开着时定时重绘
+        let blink_task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(530)).await;
+                let Ok(_) = this.update(cx, |view: &mut Self, cx: &mut Context<Self>| {
+                    if view.config.cursor_blink {
+                        cx.notify();
+                    }
+                }) else {
+                    break;
+                };
+            }
+        });
+
         Self {
+            _blink_task: blink_task,
             state,
             renderer,
             focus_handle,
@@ -366,7 +395,9 @@ impl TerminalView {
             self.update_selection_endpoint(point);
         }
         self.dragging_selection = false;
-        let _ = self.copy_selection();
+        if self.config.copy_on_select {
+            let _ = self.copy_selection();
+        }
         cx.notify();
     }
 
@@ -484,6 +515,8 @@ impl TerminalView {
         self.renderer.line_height_multiplier = config.line_height_multiplier;
         self.renderer.palette = config.colors.clone();
         self.renderer.highlighter = config.highlighter.clone();
+        self.renderer.cursor_style = config.cursor_style;
+        self.renderer.cursor_blink = config.cursor_blink;
 
         self.config = config;
 

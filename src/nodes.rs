@@ -45,10 +45,11 @@ pub(crate) enum NodesView {
     Keychain,
     KnownHosts,
     Logs,
+    Settings,
 }
 
 impl NodesView {
-    pub(crate) const ALL: [NodesView; 4] = [NodesView::Hosts, NodesView::Keychain, NodesView::KnownHosts, NodesView::Logs];
+    pub(crate) const ALL: [NodesView; 5] = [NodesView::Hosts, NodesView::Keychain, NodesView::KnownHosts, NodesView::Logs, NodesView::Settings];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -56,6 +57,7 @@ impl NodesView {
             NodesView::Keychain => "钥匙串",
             NodesView::KnownHosts => "信任",
             NodesView::Logs => "日志",
+            NodesView::Settings => "设置",
         }
     }
 
@@ -65,6 +67,7 @@ impl NodesView {
             NodesView::Keychain => IconName::KeyRound,
             NodesView::KnownHosts => IconName::ShieldCheck,
             NodesView::Logs => IconName::ScrollText,
+            NodesView::Settings => IconName::Settings,
         }
     }
 }
@@ -294,19 +297,14 @@ impl Home {
                     .child(div().size(px(7.0)).rounded(px(2.0)).bg(rgb(g.color)))
                     .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(g.name.clone()))
             }));
-        let sub = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .flex_shrink_0()
-            .px(px(CONTENT_PAD))
-            .pb(px(10.0))
-            .child(crumbs);
+        // 面包屑放进滚动区,跟列表一起滚走;搜索条和按钮留在上面不动
+        let sub = div().flex().flex_row().items_center().flex_shrink_0().pb(px(10.0)).child(crumbs);
 
         // 卡片网格:放得下几张就分几列,卡片均分剩余宽度
         let avail = f32::from(window.viewport_size().width) - NODES_SIDE_W - CONTENT_PAD * 2.0;
         let cols = (((avail + NODE_CARD_GAP) / (NODE_CARD_MIN_W + NODE_CARD_GAP)).floor() as usize).max(1);
-        let card_w = (avail - NODE_CARD_GAP * (cols - 1) as f32) / cols as f32;
+        // 向下取整:刚好排满一行时,浮点误差会让最后一张换行,右边空出整整一列
+        let card_w = ((avail - NODE_CARD_GAP * (cols - 1) as f32) / cols as f32).floor();
         let grid = |cards: Vec<Stateful<Div>>| div().flex().flex_row().flex_wrap().gap(px(NODE_CARD_GAP)).children(cards);
         let section = |label: &'static str, first: bool| {
             div()
@@ -328,6 +326,7 @@ impl Home {
             .px(px(CONTENT_PAD))
             .pb(px(CONTENT_PAD));
 
+        list = list.child(sub);
         // 根目录且没在搜索/筛选时,先列分组文件夹
         let mut first = true;
         if self.node_group.is_none() && !searching {
@@ -362,7 +361,7 @@ impl Home {
             list = list.child(section(label, first)).child(grid(cards));
         }
 
-        div().flex_1().min_w_0().h_full().flex().flex_col().child(top).child(sub).child(list)
+        div().flex_1().min_w_0().h_full().flex().flex_col().child(top).child(list)
     }
 
     /// 图标块:圆角方块里放图标,Termius 风格
@@ -737,7 +736,8 @@ impl Home {
         Self::card_shell(("node", id.0 as usize).into(), w)
             .group(format!("node-card-{}", id.0))
             .child(Self::os_tile(n.os))
-            .when_some(group.clone(), |d, g| d.child(div().absolute().top(px(7.0)).right(px(12.0)).max_w(px(88.0)).truncate().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(g)))
+            // 分组名在右上角;鼠标移到卡片上时隐藏,免得和编辑按钮叠在一起
+            .when_some(group.clone(), |d, g| d.child(div().absolute().top(px(7.0)).right(px(12.0)).max_w(px(88.0)).group_hover(format!("node-card-{}", id.0), |s| s.opacity(0.0)).truncate().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(g)))
             .child(
                 div()
                     .flex_1()
@@ -778,7 +778,6 @@ impl Home {
                     .group_hover(format!("node-card-{}", id.0), |s| s.opacity(1.0))
                     .hover(|s| s.bg(c::hover()))
                     .child(icon(IconName::Pencil, 14.0, c::muted()))
-                    .tooltip(|_, cx| cx.new(|_| crate::files::Tip("编辑".into())).into())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.open_edit_node(id, window, cx);

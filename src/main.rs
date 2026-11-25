@@ -10,6 +10,8 @@ mod ctl;
 mod ipc;
 mod ipc_server;
 mod platform;
+mod prefs;
+mod leave;
 mod takeover;
 mod daemon_conf;
 mod sysops;
@@ -30,6 +32,7 @@ mod monitor;
 mod node_form;
 mod nodes;
 mod nodes_side;
+mod settings_page;
 mod assets;
 mod osinfo;
 mod pages;
@@ -38,6 +41,7 @@ mod titlebar;
 mod ui;
 mod update;
 mod update_ui;
+mod winstate;
 mod workspace;
 
 use std::rc::Rc;
@@ -82,6 +86,10 @@ impl Page {
     /// 容器相关的页(侧栏的「容器」项下面用页签切换)
     fn is_docker(self) -> bool {
         matches!(self, Page::Containers | Page::Stacks | Page::Images | Page::Volumes | Page::Registry | Page::Config)
+    }
+    /// 整页(页头 + 内容)一起滚动的列表页;配置页有定高的编辑器、堆栈页是虚拟列表,不在其中
+    fn scrolls_whole(self) -> bool {
+        matches!(self, Page::Containers | Page::Images | Page::Volumes | Page::Registry | Page::Processes | Page::Services | Page::Storage | Page::Cron)
     }
     /// 服务器运维页:读 SSH 命令的输出,不依赖 Docker
     fn is_sys(self) -> bool {
@@ -133,8 +141,11 @@ struct Home {
     node_group: Option<usize>,
     /// 节点页卡片右键菜单:(目标, 鼠标位置)
     node_menu: Option<(nodes::NodeMenuTarget, Point<Pixels>)>,
+    /// 鼠标正悬在哪张节点卡的编辑按钮上(那张卡的分组名暂时隐藏)
     /// 待确认删除的分组 id(非空分组)
     group_delete: Option<i64>,
+    logs_clear_ask: bool,
+    settings: settings_page::SettingsUi,
     /// 待确认删除的节点 id
     node_delete: Option<NodeId>,
     /// 新建分组弹窗
@@ -143,6 +154,7 @@ struct Home {
     tab_menu: Option<(usize, Point<Pixels>)>,
     /// 节点页侧栏当前视图
     nodes_view: nodes::NodesView,
+    logs_verbose: bool,
     /// 已知主机视图的缓存(切到该视图或删除后重新读文件)
     known_hosts: Vec<known_hosts::KnownHost>,
     /// 「信任」页的 Agent 授权列表
@@ -163,6 +175,10 @@ struct Home {
     /// 当前每张服务卡片的宽度,用来估算端口能显示几个
     svc_w: f32,
     scroll: VirtualListScrollHandle,
+    /// 整页滚动的页面(容器、镜像等)的滚动句柄,页头滚走后页签吸顶
+    page_scroll: ScrollHandle,
+    /// `page_scroll` 上次属于哪个标签的哪一页;换了就把滚动位置归零(不然别的页滚到哪,这页一进来就是哪)
+    page_scroll_key: Option<(u64, Page)>,
     /// 离屏截图:(输出路径, 已渲染帧数)。仅用于 `--shot`。
     shot: Option<(String, u32)>,
     /// 添加 / 编辑节点弹窗
@@ -175,6 +191,9 @@ struct Home {
     files: files::Files,
     /// 演示模式(mock 数据,不连服务器)
     demo: bool,
+    /// 窗口位置和大小:最近一次写进设置的值,以及是否已有一次延时保存在排队
+    win_saved: Option<String>,
+    win_pending: bool,
     /// 容器模式各页的界面状态和当前快照
     dock: pages::dockerpages::DockUi,
     /// 已经(或正在)探测过系统的节点,同一次运行里不重复探测
@@ -187,6 +206,10 @@ struct Home {
     takeover_prompts: std::collections::VecDeque<takeover::Prompt>,
     /// 等用户确认的提权(sudo 代填)请求
     sudo_prompt: Option<takeover::SudoPrompt>,
+    /// 等用户确认的关闭标签 / 退出
+    leave_ask: Option<leave::LeaveAsk>,
+    /// 上次保存的标签列表(去重用)
+    tabs_saved: Option<String>,
     /// 被结束但 agent 还没得知的接管:(连接 id, 会话 id) → 原因
     takeover_revoked: std::collections::HashMap<(u64, u64), &'static str>,
     /// 持久接管(lease)被结束的原因,按令牌记,下一个带着令牌来的连接能知道
@@ -213,6 +236,14 @@ impl Home {
                 Ok((s, g)) => {
                     files::restore_prefs(&s);
                     terminal::highlight::restore(&s);
+                    terminal::theme::restore(&s);
+                    terminal::ssh::restore_prefs(&s);
+                    prefs::restore(&s);
+                    takeover::restore_prefs(&s);
+                    winstate::set_remember(s.get_setting(winstate::KEY_REMEMBER).as_deref() != Some("off"));
+                    update_ui::restore(&s);
+                    logs::restore(&s);
+                    logs::start_writer();
                     store = Some(s);
                     g
                 }
@@ -242,10 +273,13 @@ impl Home {
             node_group: None,
             node_menu: None,
             group_delete: None,
+            logs_clear_ask: false,
+            settings: Default::default(),
             node_delete: None,
             group_form: None,
             tab_menu: None,
             nodes_view: nodes::NodesView::Hosts,
+            logs_verbose: false,
             known_hosts: Vec::new(),
             grants: Vec::new(),
             keys,
@@ -258,16 +292,22 @@ impl Home {
             cols: 2,
             svc_w: SVC_MIN_W,
             scroll: VirtualListScrollHandle::new(),
+            page_scroll: ScrollHandle::new(),
+            page_scroll_key: None,
             shot: None,
             form: None,
             files: files::Files::new(),
             demo,
+            win_saved: None,
+            win_pending: false,
             dock: pages::dockerpages::DockUi::new(),
             os_probed: Default::default(),
             update: update::State::Idle,
             fstore: files::Store::default(),
             takeover_prompts: Default::default(),
             sudo_prompt: None,
+            leave_ask: None,
+            tabs_saved: None,
             takeover_revoked: Default::default(),
             lease_revoked: Default::default(),
             takeover_focus: None,
@@ -312,8 +352,32 @@ impl Home {
     }
 }
 
+impl Home {
+    /// 窗口位置或大小变了就排一次延时保存(拖动、缩放时每帧都在变,停下 0.6 秒后才写一次)
+    fn track_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.demo || self.store.is_none() || self.win_pending || !winstate::remember() || self.win_saved.as_deref() == Some(winstate::encode(&window.window_bounds()).as_str()) {
+            return;
+        }
+        self.win_pending = true;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(600)).await;
+            let _ = this.update_in(cx, |h, window, _| {
+                h.win_pending = false;
+                let s = winstate::encode(&window.window_bounds());
+                if let Some(st) = &h.store {
+                    let _ = st.set_setting(winstate::KEY, &s);
+                }
+                h.win_saved = Some(s);
+            });
+        })
+        .detach();
+    }
+}
+
 impl Render for Home {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.track_window(window, cx);
+        self.track_tabs();
         if let Some((path, frames)) = &mut self.shot {
             *frames += 1;
             let target: u32 = std::env::var("OTTER_SHOT_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
@@ -339,14 +403,6 @@ impl Render for Home {
         let on_node_tab = matches!(active_kind, Some(workspace::TabKind::Node(_)));
         let is_files_tab = on_node_tab && mode == Some(workspace::NodeMode::Files);
         let body = match active_kind {
-            Some(workspace::TabKind::Terminal { container, .. }) => {
-                let node = self.node();
-                div().flex_1().min_h_0().flex().flex_col().child(self.terminal_view(&node.name, &node.user_host, Some(container)))
-            }
-            Some(workspace::TabKind::Logs { stack, svc, .. }) => {
-                let a = self.workspace.active.unwrap_or(0);
-                div().flex_1().min_h_0().flex().flex_col().child(self.logs_view(a, stack, svc, cx))
-            }
             Some(workspace::TabKind::Node(_)) => match mode {
                 Some(workspace::NodeMode::Terminal) if self.active_term().is_some() => {
                     div().flex_1().min_h_0().flex().flex_col().child(self.ssh_terminal_view(cx))
@@ -365,7 +421,7 @@ impl Render for Home {
         let takeover = self.takeover_overlay(cx);
         let body = div().relative().flex_1().min_h_0().flex().flex_col().child(body).children(overlay).children(takeover);
         let drawer = if is_files_tab { None } else { self.files_drawer(window, cx) };
-        let dialog = self.sudo_prompt_dialog(window, cx).or_else(|| self.takeover_prompt_dialog(cx)).or_else(|| self.node_dialog(window, cx)).or_else(|| self.key_modal_view(window, cx)).or_else(|| self.import_dialog(cx)).or_else(|| self.group_delete_dialog(cx)).or_else(|| self.node_delete_dialog(cx)).or_else(|| self.group_form_dialog(window, cx));
+        let dialog = self.leave_dialog(cx).or_else(|| self.sudo_prompt_dialog(window, cx)).or_else(|| self.takeover_prompt_dialog(cx)).or_else(|| self.node_dialog(window, cx)).or_else(|| self.key_modal_view(window, cx)).or_else(|| self.import_dialog(cx)).or_else(|| self.group_delete_dialog(cx)).or_else(|| self.node_delete_dialog(cx)).or_else(|| self.logs_clear_dialog(cx)).or_else(|| self.group_form_dialog(window, cx));
         // 容器页的抽屉、确认框、提示盖在整个窗口上(含标题栏)
         let dock_layer = if self.dock_visible() { self.dock_overlays(window, cx) } else { Vec::new() };
         div()
@@ -421,8 +477,11 @@ fn main() {
     gpui_kit::application().with_assets(assets::AppAssets).run(move |cx| {
         gpui_kit::init(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+        // 记住的窗口位置和大小(演示/截图模式不读写本地库,用默认)
+        let saved = if demo { None } else { store::Store::open_default().ok().filter(|s| s.get_setting(winstate::KEY_REMEMBER).as_deref() != Some("off")).and_then(|s| s.get_setting(winstate::KEY)) };
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1360.0), px(860.0)), cx))),
+            window_bounds: Some(winstate::initial(saved.as_deref(), cx)),
+            window_min_size: Some(size(px(WINDOW_MIN_W), px(WINDOW_MIN_H))),
             titlebar: Some(TitlebarOptions {
                 title: Some("Otter".into()),
                 appears_transparent: true,
@@ -433,6 +492,27 @@ fn main() {
         gpui_kit::open_window(options, cx, move |window, cx| {
             cx.new(|cx| {
                 let mut h = Home::new(demo);
+                h.logs_verbose = h.store.as_ref().is_some_and(|s| s.get_setting(settings_page::KEY_LOGS_VERBOSE).as_deref() == Some("on"));
+                // ⌘, 打开设置:用全局按键拦截,不依赖当前焦点在哪个元素里
+                let weak: WeakEntity<Home> = cx.entity().downgrade();
+                cx.intercept_keystrokes(move |ev, _, app| {
+                    let m = &ev.keystroke.modifiers;
+                    let accel = if cfg!(target_os = "macos") { m.platform && !m.control } else { m.control && !m.platform };
+                    if ev.keystroke.key == "," && accel && !m.shift && !m.alt {
+                        if let Some(me) = weak.upgrade() {
+                            me.update(app, |this, cx| {
+                                this.activate(0);
+                                this.set_nodes_view(nodes::NodesView::Settings, cx);
+                            });
+                        }
+                        app.stop_propagation();
+                    }
+                })
+                .detach();
+                {
+                    let weak: WeakEntity<Home> = cx.entity().downgrade();
+                    window.on_window_should_close(cx, move |_, app| weak.upgrade().map_or(true, |me| me.update(app, |this, cx| this.request_quit(cx))));
+                }
                 if empty {
                     h.groups = vec![Group { id: 0, name: "未分组".into(), color: 0x7d8ea6, nodes: vec![] }];
                     h.sel = NodeId(0);
@@ -460,18 +540,9 @@ fn main() {
                         match kind {
                             "n" => h.open_node(id, Some(workspace::NodeMode::Containers), window, cx),
                             "t" => {
-                                // t:节点名 = 节点标签的终端模式;t:节点名@堆栈/服务 = 容器终端标签
+                                // t:节点名 = 节点标签的终端模式
                                 h.sel = id;
-                                match ct.and_then(|c| c.split_once('/')) {
-                                    Some((a, b)) => h.open_terminal((a.to_string(), b.to_string()), cx),
-                                    None => h.open_node(id, Some(workspace::NodeMode::Terminal), window, cx),
-                                }
-                            }
-                            "l" => {
-                                h.sel = id;
-                                if let Some((a, b)) = ct.and_then(|c| c.split_once('/')) {
-                                    h.open_logs(a.into(), b.into(), cx);
-                                }
+                                h.open_node(id, Some(workspace::NodeMode::Terminal), window, cx);
                             }
                             "f" => {
                                 // f:节点名 = 节点标签的 SFTP 模式(服务器文件);f:节点名@堆栈/服务 = 同上但指向容器
@@ -502,9 +573,15 @@ fn main() {
                     };
                     h.set_mode(m, window, cx);
                 }
+                if node.is_none() && tabs_arg.is_none() && ssh_arg.is_none() && mode_arg.is_none() {
+                    h.restore_tabs(window, cx);
+                }
                 if let Some(k) = nview {
                     h.activate(0);
-                    h.set_nodes_view(nodes::NodesView::ALL[k.min(3)], cx);
+                    h.set_nodes_view(nodes::NodesView::ALL[k.min(4)], cx);
+                    if let Some(i) = std::env::var("OTTER_SETTINGS_TAB").ok().and_then(|v| v.parse::<usize>().ok()) {
+                        h.settings.tab = settings_page::SettingsTab::ALL[i.min(3)];
+                    }
                     if let Ok(kind) = std::env::var("OTTER_KEY_MODAL") {
                         h.debug_key_modal(&kind, window, cx);
                     }

@@ -11,7 +11,7 @@ pub mod view;
 pub use clipboard::Clipboard;
 pub use colors::{ColorPalette, ColorPaletteBuilder};
 pub use event::{GpuiEventProxy, TerminalEvent};
-pub use render::{Highlighter, TerminalRenderer};
+pub use render::{CursorStyle, Highlighter, TerminalRenderer};
 pub use terminal::{TerminalState, TextSnapshot};
 pub use view::{
     BellCallback, ClipboardStoreCallback, ExitCallback, KeyHandler, ResizeCallback, TerminalConfig,

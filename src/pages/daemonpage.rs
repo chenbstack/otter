@@ -40,9 +40,16 @@ pub(crate) struct ConfUi {
     raw: Option<Entity<EditorState>>,
     /// 读到时的文件内容(规范化后),原始模式用它判断有没有改动
     orig_text: String,
+    /// 表单模式下整页一起滚,保存栏钉在下面:配置页把栏放在这里,`content` 取走
+    pub(crate) bar: Option<AnyElement>,
 }
 
 impl Home {
+    /// 配置页是不是「整页一起滚、保存栏钉在下面」:读到了配置、没出错、不是原始 JSON 模式(编辑器自己定高滚动)
+    pub(crate) fn conf_scrolls_whole(&self) -> bool {
+        self.page == Page::Config && self.dock.conf.loaded && self.dock.conf.err.is_none() && !self.dock.conf.raw_mode
+    }
+
     /// 每次渲染前调用(配置页在前台时):建输入框、请求并接收 daemon.json
     pub(crate) fn conf_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.page != Page::Config {
@@ -303,7 +310,7 @@ impl Home {
                 .children(editor.map(|e| Editor::new(&e).h_full()))
                 .into_any_element()
         } else {
-            div().id("conf-scroll").flex_1().min_h_0().overflow_y_scroll().child(forms).into_any_element()
+            forms.into_any_element()
         };
 
         let info = if saving {
@@ -336,6 +343,11 @@ impl Home {
                 }
             })));
 
+        if !raw_mode {
+            // 表单模式:开关行和表单是页面内容,跟页头一起滚;保存栏钉在下面
+            self.dock.conf.bar = Some(div().pt(px(10.0)).pb(px(14.0)).flex_shrink_0().child(bar).into_any_element());
+            return div().flex().flex_col().gap(px(10.0)).child(mode_row).child(body).into_any_element();
+        }
         div()
             .flex_1()
             .min_h_0()

@@ -60,8 +60,21 @@ impl std::fmt::Debug for Highlighter {
     }
 }
 
+/// 光标形状
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CursorStyle {
+    #[default]
+    Block,
+    Bar,
+    Underline,
+}
+
 #[derive(Clone)]
 pub struct TerminalRenderer {
+    pub cursor_style: CursorStyle,
+    /// 闪烁:按系统时钟每 530ms 切换一次显隐(视图负责定时重绘)
+    pub cursor_blink: bool,
+
     pub font_family: String,
 
     pub font_size: Pixels,
@@ -88,6 +101,8 @@ impl TerminalRenderer {
         let cell_height = font_size * 1.4;
 
         Self {
+            cursor_style: CursorStyle::Block,
+            cursor_blink: false,
             font_family,
             font_size,
             cell_width,
@@ -503,7 +518,8 @@ impl TerminalRenderer {
 
         let cursor_point = grid.cursor.point;
         let visible_cursor_row = cursor_point.line.0 + display_offset;
-        if ime_preedit.is_none() && (0..num_lines as i32).contains(&visible_cursor_row) {
+        let blink_on = !self.cursor_blink || (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis()) / 530) % 2 == 0;
+        if blink_on && ime_preedit.is_none() && (0..num_lines as i32).contains(&visible_cursor_row) {
             let cursor_x = origin.x + self.cell_width * (cursor_point.column.0 as f32);
             let cursor_y = origin.y + self.cell_height * (visible_cursor_row as f32);
 
@@ -517,10 +533,16 @@ impl TerminalRenderer {
                     x: cursor_x,
                     y: cursor_y,
                 },
-                size: Size {
-                    width: self.cell_width,
-                    height: self.cell_height,
+                size: match self.cursor_style {
+                    CursorStyle::Block => Size { width: self.cell_width, height: self.cell_height },
+                    CursorStyle::Bar => Size { width: px(2.0), height: self.cell_height },
+                    CursorStyle::Underline => Size { width: self.cell_width, height: px(2.0) },
                 },
+            };
+            let cursor_bounds = if self.cursor_style == CursorStyle::Underline {
+                Bounds { origin: Point { x: cursor_bounds.origin.x, y: cursor_bounds.origin.y + self.cell_height - px(2.0) }, size: cursor_bounds.size }
+            } else {
+                cursor_bounds
             };
 
             window.paint_quad(quad(

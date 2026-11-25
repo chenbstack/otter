@@ -143,10 +143,15 @@ impl Home {
     }
 
     pub(crate) fn content(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let key = self.workspace.active.map(|a| (self.workspace.tabs[a].id, self.page));
+        if self.page_scroll_key != key {
+            self.page_scroll_key = key;
+            self.page_scroll.set_offset(point(px(0.0), px(0.0)));
+        }
         let width = f32::from(window.viewport_size().width) - MENU_W - CONTENT_PAD * 2.0;
         let inner = width - 2.0 - STACK_BODY_PAD * 2.0;
         self.cols = (((inner + SVC_GAP) / (SVC_MIN_W + SVC_GAP)).floor() as usize).max(1);
-        self.svc_w = (inner - SVC_GAP * (self.cols - 1) as f32) / self.cols as f32;
+        self.svc_w = ((inner - SVC_GAP * (self.cols - 1) as f32) / self.cols as f32).floor();
 
         self.dock.view_w = width;
         let gate = self.docker_gate(cx);
@@ -158,11 +163,10 @@ impl Home {
         } else if self.node().stacks.is_empty() {
             empty_state(IconName::Layers, "还没有堆栈", "这个节点上没有发现 Compose 项目").into_any_element()
         } else {
+            // 页头和页签是列表的第 0 项,跟着一起滚;其余项下标减一
             let sizes: Rc<Vec<Size<Pixels>>> = Rc::new(
-                self.node()
-                    .stacks
-                    .iter()
-                    .map(|s| size(px(800.0), px(self.stack_height(s))))
+                std::iter::once(size(px(800.0), px(STACK_HEAD_H)))
+                    .chain(self.node().stacks.iter().map(|s| size(px(800.0), px(self.stack_height(s)))))
                     .collect(),
             );
             let view = cx.entity();
@@ -172,17 +176,52 @@ impl Home {
                 .flex_1()
                 .min_h_0()
                 .relative()
+                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
                 .child(div().absolute().inset_0().child(
                     v_virtual_list(view, "stacks", sizes, |this, range, _w, cx| {
-                        range.map(|ix| this.stack_card(ix, cx)).collect::<Vec<_>>()
+                        range.map(|ix| if ix == 0 { this.dock_head_block(cx) } else { this.stack_card(ix - 1, cx) }).collect::<Vec<_>>()
                     })
                     .track_scroll(&self.scroll),
                 ))
                 .into_any_element()
         };
 
+        let header = self.dock_head(gated, cx);
+        let head_in_list = self.page == Page::Stacks && !gated && !self.node().stacks.is_empty();
+        let scroll_header = !gated && (self.page == Page::Overview || self.page.scrolls_whole() || self.conf_scrolls_whole());
+
+        let tabs = (self.page.is_docker() && !gated).then(|| self.docker_tabs_slot(cx).into_any_element());
+        let sticky = (!gated && self.dock_stuck()).then(|| self.dock_sticky_bar(window, cx));
+        let inner: Vec<AnyElement> = if head_in_list {
+            vec![body]
+        } else if scroll_header {
+            // 配置页表单模式:保存栏钉在滚动区下面
+            let pinned = if self.page == Page::Config { self.dock.conf.bar.take() } else { None };
+            let mut v = vec![div().id("overview-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.page_scroll).on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify())).flex().flex_col().child(header).children(tabs).child(body).into_any_element()];
+            v.extend(pinned);
+            v
+        } else {
+            vec![header.into_any_element(), tabs.unwrap_or_else(|| div().into_any_element()), body]
+        };
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .px(px(CONTENT_PAD))
+            .relative()
+            // 页头跟着内容一起滚动(列表页整页滚;堆栈页页头是虚拟列表的第一项)
+            .children(inner)
+            .children(sticky)
+    }
+
+    /// 页头:图标、标题、副标题和右侧的操作按钮。`gated` 为真(没连上、没权限等)时不显示操作
+    fn dock_head(&self, gated: bool, cx: &mut Context<Self>) -> Div {
         let hide = self.hide_charts;
-        let header = div()
+        // 吸顶时按钮已经移到顶部那一条里,这里不再画(同一个按钮只画一份)
+        let gated = gated || self.dock_stuck();
+        div()
             .flex()
             .flex_row()
             .items_center()
@@ -225,26 +264,60 @@ impl Home {
                         )
                     })
                     .children(self.dock_header_actions(cx))
-            });
+            })
+    }
 
-        let scroll_header = self.page == Page::Overview && !gated;
+    /// 页头和页签一起,堆栈页放在虚拟列表的第一项里跟着滚动
+    fn dock_head_block(&self, cx: &mut Context<Self>) -> Div {
+        div().h(px(STACK_HEAD_H)).flex().flex_col().child(self.dock_head(false, cx)).child(self.docker_tabs_slot(cx))
+    }
 
-        let tabs = (self.page.is_docker() && !gated).then(|| self.docker_tabs(cx).into_any_element());
-        let inner: Vec<AnyElement> = if scroll_header {
-            vec![div().id("overview-scroll").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().child(header).child(body).into_any_element()]
-        } else {
-            vec![header.into_any_element(), tabs.unwrap_or_else(|| div().into_any_element()), body]
-        };
+    /// 页签在页头下面的位置:吸顶时真正的页签画在顶部,这里留一个同样高的空位,内容不跳
+    fn docker_tabs_slot(&self, cx: &mut Context<Self>) -> Div {
+        if self.dock_stuck() { div().h(px(DOCK_TABS_H)).flex_shrink_0() } else { self.docker_tabs(cx) }
+    }
+
+    /// 页头(图标、标题、副标题)已经滚出去、页签/按钮该吸在顶部了吗。整页滚动的容器、镜像、存储卷、仓库、进程、服务、存储、定时任务页和堆栈页有
+    pub(crate) fn dock_stuck(&self) -> bool {
+        if !(self.page.is_docker() || self.page.is_sys()) || (self.page == Page::Config && !self.conf_scrolls_whole()) {
+            return false;
+        }
+        let h = if self.page == Page::Stacks { self.scroll.base_handle() } else { &self.page_scroll };
+        // 内容没超出高度时滚轮也会把偏移改成负数,实际没有滚动;偏移不能超过可滚动的最大值
+        let off = (-f32::from(h.offset().y)).min(f32::from(h.max_offset().y));
+        off > DOCK_HEAD_H
+    }
+
+    /// 吸顶条:页签 + 页头右侧的按钮/搜索,底是窗口底(底色 + 光晕)按窗口坐标对齐画的一份
+    fn dock_sticky_bar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let vp = window.viewport_size();
+        let bg = div().absolute().left(px(-MENU_W)).top(px(-TITLEBAR_H)).w(vp.width).h(vp.height).child(backdrop());
         div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .px(px(CONTENT_PAD))
-            .relative()
-            // 概览页的页头跟着内容一起滚动,其他页的页头固定在上面
-            .children(inner)
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .overflow_hidden()
+            .bg(c::bg())
+            .child(bg)
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(CONTENT_PAD))
+                    .pt(px(10.0))
+                    .child(if self.page.is_docker() {
+                        self.docker_tabs(cx)
+                    } else {
+                        // 没有页签的页面(进程、服务等):吸顶条左边放页面图标和名字
+                        div().h(px(30.0)).mb(px(10.0)).flex().flex_row().items_center().gap(px(8.0)).child(icon(self.page.icon(), 16.0, c::secondary())).child(div().text_size(px(t::TYPE_TITLE)).font_weight(FontWeight::BOLD).child(self.page.label()))
+                    })
+                    .child(div().flex_1())
+                    .children(self.dock_header_actions(cx)),
+            )
     }
 
     /// 容器相关四个页面的页签:容器 / 堆栈 / 镜像 / 存储卷
@@ -407,12 +480,31 @@ impl Home {
                 for (ci, svc) in row.iter().enumerate() {
                     let target = files::Target::Container { stack: s.name.clone(), svc: svc.name.clone() };
                     let (fst, fsv) = (s.name.clone(), svc.name.clone());
-                    let on_files = cx.listener(move |this, _, window, cx| this.ct_open_stack(&fst, &fsv, &target, window, cx));
+                    let on_files = cx.listener(move |this, _, window, cx| this.ct_open_stack(&fst, &fsv, &target, super::ctpanel::CtTab::Files, window, cx));
+                    let (st, sv, tg) = (s.name.clone(), svc.name.clone(), files::Target::Container { stack: s.name.clone(), svc: svc.name.clone() });
+                    let tg_logs = tg.clone();
+                    let on_term = cx.listener(move |this, _, window, cx| this.ct_open_stack(&st, &sv, &tg, super::ctpanel::CtTab::Term, window, cx));
                     let (st, sv) = (s.name.clone(), svc.name.clone());
-                    let on_term = cx.listener(move |this, _, _, cx| this.open_terminal((st.clone(), sv.clone()), cx));
+                    let on_logs = cx.listener(move |this, _, window, cx| this.ct_open_stack(&st, &sv, &tg_logs, super::ctpanel::CtTab::Logs, window, cx));
                     let (st, sv) = (s.name.clone(), svc.name.clone());
-                    let on_logs = cx.listener(move |this, _, _, cx| this.open_logs(st.clone(), sv.clone(), cx));
-                    r = r.child(service_card(ix * 1000 + ri * 10 + ci, svc, svc_h, self.svc_w, hide, on_files, on_term, on_logs));
+                    let on_toggle = cx.listener(move |this, _, _, cx| {
+                        if let Some((n, up, false)) = this.ct_lookup(&st, &sv) {
+                            this.dock_act(if up { crate::docker::Action::Stop(n) } else { crate::docker::Action::Start(n) }, cx);
+                        }
+                    });
+                    let (st, sv) = (s.name.clone(), svc.name.clone());
+                    let on_restart = cx.listener(move |this, _, _, cx| {
+                        if let Some((n, _, false)) = this.ct_lookup(&st, &sv) {
+                            this.dock_act(crate::docker::Action::Restart(n), cx);
+                        }
+                    });
+                    let (st, sv) = (s.name.clone(), svc.name.clone());
+                    let on_remove = cx.listener(move |this, _, _, cx| {
+                        if let Some((n, _, false)) = this.ct_lookup(&st, &sv) {
+                            this.ask(super::dockerpages::DockAsk { title: "删除容器", tile: IconName::Box, name: n.clone(), detail: "Docker 容器", body: "强制删除,容器内未保存到存储卷的数据会丢失", label: "删除容器", action: crate::docker::Action::Remove(n), list: Vec::new() }, cx);
+                        }
+                    });
+                    r = r.child(service_card(ix * 1000 + ri * 10 + ci, svc, svc_h, self.svc_w, hide, on_files, on_term, on_logs, on_toggle, on_restart, on_remove));
                 }
                 for _ in row.len()..self.cols {
                     r = r.child(div().flex_1());
@@ -462,6 +554,9 @@ pub(crate) fn service_card(
     on_files: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_term: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_logs: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_restart: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_remove: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Div {
     let up = svc.state == Running::Up;
     let metric = |label: &'static str, value: &str, s: &[f32; SPARK_N], color: Rgba| {
@@ -598,7 +693,7 @@ pub(crate) fn service_card(
             .text_color(c::muted())
             .hover(|s| s.bg(c::hover()).text_color(c::text()))
             .child(icon(ic, 14.0, color))
-            .when(!tip.is_empty(), |d| d.child(tip))
+            .tooltip(move |_, cx| cx.new(|_| crate::files::Tip(tip.into())).into())
     };
 
     let actions = div()
@@ -612,12 +707,12 @@ pub(crate) fn service_card(
         .child(ports)
         .child(action(0, IconName::SquareTerminal, c::muted(), "终端").on_click(on_term))
         .child(action(1, IconName::ScrollText, c::muted(), "日志").on_click(on_logs))
-        .child(action(6, IconName::FolderOpen, c::muted(), "").on_click(on_files))
-        .child(action(2, IconName::ExternalLink, c::muted(), ""))
+        .child(action(6, IconName::FolderOpen, c::muted(), "文件").on_click(on_files))
+        .child(action(2, IconName::ExternalLink, c::muted(), "打开"))
         .child(div().w(px(1.0)).h(px(14.0)).mx(px(4.0)).bg(c::border()))
-        .child(action(3, if up { IconName::Square } else { IconName::Play }, c::muted(), ""))
-        .child(action(4, IconName::RefreshCw, c::muted(), ""))
-        .child(action(5, IconName::Trash, c::danger().opacity(0.85), ""));
+        .child(action(3, if up { IconName::Square } else { IconName::Play }, c::muted(), if up { "停止" } else { "启动" }).on_click(on_toggle))
+        .child(action(4, IconName::RefreshCw, c::muted(), "重启").on_click(on_restart))
+        .child(action(5, IconName::Trash, c::danger().opacity(0.85), "删除").on_click(on_remove));
 
     div()
         .flex_1()

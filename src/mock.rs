@@ -1,6 +1,6 @@
 //! 首页用的 mock 数据。全部是确定性生成,没有任何真实连接。
 
-pub const SPARK_N: usize = 12;
+pub const SPARK_N: usize = 24;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Running {

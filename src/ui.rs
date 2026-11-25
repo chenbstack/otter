@@ -425,12 +425,17 @@ pub fn drawer(
 
 /// 独立的描边输入框:左侧图标 + 内容(只靠占位符说明字段,不写标签);聚焦描边变强调色,出错变红。
 pub fn field(ic: IconName, focused: bool, error: bool, content: impl IntoElement) -> Div {
+    field_h(42.0, ic, focused, error, content)
+}
+
+/// 同 `field`,高度可调(设置页等行内控件用 `control.h.md` = 30)
+pub fn field_h(h: f32, ic: IconName, focused: bool, error: bool, content: impl IntoElement) -> Div {
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(10.0))
-        .h(px(42.0))
+        .h(px(h))
         .pl(px(14.0))
         .pr(px(8.0))
         .rounded(px(t::RADIUS_MD))
@@ -595,6 +600,22 @@ pub fn select_with(
     on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
     trailing: Option<AnyElement>,
 ) -> Div {
+    select_sized(42.0, id, ic, items, selected, open, on_toggle, on_pick, on_dismiss, trailing)
+}
+
+/// 同 `select_with`,触发框高度可调;菜单离触发框 4px。
+pub fn select_sized(
+    h: f32,
+    id: &'static str,
+    ic: IconName,
+    items: Vec<MenuItem>,
+    selected: usize,
+    open: bool,
+    on_toggle: impl Fn(&mut Window, &mut App) + 'static,
+    on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
+    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
+    trailing: Option<AnyElement>,
+) -> Div {
     let cur = items.get(selected).cloned().unwrap_or_else(|| MenuItem::new(""));
     let trigger = div()
         .id((id, 0usize))
@@ -611,10 +632,33 @@ pub fn select_with(
         .child(div().flex_1().child(cur.label))
         .child(icon(IconName::ChevronsUpDown, 14.0, c::ghost()))
         .on_click(move |_, window, cx| on_toggle(window, cx));
+    // 菜单往哪边开:每帧在布局时记下触发框下方还剩多少空间,展开时据此判断放得下放不下(放不下又是上方更宽裕就往上开)
+    let need = items.len() as f32 * 36.0 + 8.0 + h + 16.0;
+    let below = SELECT_ROOM.with(|m| m.borrow().get(id).copied()).unwrap_or(f32::MAX);
+    let above = SELECT_ROOM_ABOVE.with(|m| m.borrow().get(id).copied()).unwrap_or(0.0);
+    let side = if below < need && above > below { MenuSide::Above } else { MenuSide::Below };
     div()
         .relative()
-        .child(field(ic, open, false, div().flex_1().min_w_0().flex().flex_row().items_center().gap(px(6.0)).child(trigger).children(trailing)))
-        .when(open, |d| d.child(dropdown_menu(id, items, Some(selected), MenuSide::Below, 46.0, on_pick, on_dismiss)))
+        .child(
+            canvas(
+                move |bounds, window, _| {
+                    let vh = f32::from(window.viewport_size().height);
+                    SELECT_ROOM.with(|m| m.borrow_mut().insert(id, vh - f32::from(bounds.bottom())));
+                    SELECT_ROOM_ABOVE.with(|m| m.borrow_mut().insert(id, f32::from(bounds.top())));
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
+        .child(field_h(h, ic, open, false, div().flex_1().min_w_0().flex().flex_row().items_center().gap(px(6.0)).child(trigger).children(trailing)))
+        .when(open, |d| d.child(dropdown_menu(id, items, Some(selected), side, h + 4.0, on_pick, on_dismiss)))
+}
+
+thread_local! {
+    /// `select_sized` 触发框下方 / 上方到窗口边缘的空间(逻辑像素),按控件 id 记
+    static SELECT_ROOM: std::cell::RefCell<std::collections::HashMap<&'static str, f32>> = Default::default();
+    static SELECT_ROOM_ABOVE: std::cell::RefCell<std::collections::HashMap<&'static str, f32>> = Default::default();
 }
 
 /// 窗口底:墨黑上铺三团光晕(玫红、紫、蓝),各区域的半透明表面叠在它上面。
@@ -672,6 +716,12 @@ pub const MENU_W: f32 = 200.0;
 pub const DROPDOWN_W: f32 = 260.0;
 /// 工具栏「更多」这类紧凑操作菜单的宽度
 pub const DROPDOWN_COMPACT_W: f32 = 148.0;
+/// 窗口最小大小
+pub const WINDOW_MIN_W: f32 = 1100.0;
+pub const WINDOW_MIN_H: f32 = 700.0;
+/// 第一次启动(没有记忆)的默认窗口大小
+pub const WINDOW_DEFAULT_W: f32 = 1360.0;
+pub const WINDOW_DEFAULT_H: f32 = 860.0;
 pub const TITLEBAR_H: f32 = 46.0;
 /// 标题栏里的标签(胶囊)高度,垂直居中
 pub const TAB_H: f32 = 30.0;
@@ -688,15 +738,6 @@ pub const NODE_BAR_H: f32 = 30.0;
 /// 终端字号、终端画布内边距
 pub const TERM_FONT: f32 = 13.0;
 pub const TERM_PAD: f32 = 8.0;
-/// 终端默认前景色,见 `docs/design/tokens.md` 1.9 `terminal.fg`
-pub const TERM_FG: (u8, u8, u8) = (0xB3, 0xAE, 0xDB);
-/// 终端 ANSI 16 色(0–7 普通,8–15 明亮),取值见 `docs/design/tokens.md` 1.9
-pub const TERM_ANSI: [(u8, u8, u8); 16] = [
-    (0x1A, 0x19, 0x23), (0xFF, 0x5C, 0x6C), (0x46, 0xD9, 0xA0), (0xFF, 0xB2, 0x4A),
-    (0x7F, 0x9B, 0xFF), (0xB1, 0x8C, 0xF2), (0x3F, 0xD0, 0xC9), (0xC9, 0xC8, 0xD0),
-    (0x60, 0x5F, 0x6C), (0xFF, 0x8A, 0x96), (0x74, 0xE8, 0xBB), (0xFF, 0xC8, 0x78),
-    (0xA5, 0xB8, 0xFF), (0xC9, 0xAA, 0xFF), (0x6E, 0xE3, 0xDD), (0xF5, 0xF4, 0xF7),
-];
 pub const NODE_CARD_GAP: f32 = 10.0;
 /// 节点页左侧栏宽度
 pub const NODES_SIDE_W: f32 = 184.0;
@@ -704,6 +745,11 @@ pub const CONTENT_PAD: f32 = 20.0;
 
 pub const STACK_HEADER_H: f32 = 50.0;
 pub const STACK_BODY_PAD: f32 = 14.0;
+/// 堆栈页虚拟列表第 0 项(页头 + 页签)的高度
+pub const STACK_HEAD_H: f32 = 124.0;
+/// 容器页页头(图标 + 标题,不含页签)的高度 = 上边距 18 + 图标 36 + 下边距 14;页签行 = 30 + 下边距 10。页头滚出这么多后页签吸顶
+pub const DOCK_HEAD_H: f32 = 68.0;
+pub const DOCK_TABS_H: f32 = 40.0;
 pub const STACK_GAP: f32 = 10.0;
 pub const SVC_GAP: f32 = 12.0;
 pub const SVC_H_CHART: f32 = 180.0;

@@ -12,12 +12,14 @@ use gpui_kit::component::input::{Input, InputState};
 use super::daemonpage::field;
 
 use super::super::*;
-use super::dockerpages::{DockAsk, head, icon_btn, row, small, table};
+use super::dockerpages::{DockAsk, head, icon_btn, row, small, table_flow};
 use crate::docker::Action;
 use crate::sysops::{self, CronInfo, DirSize, Job, Kind, Mount, Proc, Service};
 
 /// 进程列表的刷新间隔
-const PROC_EVERY: Duration = Duration::from_secs(3);
+fn proc_every() -> Duration {
+    Duration::from_secs(crate::prefs::proc_secs())
+}
 /// 发出结束后等多久,进程还在就提供强制结束
 const FORCE_AFTER: Duration = Duration::from_secs(1);
 
@@ -157,7 +159,7 @@ impl Home {
     pub(crate) fn sys_due(&self) -> bool {
         // 刚过了 1 秒的「结束」:重绘一次,把按钮换成强制结束
         let force_now = self.page == Page::Processes && self.dock.sys.killed.values().any(|t| t.elapsed() >= FORCE_AFTER && t.elapsed() < FORCE_AFTER + Duration::from_millis(900));
-        force_now || (self.page == Page::Processes && !self.demo && !self.dock.sys.inflight.contains(&Kind::Procs) && self.dock.sys.asked.get(&Kind::Procs).is_some_and(|t| t.elapsed() >= PROC_EVERY))
+        force_now || (self.page == Page::Processes && !self.demo && !self.dock.sys.inflight.contains(&Kind::Procs) && self.dock.sys.asked.get(&Kind::Procs).is_some_and(|t| t.elapsed() >= proc_every()))
     }
 
     /// 记下刚发出的结束操作(`dock_act` 调用)
@@ -241,7 +243,7 @@ impl Home {
         let idle = !self.dock.sys.inflight.contains(&kind);
         let due = match self.dock.sys.asked.get(&kind) {
             None => true,
-            Some(t) => kind == Kind::Procs && t.elapsed() >= PROC_EVERY,
+            Some(t) => kind == Kind::Procs && t.elapsed() >= proc_every(),
         };
         if idle && due {
             self.sys_ask(kind, script, false);
@@ -325,7 +327,7 @@ impl Home {
     pub(crate) fn sys_subtitle(&self) -> Option<String> {
         let n = &self.node().name;
         match self.page {
-            Page::Processes => Some(format!("{n} 上正在运行的进程,每 3 秒刷新")),
+            Page::Processes => Some(format!("{n} 上正在运行的进程,每 {} 秒刷新", crate::prefs::proc_secs())),
             Page::Services => Some(format!("{n} 上的 systemd 服务")),
             Page::Storage => Some(format!("{n} 的磁盘和挂载点,点一行看里面最大的目录")),
             Page::Cron => Some(format!("{n} 上的 crontab 和 systemd 定时器;只能改自己的 crontab")),
@@ -403,7 +405,7 @@ impl Home {
             return empty_state(IconName::Search, "没有匹配的进程", "换个关键字试试").into_any_element();
         }
         let _ = total;
-        div().flex_1().min_h_0().pb(px(14.0)).flex().flex_col().child(table("ps-list", header, rows)).into_any_element()
+        div().flex_shrink_0().pb(px(14.0)).flex().flex_col().child(table_flow(header, rows)).into_any_element()
     }
 
     // ---- 服务 ----
@@ -503,7 +505,7 @@ impl Home {
             r = if narrow { r.child(div().flex_1()) } else { r.child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(s.desc.clone())) };
             rows.push(r.child(act));
         }
-        div().flex_1().min_h_0().pb(px(14.0)).flex().flex_col().child(table("sv-list", header, rows)).into_any_element()
+        div().flex_shrink_0().pb(px(14.0)).flex().flex_col().child(table_flow(header, rows)).into_any_element()
     }
 
     // ---- 存储 ----
@@ -544,7 +546,7 @@ impl Home {
                     })),
             );
         }
-        let mut col = div().flex_1().min_h_0().pb(px(14.0)).flex().flex_col().gap(px(12.0)).child(table("st-list", header, rows));
+        let mut col = div().flex_shrink_0().pb(px(14.0)).flex().flex_col().gap(px(12.0)).child(table_flow(header, rows));
         if let Some((path, res)) = &self.dock.sys.top {
             let body: AnyElement = match res {
                 None => div().flex_1().flex().items_center().justify_center().text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child("正在统计目录大小,大目录可能要几十秒…").into_any_element(),
@@ -816,10 +818,7 @@ impl Home {
             })
             .collect();
         div()
-            .id("cron-scroll")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
+            .flex_shrink_0()
             .pb(px(14.0))
             .flex()
             .flex_col()

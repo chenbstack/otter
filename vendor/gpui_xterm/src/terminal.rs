@@ -63,7 +63,13 @@ pub struct TerminalState {
 
 impl TerminalState {
     pub fn new(cols: usize, rows: usize, event_proxy: GpuiEventProxy) -> Self {
-        let config = Config::default();
+        Self::with_scrollback(cols, rows, event_proxy, 10000)
+    }
+
+    /// `scrollback`:回滚缓冲保留的行数
+    pub fn with_scrollback(cols: usize, rows: usize, event_proxy: GpuiEventProxy, scrollback: usize) -> Self {
+        let mut config = Config::default();
+        config.scrolling_history = scrollback;
 
         let dimensions = TermDimensions::new(cols, rows);
 

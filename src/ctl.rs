@@ -266,8 +266,6 @@ impl Home {
                 NodeMode::Files => "sftp",
                 NodeMode::Containers => "docker",
             }),
-            TabKind::Terminal { .. } => ("container_terminal", "terminal"),
-            TabKind::Logs { .. } => ("logs", ""),
         };
         let state = t.term.as_ref().map_or("none", |s| state_name(&s.handle.status()));
         json!({

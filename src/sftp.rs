@@ -188,7 +188,7 @@ impl Sftp {
         let sh2 = sh.clone();
         let join = runtime().spawn(async move {
             let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
-            logs::push(logs::Level::Info, &label, "开始连接");
+            logs::push(logs::Level::Debug, &label, "开始连接");
             let io = Io::headless(sh2.host_prompt.clone(), sh2.steps.clone());
             if let Err(e) = session_task(&conn, &label, &io, sh2.clone(), rx, shared).await {
                 logs::push(logs::Level::Error, &label, e.clone());
@@ -334,12 +334,12 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
     }
     let session = match shared {
         Some(s) => {
-            logs::push(logs::Level::Info, label, "复用终端的连接");
+            logs::push(logs::Level::Debug, label, "复用终端的连接");
             s
         }
         None => {
             let s = Arc::new(open_authenticated(conn, io).await?);
-            logs::push(logs::Level::Info, label, "认证成功");
+            logs::push(logs::Level::Debug, label, "认证成功");
             s
         }
     };
@@ -352,7 +352,7 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
     *sh.home.lock().unwrap() = home;
     *sh.session.lock().unwrap() = Some(sftp.clone());
     *sh.status.lock().unwrap() = Status::Ready;
-    logs::push(logs::Level::Info, label, "SFTP 已就绪");
+    logs::push(logs::Level::Debug, label, "SFTP 已就绪");
 
     while let Some(cmd) = rx.recv().await {
         let (sftp, sh) = (sftp.clone(), sh.clone());

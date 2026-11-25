@@ -3,6 +3,7 @@
 pub(crate) mod connecting;
 pub mod highlight;
 pub mod ssh;
+pub mod theme;
 
 use ::gpui::{Animation, AnimationExt as _, Transformation, percentage};
 use std::sync::Arc;
@@ -27,6 +28,8 @@ pub struct TermSession {
     pub activity: Arc<Activity>,
     /// 用户关掉了「连接已断开」浮层(之后只剩右上角的「重新连接」)
     pub overlay_dismissed: bool,
+    /// 最近一次响铃的时间(毫秒,0 = 没响过),视觉响铃据此闪一下
+    pub bell_at: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// 终端的「正在执行」状态,标签栏据此转圈。
@@ -284,6 +287,27 @@ impl Home {
         cx.notify();
     }
 
+    /// 设置页改了字体/字号/主题后,让所有已打开的终端(标签里的和容器抽屉里的)立刻按新偏好重绘
+    pub(crate) fn apply_term_prefs(&mut self, cx: &mut Context<Self>) {
+        let new = term_config();
+        let mut views: Vec<Entity<TerminalView>> = self.workspace.tabs.iter().filter_map(|t| t.term.as_ref().map(|s| s.view.clone())).collect();
+        views.extend(self.ct_term_view());
+        for v in views {
+            let new = new.clone();
+            v.update(cx, |tv, cx| {
+                let mut cfg = tv.config().clone();
+                cfg.font_family = new.font_family;
+                cfg.font_size = new.font_size;
+                cfg.colors = new.colors;
+                cfg.cursor_style = new.cursor_style;
+                cfg.cursor_blink = new.cursor_blink;
+                cfg.copy_on_select = new.copy_on_select;
+                tv.update_config(cfg, cx);
+            });
+        }
+        cx.notify();
+    }
+
     pub(crate) fn active_term(&self) -> Option<&TermSession> {
         self.workspace.active.and_then(|a| self.workspace.tabs[a].term.as_ref())
     }
@@ -295,16 +319,28 @@ impl Home {
         let out = PasteModeScan { inner: out, flag: bracketed_paste.clone(), activity: activity.clone(), tail: Vec::new() };
         let resizer = handle.resizer();
         let inputter = handle.inputter();
-        let cfg = TerminalConfig {
-            font_family: MONO.into(),
-            font_size: px(TERM_FONT),
-            padding: Edges::all(px(TERM_PAD)),
-            colors: term_palette(),
-            highlighter: Some(highlight::highlighter()),
-            ..Default::default()
-        };
+        let cfg = term_config();
+        let bell_at = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let bell_flag = bell_at.clone();
         let view = cx.new(|cx| {
             TerminalView::new(inp, out, cfg, cx)
+                // 响铃:按设置闪一下边框或放系统提示音
+                .with_bell_callback(move |window, cx| match crate::prefs::bell() {
+                    1 => {
+                        bell_flag.store(wall_ms(), Ordering::Relaxed);
+                        window.refresh();
+                        cx.spawn(async move |_, cx| {
+                            cx.background_executor().timer(std::time::Duration::from_millis(BELL_FLASH_MS + 40)).await;
+                            cx.update(|app| app.refresh_windows());
+                        })
+                        .detach();
+                    }
+                    2 => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("afplay").arg("/System/Library/Sounds/Tink.aiff").spawn();
+                    }
+                    _ => {}
+                })
                 .with_resize_callback(move |c, r| {
                     let _ = resizer.send((c as u16, r as u16));
                 })
@@ -351,7 +387,7 @@ impl Home {
             }
         })
         .detach();
-        TermSession { view, handle, conn, bracketed_paste, activity, overlay_dismissed: false }
+        TermSession { view, handle, conn, bracketed_paste, activity, overlay_dismissed: false, bell_at }
     }
 
     /// 重新连接:丢弃旧会话,用同样的连接信息开新会话。
@@ -377,7 +413,13 @@ impl Home {
         if !t.handle.ever_connected() && status != Status::Waiting {
             return self.connecting_view(t.handle.steps(), cx);
         }
-        let closed = matches!(status, Status::Closed(_));
+        self.term_canvas(t, matches!(status, Status::Closed(_)), cx)
+    }
+
+    /// 终端画布(含复制粘贴、高亮开关的快捷键)。`reconnect` 为真时右上角浮出「重新连接」;容器抽屉里的终端不要它。
+    pub(crate) fn term_canvas(&self, t: &TermSession, reconnect: bool, cx: &mut Context<Self>) -> Div {
+        let closed = reconnect;
+        let hl_view = t.view.clone();
         div()
             .flex_1()
             .min_w_0()
@@ -388,7 +430,22 @@ impl Home {
                 let view = t.view.clone();
                 let inputter = t.handle.inputter();
                 let bracketed = t.bracketed_paste.clone();
-                div().size_full().child(t.view.clone()).capture_key_down(move |ev, _, cx| {
+                let inputter_r = t.handle.inputter();
+                let bracketed_r = t.bracketed_paste.clone();
+                let flash = wall_ms().saturating_sub(t.bell_at.load(Ordering::Relaxed)) < BELL_FLASH_MS && t.bell_at.load(Ordering::Relaxed) != 0;
+                div().size_full().relative().child(t.view.clone())
+                // 右键粘贴(设置里开启时)
+                .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                    if !crate::prefs::right_click_paste() {
+                        return;
+                    }
+                    if let Ok(text) = gpui_xterm::Clipboard::new().and_then(|mut c| c.paste()) {
+                        let _ = inputter_r.send(paste_bytes(&text, bracketed_r.load(Ordering::Relaxed)));
+                    }
+                    cx.stop_propagation();
+                })
+                .when(flash, |d| d.child(div().absolute().inset_0().border_2().border_color(c::accent().opacity(0.7)).rounded(px(t::RADIUS_SM))))
+                .capture_key_down(move |ev, _, cx| {
                     let m = &ev.keystroke.modifiers;
                     if !crate::platform::accel(m) {
                         return;
@@ -409,7 +466,7 @@ impl Home {
                     }
                 })
                 // Cmd+Shift+H:开关关键字高亮并记住。目前还没有设置页,先用快捷键
-                .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                .capture_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| {
                     let m = &ev.keystroke.modifiers;
                     if !crate::platform::accel_shift(m) || ev.keystroke.key != "h" {
                         return;
@@ -419,9 +476,7 @@ impl Home {
                     if let Some(st) = this.store.as_ref() {
                         let _ = st.set_setting(highlight::SETTING_KEY, if on { "on" } else { "off" });
                     }
-                    if let Some(view) = this.active_term().map(|t| t.view.clone()) {
-                        view.update(cx, |_, cx| cx.notify());
-                    }
+                    hl_view.update(cx, |_, cx| cx.notify());
                     cx.stop_propagation();
                 }))
             })
@@ -452,13 +507,41 @@ impl Home {
     }
 }
 
-fn term_palette() -> ColorPalette {
-    let a = crate::ui::TERM_ANSI;
-    let b = ColorPalette::builder().background(0x0B, 0x0A, 0x0F).background_alpha(0.0).foreground(crate::ui::TERM_FG.0, crate::ui::TERM_FG.1, crate::ui::TERM_FG.2).cursor(0x8B, 0x80, 0xFF);
+pub(crate) fn term_palette() -> ColorPalette {
+    let th = theme::current();
+    let (a, f, cu) = (th.ansi, th.fg, th.cursor);
+    let b = ColorPalette::builder().background(th.bg.0, th.bg.1, th.bg.2).background_alpha(0.0).foreground(f.0, f.1, f.2).cursor(cu.0, cu.1, cu.2);
     let b = b.black(a[0].0, a[0].1, a[0].2).red(a[1].0, a[1].1, a[1].2).green(a[2].0, a[2].1, a[2].2).yellow(a[3].0, a[3].1, a[3].2);
     let b = b.blue(a[4].0, a[4].1, a[4].2).magenta(a[5].0, a[5].1, a[5].2).cyan(a[6].0, a[6].1, a[6].2).white(a[7].0, a[7].1, a[7].2);
     let b = b.bright_black(a[8].0, a[8].1, a[8].2).bright_red(a[9].0, a[9].1, a[9].2).bright_green(a[10].0, a[10].1, a[10].2).bright_yellow(a[11].0, a[11].1, a[11].2);
     b.bright_blue(a[12].0, a[12].1, a[12].2).bright_magenta(a[13].0, a[13].1, a[13].2).bright_cyan(a[14].0, a[14].1, a[14].2).bright_white(a[15].0, a[15].1, a[15].2).build()
+}
+
+/// 视觉响铃的闪烁时长
+const BELL_FLASH_MS: u64 = 220;
+
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// 当前偏好(字体、字号、主题)对应的终端配置
+pub(crate) fn term_config() -> TerminalConfig {
+    TerminalConfig {
+        font_family: theme::font(),
+        font_size: px(theme::size()),
+        padding: Edges::all(px(TERM_PAD)),
+        colors: term_palette(),
+        highlighter: Some(highlight::highlighter()),
+        scrollback: crate::prefs::scrollback() as usize,
+        cursor_style: match crate::prefs::cursor_style() {
+            1 => gpui_xterm::CursorStyle::Bar,
+            2 => gpui_xterm::CursorStyle::Underline,
+            _ => gpui_xterm::CursorStyle::Block,
+        },
+        cursor_blink: crate::prefs::cursor_blink(),
+        copy_on_select: crate::prefs::copy_on_select(),
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]

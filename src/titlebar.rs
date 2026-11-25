@@ -81,12 +81,6 @@ impl Home {
                     let (g, n) = self.locate(id);
                     let node = &self.groups[g].nodes[n];
                     match &tab.kind {
-                        TabKind::Terminal { container, n, .. } => {
-                            let who = &container.1;
-                            let title = if *n > 1 { format!("{who} · 终端 {n}") } else { format!("{who} · 终端") };
-                            (title, IconName::SquareTerminal)
-                        }
-                        TabKind::Logs { svc, .. } => (format!("{svc} · 日志"), IconName::ScrollText),
                         _ => {
                             // 同一节点开了多个标签(复制出来的)时加序号区分
                             let same: Vec<usize> = (0..self.workspace.tabs.len())
@@ -201,7 +195,7 @@ impl Home {
                             .child(icon(IconName::X, 12.0, c::muted()))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.close_tab(ix, cx);
+                                this.request_close_tab(ix, cx);
                             })),
                     )
                 })
@@ -280,18 +274,18 @@ impl Home {
     /// 标题栏最右侧的更新按钮:发现新版本时出现一个小的下载图标,点一下直接更新。
     fn update_button(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         use crate::update::State;
-        let (ic, color, bg, tip, clickable) = match &self.update {
+        let (ic, color, tip, clickable) = match &self.update {
             State::Idle => return None,
             State::Available(u) => (
                 IconName::Download,
                 c::accent(),
-                c::accent_soft(),
                 if u.asset.is_some() { format!("发现新版本 {},点击更新", u.version) } else { format!("发现新版本 {},点击前往下载", u.version) },
                 true,
             ),
-            State::Downloading(u) => (IconName::LoaderCircle, c::muted(), c::hover(), format!("正在下载 {}…", u.version), false),
-            State::Failed(u, e) => (IconName::Download, c::warn(), c::warn_soft(), format!("更新到 {} 失败:{e}。点击重试", u.version), true),
+            State::Downloading(u) => (IconName::LoaderCircle, c::muted(), format!("正在下载 {}…", u.version), false),
+            State::Failed(u, e) => (IconName::Download, c::warn(), format!("更新到 {} 失败:{e}。点击重试", u.version), true),
         };
+        let downloading = matches!(self.update, State::Downloading(_));
         Some(
             div()
                 .id("update-btn")
@@ -302,8 +296,14 @@ impl Home {
                 .items_center()
                 .justify_center()
                 .rounded(px(t::RADIUS_MD))
-                .bg(bg)
-                .child(icon(ic, 15.0, color))
+                .child(if downloading {
+                    // 下载中:图标转圈,让人看得出在进行
+                    icon(ic, 15.0, color)
+                        .with_animation("update-spin", Animation::new(Duration::from_millis(900)).repeat(), |i, t| i.transform(::gpui::Transformation::rotate(::gpui::percentage(t))))
+                        .into_any_element()
+                } else {
+                    icon(ic, 15.0, color).into_any_element()
+                })
                 .tooltip(move |_, cx| cx.new(|_| crate::files::Tip(tip.clone())).into())
                 .when(clickable, |d| d.cursor_pointer().hover(|s| s.opacity(0.8)).on_click(cx.listener(|this, _, _, cx| this.start_update(cx)))),
         )
@@ -379,7 +379,7 @@ impl Home {
             }))
             .child(item("tab-close-menu", IconName::X, "关闭标签", true).on_click(cx.listener(move |this, _, _, cx| {
                 this.tab_menu = None;
-                this.close_tab(ix, cx);
+                this.request_close_tab(ix, cx);
             })));
         Some(
             div()

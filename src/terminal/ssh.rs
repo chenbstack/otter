@@ -66,6 +66,16 @@ pub struct Conn {
     pub auth: Auth,
     /// 读取已保存的认证信息失败(如系统凭据库不可用);连接时直接报这个错
     pub auth_error: Option<String>,
+    /// 不开登录 shell,而是在 pty 里直接跑这条命令(容器终端的 `docker exec -it`)。这种连接断了不自动重连
+    pub exec: Option<Exec>,
+}
+
+/// pty 里直接执行的命令
+#[derive(Clone, Debug)]
+pub struct Exec {
+    pub command: String,
+    /// 命令启动后先写给它的一行输入(`sudo -S` 要的密码)。命令行里不放密码
+    pub stdin_first: Option<Zeroizing<String>>,
 }
 
 impl Conn {
@@ -81,7 +91,7 @@ impl Conn {
             Some((h, p)) if p.parse::<u16>().is_ok() => (h, p.parse().unwrap()),
             _ => (rest, 22),
         };
-        Conn { host: host.into(), port, user: user.into(), auth: Auth { agent: true, ..Default::default() }, auth_error: None }
+        Conn { host: host.into(), port, user: user.into(), auth: Auth { agent: true, ..Default::default() }, auth_error: None, exec: None }
     }
 }
 
@@ -116,6 +126,44 @@ enum End {
     Lost,
     /// 界面丢弃了句柄
     Dropped,
+}
+
+/// 连接偏好(设置页「连接」):保活间隔、连接超时(秒)、断线自动重连
+static KEEPALIVE_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(15);
+static CONNECT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(15);
+static AUTO_RECONNECT: AtomicBool = AtomicBool::new(true);
+pub const KEY_KEEPALIVE: &str = "ssh_keepalive_secs";
+pub const KEY_CONNECT_TIMEOUT: &str = "ssh_connect_timeout_secs";
+pub const KEY_AUTO_RECONNECT: &str = "ssh_auto_reconnect";
+
+pub fn keepalive_secs() -> u64 {
+    KEEPALIVE_SECS.load(Ordering::Relaxed)
+}
+pub fn set_keepalive_secs(v: u64) {
+    KEEPALIVE_SECS.store(v.clamp(5, 300), Ordering::Relaxed);
+}
+pub fn connect_secs() -> u64 {
+    CONNECT_SECS.load(Ordering::Relaxed)
+}
+pub fn set_connect_secs(v: u64) {
+    CONNECT_SECS.store(v.clamp(5, 300), Ordering::Relaxed);
+}
+pub fn auto_reconnect() -> bool {
+    AUTO_RECONNECT.load(Ordering::Relaxed)
+}
+pub fn set_auto_reconnect(on: bool) {
+    AUTO_RECONNECT.store(on, Ordering::Relaxed);
+}
+
+/// 启动时按记住的设置恢复
+pub fn restore_prefs(st: &crate::store::Store) {
+    if let Some(v) = st.get_setting(KEY_KEEPALIVE).and_then(|v| v.parse().ok()) {
+        set_keepalive_secs(v);
+    }
+    if let Some(v) = st.get_setting(KEY_CONNECT_TIMEOUT).and_then(|v| v.parse().ok()) {
+        set_connect_secs(v);
+    }
+    set_auto_reconnect(st.get_setting(KEY_AUTO_RECONNECT).as_deref() != Some("off"));
 }
 
 /// 自动重连的最多次数和每次之前等待的秒数
@@ -272,7 +320,7 @@ pub fn connect(conn: Conn, cols: usize, rows: usize, activity: Arc<super::Activi
     let join = runtime().spawn(async move {
         let io = Io { out: out_tx, inp: Arc::new(tokio::sync::Mutex::new(in_rx)), status: st.clone(), steps: steps_io, host_prompt: hp_io, ever: ever_io, epoch: epoch_io, link: link_io, activity, pw_override: Arc::new(Mutex::new(None)), save_pw: new_pw_io };
         let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
-        logs::push(logs::Level::Info, &label, "开始连接");
+        logs::push(logs::Level::Debug, &label, "开始连接");
         let size = Arc::new(Mutex::new((cols as u16, rows as u16)));
         let mut rs_rx = rs_rx;
         let mut attempt = 0usize;
@@ -293,7 +341,7 @@ pub fn connect(conn: Conn, cols: usize, rows: usize, activity: Arc<super::Activi
                 Err(e) => e,
             };
             // 没进过 shell、认证/指纹问题、没有可自动使用的认证、次数用完:不再自动重连
-            let retry = io.ever.load(Ordering::Relaxed) && conn.has_saved_auth() && !io.failed_at_auth() && !is_fatal(&lost) && attempt < RECONNECT_DELAYS.len();
+            let retry = auto_reconnect() && io.ever.load(Ordering::Relaxed) && conn.exec.is_none() && conn.has_saved_auth() && !io.failed_at_auth() && !is_fatal(&lost) && attempt < RECONNECT_DELAYS.len();
             if !retry {
                 // 重试用完了:写明次数,界面浮层据此告诉用户「不是没试」
                 let exhausted = attempt >= RECONNECT_DELAYS.len();
@@ -317,7 +365,7 @@ pub fn connect(conn: Conn, cols: usize, rows: usize, activity: Arc<super::Activi
             }
             tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
             io.steps.lock().map(|mut g| g.clear()).ok();
-            logs::push(logs::Level::Info, &label, "开始连接");
+            logs::push(logs::Level::Debug, &label, "开始连接");
         };
         set(&st, Status::Closed(reason));
         // io 在这里释放,Output 读到 0
@@ -524,12 +572,12 @@ pub(crate) fn expand(path: &str) -> PathBuf {
 /// 连接服务器、校验主机密钥、认证,返回已认证的会话(终端和 SFTP 共用)。
 /// 过程会通过 `io` 记录步骤和日志;首次连接的指纹确认走 `io.confirm_host`。
 pub(crate) async fn open_authenticated(conn: &Conn, io: &Io) -> Result<client::Handle<Client>, String> {
-    let config = Arc::new(client::Config { inactivity_timeout: None, keepalive_interval: Some(std::time::Duration::from_secs(15)), ..Default::default() });
+    let config = Arc::new(client::Config { inactivity_timeout: None, keepalive_interval: Some(std::time::Duration::from_secs(keepalive_secs())), ..Default::default() });
     let handler = Client { io: io.clone(), host: conn.host.clone(), port: conn.port };
     let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
     io.begin_step(STEP_LABELS[0]);
-    logs::push(logs::Level::Info, &label, format!("正在连接 {}:{}", conn.host, conn.port));
-    let mut session = tokio::time::timeout(std::time::Duration::from_secs(15), client::connect(config, (conn.host.as_str(), conn.port), handler))
+    logs::push(logs::Level::Debug, &label, format!("正在连接 {}:{}", conn.host, conn.port));
+    let mut session = tokio::time::timeout(std::time::Duration::from_secs(connect_secs()), client::connect(config, (conn.host.as_str(), conn.port), handler))
         .await
         .map_err(|_| "连接超时".to_string())?
         .map_err(|e| match e {
@@ -538,10 +586,10 @@ pub(crate) async fn open_authenticated(conn: &Conn, io: &Io) -> Result<client::H
         })?;
 
     io.done_step();
-    logs::push(logs::Level::Info, &label, "已建立连接,主机密钥校验通过");
+    logs::push(logs::Level::Debug, &label, "已建立连接,主机密钥校验通过");
     io.begin_step(STEP_LABELS[1]);
     logs::push(
-        logs::Level::Info,
+        logs::Level::Debug,
         &label,
         format!("开始认证({})", conn.auth.describe()),
     );
@@ -554,13 +602,25 @@ async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, resize: &mut tokio_mpsc:
     let label = format!("{}@{}:{}", conn.user, conn.host, conn.port);
     let session = Arc::new(open_authenticated(conn, &io).await?);
     io.begin_step(STEP_LABELS[2]);
-    logs::push(logs::Level::Info, &label, "认证成功");
+    logs::push(logs::Level::Debug, &label, "认证成功");
 
     let mut ch = session.channel_open_session().await.map_err(|e| format!("打开会话失败:{e}"))?;
     ch.request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| format!("申请终端失败:{e}"))?;
-    ch.request_shell(true).await.map_err(|e| format!("启动 shell 失败:{e}"))?;
+    match &conn.exec {
+        Some(x) => {
+            ch.exec(true, x.command.as_bytes()).await.map_err(|e| format!("启动命令失败:{e}"))?;
+            if let Some(first) = &x.stdin_first {
+                // 命令开头先 `stty -echo`;稍等它跑完再写,密码才不会回显出来
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                let line = Zeroizing::new(format!("{}\n", first.as_str()));
+                ch.data(line.as_bytes()).await.map_err(|e| e.to_string())?;
+            }
+        }
+        None => ch.request_shell(true).await.map_err(|e| format!("启动 shell 失败:{e}"))?,
+    }
     io.done_step();
-    logs::push(logs::Level::Info, &label, "已打开终端");
+    logs::push(logs::Level::Debug, &label, "已打开终端");
+    logs::push(logs::Level::Info, &label, format!("终端已连接({})", conn.auth.describe()));
     set(&io.status, Status::Connected);
     io.ever.store(true, Ordering::Relaxed);
     io.epoch.fetch_add(1, Ordering::Relaxed);

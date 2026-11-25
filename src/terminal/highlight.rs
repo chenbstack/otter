@@ -8,7 +8,6 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui_xterm::Highlighter;
 
-use crate::ui::TERM_ANSI;
 
 /// 全局开关,设置里切换后下一次重绘生效
 static ENABLED: AtomicBool = AtomicBool::new(true);
@@ -39,7 +38,7 @@ enum Kind {
 }
 
 impl Kind {
-    /// 颜色取自 `TERM_ANSI`(见 tokens.md 1.9)
+    /// 颜色取自当前主题的 ANSI 色(`theme::current()`,默认主题见 tokens.md 1.9)
     fn ansi(self) -> usize {
         match self {
             Kind::Error => 1,  // 红
@@ -96,7 +95,7 @@ fn find(line: &str) -> Vec<(Range<usize>, Kind)> {
 }
 
 fn color(kind: Kind) -> gpui_kit::Hsla {
-    let (r, g, b) = TERM_ANSI[kind.ansi()];
+    let (r, g, b) = super::theme::current().ansi[kind.ansi()];
     gpui_kit::Rgba { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }.into()
 }
 

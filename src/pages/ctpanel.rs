@@ -15,13 +15,16 @@ use crate::ctfiles::{self, CtKind, Level, LogLine};
 use crate::files::Target;
 
 /// 日志刷新间隔
-const LOG_EVERY: Duration = Duration::from_secs(2);
+fn log_every() -> Duration {
+    Duration::from_secs(crate::prefs::ctlog_secs())
+}
 
 #[derive(Clone, Copy, PartialEq, Default)]
 pub(crate) enum CtTab {
     #[default]
     Logs,
     Files,
+    Term,
 }
 
 #[derive(Default)]
@@ -37,9 +40,16 @@ pub(crate) struct CtUi {
     log_asked: Option<Instant>,
     log_inflight: bool,
     demo_opened: bool,
+    /// 终端页的会话:(容器名, 会话)。关抽屉、换容器、离开 Docker 页即丢弃(断开连接)
+    term: Option<(String, crate::terminal::TermSession)>,
 }
 
 impl Home {
+    /// 抽屉里终端会话的视图(没开则为空)
+    pub(crate) fn ct_term_view(&self) -> Option<Entity<gpui_xterm::TerminalView>> {
+        self.dock.ct.term.as_ref().map(|(_, t)| t.view.clone())
+    }
+
     fn ct_docker(&self) -> Option<&crate::docker::Docker> {
         self.workspace.active.and_then(|i| self.workspace.tabs.get(i)).and_then(|t| t.docker.as_ref())
     }
@@ -51,11 +61,15 @@ impl Home {
             ct.paused = false;
             ct.log_asked = None;
             ct.log_inflight = false;
+            ct.term = None;
         }
         self.dock.ct.open = Some((name.clone(), running));
         self.dock.ct.tab = tab;
         if tab == CtTab::Files {
-            self.open_files(Target::Container { stack: String::new(), svc: name }, window, cx);
+            self.open_files(Target::Container { stack: String::new(), svc: name.clone() }, window, cx);
+        }
+        if tab == CtTab::Term {
+            self.ct_start_term(&name, running, window, cx);
         }
         if self.dock.ct.search.is_none() {
             let s = cx.new(|cx| InputState::new(window, cx).placeholder("搜索日志"));
@@ -65,17 +79,41 @@ impl Home {
         cx.notify();
     }
 
-    /// 堆栈卡片上的「文件」:找到对应的容器,在抽屉的文件页打开
-    pub(crate) fn ct_open_stack(&mut self, stack: &str, svc: &str, target: &Target, window: &mut Window, cx: &mut Context<Self>) {
-        let found = self.dock.snap.containers.iter().find(|c| c.project.as_deref() == Some(stack) && c.service.as_deref() == Some(svc)).or_else(|| self.dock.snap.containers.iter().find(|c| c.name == svc)).map(|c| (c.name.clone(), c.running()));
-        match found {
-            Some((n, up)) => self.ct_open(n, up, CtTab::Files, window, cx),
-            None => self.open_files(target.clone(), window, cx),
+    /// 终端页:没有会话、或上一个会话已经结束时,新开一条 `docker exec -it`。容器没运行、Docker 还没就绪就不开
+    fn ct_start_term(&mut self, name: &str, running: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let alive = self.dock.ct.term.as_ref().is_some_and(|(n, t)| n == name && !matches!(t.handle.status(), crate::terminal::ssh::Status::Closed(_)));
+        if alive {
+            return;
+        }
+        self.dock.ct.term = None;
+        if !running {
+            return;
+        }
+        let Some(node) = self.workspace.active.and_then(|i| self.workspace.tabs.get(i)).and_then(|t| t.node()) else { return };
+        let base = self.conn_for(node);
+        let Some(conn) = self.ct_docker().and_then(|d| d.exec_conn(base, name)) else { return };
+        let session = self.start_session(conn, window, cx);
+        self.dock.ct.term = Some((name.to_string(), session));
+    }
+
+    /// 堆栈卡片上的服务对应哪个真实容器:(容器名, 是否在运行, 是否面板管理的只读容器)
+    pub(crate) fn ct_lookup(&self, stack: &str, svc: &str) -> Option<(String, bool, bool)> {
+        let cs = &self.dock.snap.containers;
+        cs.iter().find(|c| c.project.as_deref() == Some(stack) && c.service.as_deref() == Some(svc)).or_else(|| cs.iter().find(|c| c.name == svc)).map(|c| (c.name.clone(), c.running(), c.panel.is_some()))
+    }
+
+    /// 堆栈卡片上的「文件」「终端」:找到对应的容器,在抽屉的对应页打开
+    pub(crate) fn ct_open_stack(&mut self, stack: &str, svc: &str, target: &Target, tab: CtTab, window: &mut Window, cx: &mut Context<Self>) {
+        match self.ct_lookup(stack, svc) {
+            Some((n, up, _)) => self.ct_open(n, up, tab, window, cx),
+            None if tab == CtTab::Files => self.open_files(target.clone(), window, cx),
+            None => {}
         }
     }
 
     fn ct_close(&mut self, cx: &mut Context<Self>) {
         self.dock.ct.open = None;
+        self.dock.ct.term = None;
         self.files.open = false;
         cx.notify();
     }
@@ -92,6 +130,7 @@ impl Home {
         }
         let Some((name, _)) = self.dock.ct.open.clone() else { return };
         if !self.page.is_docker() {
+            self.dock.ct.term = None;
             return;
         }
         let up = self.dock.snap.containers.iter().find(|c| c.name == name).map(|c| c.running());
@@ -114,7 +153,7 @@ impl Home {
                 self.dock.ct.lines = Some(res.map(|t| ctfiles::parse_logs(&t)));
             }
         }
-        if !self.dock.ct.log_inflight && self.dock.ct.log_asked.is_none_or(|t| t.elapsed() >= LOG_EVERY) {
+        if !self.dock.ct.log_inflight && self.dock.ct.log_asked.is_none_or(|t| t.elapsed() >= log_every()) {
             self.dock.ct.log_asked = Some(Instant::now());
             self.dock.ct.log_inflight = true;
             let args = ["logs", "--tail", "500", "-t", &name].into_iter().map(String::from).collect();
@@ -126,7 +165,7 @@ impl Home {
 
     /// 日志抽屉在前台、过了刷新间隔:需要重绘来触发下一次读取
     pub(crate) fn ct_due(&self) -> bool {
-        self.dock.ct.open.is_some() && self.dock.ct.tab == CtTab::Logs && !self.demo && !self.dock.ct.log_inflight && self.dock.ct.log_asked.is_some_and(|t| t.elapsed() >= LOG_EVERY)
+        self.dock.ct.open.is_some() && self.dock.ct.tab == CtTab::Logs && !self.demo && !self.dock.ct.log_inflight && self.dock.ct.log_asked.is_some_and(|t| t.elapsed() >= log_every())
     }
 
     /// 抽屉本体(只在容器、堆栈这些 Docker 页上显示),遮罩铺满整个窗口(含标题栏),点遮罩关闭
@@ -159,13 +198,39 @@ impl Home {
                     this.ct_open(n, up, CtTab::Files, window, cx);
                 }
             })))
+            .child(chip(("ct-tab", 2), "终端", tab == CtTab::Term).on_click(cx.listener(|this, _, window, cx| {
+                if let Some((n, up)) = this.dock.ct.open.clone() {
+                    this.ct_open(n, up, CtTab::Term, window, cx);
+                }
+            })))
             .child(div().flex_1())
             .child(tip(icon_btn(("ct-close", 0), IconName::X, c::muted()).on_click(cx.listener(|this, _, _, cx| this.ct_close(cx))), "关闭"));
         let body = match tab {
             CtTab::Logs => self.ct_logs(cx),
             CtTab::Files => self.files_embedded(window, cx, w),
+            CtTab::Term => self.ct_term(cx),
         };
         Some(crate::ui::drawer("ct-drawer", w, cx.listener(|this, _, _, cx| this.ct_close(cx)), [header.into_any_element(), body]).into_any_element())
+    }
+
+    fn ct_term(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::terminal::ssh::Status;
+        let running = self.dock.ct.open.as_ref().is_some_and(|o| o.1);
+        if !running {
+            return ct_note_view(IconName::SquareTerminal, "容器没有运行", "先启动容器,再打开终端");
+        }
+        let Some((_, t)) = self.dock.ct.term.as_ref() else {
+            return ct_note_view(IconName::SquareTerminal, "暂时不能打开终端", "Docker 还没有就绪,稍后再点「终端」重试");
+        };
+        let status = t.handle.status();
+        if !t.handle.ever_connected() && status != Status::Waiting {
+            return match status {
+                Status::Closed(Some(e)) => ct_note_view(IconName::SquareTerminal, "终端连接失败", e),
+                Status::Closed(None) => ct_note_view(IconName::SquareTerminal, "终端已关闭", "点上方的「终端」重新打开"),
+                _ => ct_note_view(IconName::SquareTerminal, "正在连接…", "新开一条 SSH 连接并进入容器"),
+            };
+        }
+        div().flex_1().min_h_0().flex().flex_col().child(self.term_canvas(t, false, cx)).into_any_element()
     }
 
     fn ct_logs(&self, cx: &mut Context<Self>) -> AnyElement {
