@@ -11,6 +11,41 @@ pub enum DbKind {
     Redis,
 }
 
+/// 取 Redis 密码的脚本片段(结果放在 `$p`):环境变量 → 启动参数 `--requirepass` → 配置文件里的 `requirepass`
+/// (配置文件取启动参数里的 `*.conf`,否则试几个常见位置)。只在容器里执行,结果留在内存里
+macro_rules! redis_pw_script {
+    () => {
+        concat!(
+            r#"p="${REDIS_PASSWORD:-}"; "#,
+            r#"[ -z "$p" ] && p=$(tr '\0' '\n' </proc/1/cmdline | sed -n '/^--requirepass$/{n;p;}'); "#,
+            r#"if [ -z "$p" ]; then for f in $(tr '\0' '\n' </proc/1/cmdline | grep '\.conf$') /etc/redis/redis.conf /usr/local/etc/redis/redis.conf /data/redis.conf /redis.conf; do "#,
+            r#"[ -r "$f" ] && p=$(sed -n 's/^[[:space:]]*requirepass[[:space:]][[:space:]]*//p' "$f" | head -n1 | sed 's/^"\(.*\)"$/\1/'); [ -n "$p" ] && break; done; fi; "#
+        )
+    };
+}
+
+/// 取 PostgreSQL 管理员账号密码的脚本片段(结果放在 `$u`、`$p`):环境变量(含 `*_FILE` 密钥文件)→ `~/.pgpass`
+macro_rules! pg_pw_script {
+    () => {
+        concat!(
+            r#"u="${POSTGRES_USER:-${POSTGRESQL_USERNAME:-postgres}}"; p="${POSTGRES_PASSWORD:-${POSTGRESQL_PASSWORD:-${POSTGRESQL_POSTGRES_PASSWORD:-}}}"; "#,
+            r#"if [ -z "$p" ]; then for f in "$POSTGRES_PASSWORD_FILE" "$POSTGRESQL_PASSWORD_FILE" "$POSTGRESQL_POSTGRES_PASSWORD_FILE"; do [ -n "$f" ] && [ -r "$f" ] && p=$(head -n1 "$f") && [ -n "$p" ] && break; done; fi; "#,
+            r#"if [ -z "$p" ]; then for f in "$HOME/.pgpass" /root/.pgpass /var/lib/postgresql/.pgpass; do [ -r "$f" ] && p=$(sed -n '1{s/^\([^:]*:\)\{4\}//;p;}' "$f") && [ -n "$p" ] && break; done; fi; "#
+        )
+    };
+}
+
+/// 取 MySQL/MariaDB root 密码的脚本片段(结果放在 `$p`):环境变量(含 `*_FILE` 密钥文件)→ `~/.my.cnf` 里的 `password=`
+macro_rules! my_pw_script {
+    () => {
+        concat!(
+            r#"p="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}"; "#,
+            r#"if [ -z "$p" ]; then for f in "$MYSQL_ROOT_PASSWORD_FILE" "$MARIADB_ROOT_PASSWORD_FILE"; do [ -n "$f" ] && [ -r "$f" ] && p=$(head -n1 "$f") && [ -n "$p" ] && break; done; fi; "#,
+            r#"if [ -z "$p" ]; then for f in "$HOME/.my.cnf" /root/.my.cnf; do [ -r "$f" ] && p=$(sed -n 's/^[[:space:]]*password[[:space:]]*=[[:space:]]*//p' "$f" | head -n1 | sed "s/^[\"']\(.*\)[\"']\$/\1/") && [ -n "$p" ] && break; done; fi; "#
+        )
+    };
+}
+
 impl DbKind {
     pub fn label(self) -> &'static str {
         match self {
@@ -119,12 +154,12 @@ impl DbKind {
     fn client_script(self) -> &'static str {
         match self {
             DbKind::Postgres => {
-                r#"u="${POSTGRES_USER:-${POSTGRESQL_USERNAME:-postgres}}"; p="${POSTGRES_PASSWORD:-${POSTGRESQL_PASSWORD:-${POSTGRESQL_POSTGRES_PASSWORD:-}}}"; [ -n "$p" ] && export PGPASSWORD="$p"; exec psql -X -q -A -t -F "$(printf '\t')" -v ON_ERROR_STOP=1 -U "$u" -d postgres"#
+                concat!(pg_pw_script!(), r#"[ -n "$p" ] && export PGPASSWORD="$p"; exec psql -X -q -A -t -F "$(printf '\t')" -v ON_ERROR_STOP=1 -U "$u" -d postgres"#)
             }
             DbKind::Mysql | DbKind::Mariadb => {
-                r#"p="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}"; [ -n "$p" ] && export MYSQL_PWD="$p"; c=$(command -v mariadb || command -v mysql) || { echo "容器里没有 mysql 客户端" >&2; exit 1; }; exec "$c" -uroot -B -N"#
+                concat!(my_pw_script!(), r#"[ -n "$p" ] && export MYSQL_PWD="$p"; c=$(command -v mariadb || command -v mysql) || { echo "容器里没有 mysql 客户端" >&2; exit 1; }; exec "$c" -uroot -B -N"#)
             }
-            DbKind::Redis => r#"[ -n "$REDIS_PASSWORD" ] && export REDISCLI_AUTH="$REDIS_PASSWORD"; exec redis-cli"#,
+            DbKind::Redis => concat!(redis_pw_script!(), r#"[ -n "$p" ] && export REDISCLI_AUTH="$p"; exec redis-cli"#),
         }
     }
 
@@ -141,6 +176,17 @@ impl DbKind {
             DbKind::Redis => return None,
         };
         Some(["exec", container, "sh", "-c", script].map(String::from).to_vec())
+    }
+
+    /// 读连接信息(两行:用户名、密码)的脚本,取自容器自己的环境变量。只在「连接信息」弹窗打开时执行,
+    /// 结果只放在内存里给界面显示,不写日志、不经过 agent;Redis 没有用户名(第一行为空)
+    pub fn conn_args(self, container: &str) -> Vec<String> {
+        let script = match self {
+            DbKind::Postgres => concat!(pg_pw_script!(), r#"printf '%s\n%s' "$u" "$p""#),
+            DbKind::Mysql | DbKind::Mariadb => concat!(my_pw_script!(), r#"printf 'root\n%s' "$p""#),
+            DbKind::Redis => concat!(redis_pw_script!(), r#"printf '\n%s' "$p""#),
+        };
+        ["exec", container, "sh", "-c", script].map(String::from).to_vec()
     }
 
     pub fn is_sql(self) -> bool {
@@ -396,12 +442,38 @@ pub struct RedisInfo {
     pub memory: String,
     pub clients: String,
     pub uptime_days: String,
+    pub role: String,
+    pub mode: String,
+    pub max_memory: String,
+    pub peak_memory: String,
+    pub ops: String,
+    pub commands: String,
+    pub hits: u64,
+    pub misses: u64,
+    pub expired: String,
+    pub evicted: String,
     /// (库名如 db0, key 数)
     pub keys: Vec<(String, u64)>,
 }
 
+/// `INFO` 没拿到数据(要密码 / 密码不对)时给人看得懂的话
+pub fn redis_check(out: &str) -> Result<(), String> {
+    if out.contains("redis_version:") {
+        return Ok(());
+    }
+    let l = out.trim();
+    if l.contains("NOAUTH") || l.contains("WRONGPASS") || l.contains("invalid password") {
+        Err("Redis 需要密码,但没能从容器环境变量或启动参数里取到(可能是从别处加载的)".into())
+    } else if l.is_empty() {
+        Err("没有读到 Redis 信息".into())
+    } else {
+        Err(l.lines().next().unwrap_or(l).to_string())
+    }
+}
+
 /// 解析 `redis-cli` 里 `INFO` 的输出(`key:value`,每行一项;`dbN:keys=3,expires=0,avg_ttl=0`)
 pub fn parse_redis(out: &str) -> RedisInfo {
+    // (调用方先用 `redis_check` 判断是不是正常输出)
     let mut r = RedisInfo::default();
     for l in out.lines() {
         let Some((k, v)) = l.trim().split_once(':') else { continue };
@@ -410,6 +482,16 @@ pub fn parse_redis(out: &str) -> RedisInfo {
             "used_memory_human" => r.memory = v.to_string(),
             "connected_clients" => r.clients = v.to_string(),
             "uptime_in_days" => r.uptime_days = v.to_string(),
+            "role" => r.role = v.to_string(),
+            "redis_mode" => r.mode = v.to_string(),
+            "maxmemory_human" => r.max_memory = v.to_string(),
+            "used_memory_peak_human" => r.peak_memory = v.to_string(),
+            "instantaneous_ops_per_sec" => r.ops = v.to_string(),
+            "total_commands_processed" => r.commands = v.to_string(),
+            "keyspace_hits" => r.hits = v.parse().unwrap_or(0),
+            "keyspace_misses" => r.misses = v.parse().unwrap_or(0),
+            "expired_keys" => r.expired = v.to_string(),
+            "evicted_keys" => r.evicted = v.to_string(),
             _ if k.starts_with("db") && k[2..].chars().all(|c| c.is_ascii_digit()) && k.len() > 2 => {
                 let n = v.split(',').find_map(|p| p.strip_prefix("keys=")).and_then(|n| n.parse().ok()).unwrap_or(0);
                 r.keys.push((k.to_string(), n));
@@ -421,6 +503,70 @@ pub fn parse_redis(out: &str) -> RedisInfo {
 }
 
 /// 把容器里客户端的报错换成人看得懂的话
+/// 数据库进程还在启动/初始化(刚安装完、刚重启):连不上不算失败,过几秒会好
+/// URI 里的用户名/密码要转义:只保留字母数字和 `-._~`,其余按 UTF-8 字节写成 `%XX`
+fn pct(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+/// 连接串:`postgresql://用户:密码@主机:端口`、`mysql://…`、`redis://:密码@主机:端口`。`pw` 为空就不带密码;
+/// 主机是 IPv6 地址时加方括号。`mask` 为 true 时密码位置写成 `••••`(只用于界面显示,复制用 false)
+pub fn conn_uri(kind: DbKind, user: &str, pw: &str, host: &str, port: &str, mask: bool) -> String {
+    let scheme = match kind {
+        DbKind::Postgres => "postgresql",
+        DbKind::Mysql | DbKind::Mariadb => "mysql",
+        DbKind::Redis => "redis",
+    };
+    let pwd = if pw.is_empty() { String::new() } else if mask { "••••".to_string() } else { pct(pw) };
+    let auth = match (user.is_empty(), pwd.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => format!(":{pwd}@"),
+        (false, true) => format!("{}@", pct(user)),
+        (false, false) => format!("{}:{pwd}@", pct(user)),
+    };
+    let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host.to_string() };
+    format!("{scheme}://{auth}{host}:{port}")
+}
+
+/// 服务器上列出本机 IPv4 地址的脚本(一行一个,跳过 docker/虚拟网卡)
+pub const ADDR_SCRIPT: &str = r#"ip -o -4 addr show scope global 2>/dev/null | awk '$2 !~ /^(docker|br-|veth|cni|flannel|virbr|lo)/ {print $4}' | cut -d/ -f1"#;
+
+/// 私有地址(10/8、172.16/12、192.168/16)和运营商级 NAT(100.64/10)
+pub fn is_private_v4(ip: &str) -> bool {
+    let p: Vec<u8> = ip.split('.').filter_map(|x| x.parse().ok()).collect();
+    p.len() == 4 && (p[0] == 10 || (p[0] == 172 && (16..=31).contains(&p[1])) || (p[0] == 192 && p[1] == 168) || (p[0] == 100 && (64..=127).contains(&p[1])))
+}
+
+/// 把地址列表分成 (内网, 公网);非 IPv4 的行忽略。`node_host` 是节点的连接地址:公网 IP 或域名也算公网地址
+pub fn classify_addrs(out: &str, node_host: &str) -> (Vec<String>, Vec<String>) {
+    let (mut private, mut public) = (Vec::new(), Vec::new());
+    let mut add = |ip: &str| {
+        let ip = ip.trim();
+        if ip.split('.').count() != 4 || ip.split('.').any(|x| x.parse::<u8>().is_err()) || ip.starts_with("127.") {
+            return;
+        }
+        let list = if is_private_v4(ip) { &mut private } else { &mut public };
+        if !list.iter().any(|x| x == ip) {
+            list.push(ip.to_string());
+        }
+    };
+    out.lines().for_each(&mut add);
+    // 节点地址本身:是公网 IP 就算(云服务器的弹性公网 IP 不在网卡上);是域名也算公网
+    let h = node_host.trim();
+    let is_ip = h.split('.').count() == 4 && h.split('.').all(|x| x.parse::<u8>().is_ok());
+    if is_ip {
+        add(h);
+    } else if !h.is_empty() && !h.contains(':') && !public.iter().any(|x| x == h) {
+        public.push(h.to_string());
+    }
+    (private, public)
+}
+
+pub fn is_starting(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    ["can't connect to local", "connection refused", "starting up", "is the server running", "lost connection to mysql server", "closed the connection unexpectedly", "could not connect to server", "loading the dataset"].iter().any(|k| m.contains(k))
+}
+
 pub fn friendly_error(kind: DbKind, msg: &str) -> String {
     let m = msg.to_lowercase();
     if m.contains("is not running") || m.contains("not running") {
@@ -596,5 +742,48 @@ mod tests {
         assert!(DbKind::Postgres.create_db_with_user_sql("a;b", "u", "pw", false, "").is_err());
         assert!(DbKind::Postgres.create_db_with_user_sql("a", "u", "pw", false, "x\u{7}y").is_err());
         assert!(DbKind::Redis.create_db_with_user_sql("a", "u", "pw", false, "").is_err());
+    }
+
+    #[test]
+    fn starting_errors_are_recognized() {
+        assert!(is_starting("ERROR 2002 (HY000): Can't connect to local MySQL server through socket '/var/run/mysqld/mysqld.sock' (2)"));
+        assert!(is_starting("psql: error: connection to server on socket failed: FATAL:  the database system is starting up"));
+        assert!(!is_starting("ERROR 1045 (28000): Access denied for user 'root'"));
+    }
+
+    #[test]
+    fn conn_uri_escapes_and_masks() {
+        assert_eq!(conn_uri(DbKind::Postgres, "postgres", "a/b:c@d", "10.0.0.1", "5432", false), "postgresql://postgres:a%2Fb%3Ac%40d@10.0.0.1:5432");
+        assert_eq!(conn_uri(DbKind::Mysql, "root", "pw", "h", "3306", true), "mysql://root:••••@h:3306");
+        assert_eq!(conn_uri(DbKind::Redis, "", "pw", "::1", "6379", false), "redis://:pw@[::1]:6379");
+        assert_eq!(conn_uri(DbKind::Redis, "", "", "h", "6379", false), "redis://h:6379");
+    }
+
+    #[test]
+    fn scripts_have_valid_shell_syntax() {
+        for k in [DbKind::Postgres, DbKind::Mysql, DbKind::Redis] {
+            for args in [Some(k.exec_args("c")), Some(k.conn_args("c"))].into_iter().flatten() {
+                let script = args.last().unwrap();
+                let ok = std::process::Command::new("sh").arg("-n").arg("-c").arg(script).status().unwrap().success();
+                assert!(ok, "{k:?}: {script}");
+            }
+        }
+        if let Ok(dir) = std::env::var("OTTER_DUMP_SCRIPTS") {
+            for (n, k) in [("pg", DbKind::Postgres), ("my", DbKind::Mysql)] {
+                std::fs::write(format!("{dir}/{n}.sh"), k.conn_args("c").last().unwrap()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn classifies_addresses() {
+        let (pri, publ) = classify_addrs("192.168.139.242\n10.0.0.5\n8.8.4.4\n172.17.0.1\nbad\n", "203.0.113.9");
+        assert_eq!(pri, ["192.168.139.242", "10.0.0.5", "172.17.0.1"]);
+        assert_eq!(publ, ["8.8.4.4", "203.0.113.9"]);
+        let (pri, publ) = classify_addrs("", "db.example.com");
+        assert!(pri.is_empty());
+        assert_eq!(publ, ["db.example.com"]);
+        // 节点地址是本机回环(如 OrbStack 的 127.0.0.1)不算
+        assert!(classify_addrs("", "127.0.0.1").1.is_empty());
     }
 }

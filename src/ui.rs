@@ -498,7 +498,7 @@ pub fn dropdown_menu(
     on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
     on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Deferred {
-    dropdown_menu_impl(id, items, selected, side, offset, false, MENU_MAX_H, on_pick, on_dismiss)
+    dropdown_menu_impl(id, items, selected, side, offset, false, MENU_MAX_H, None, on_pick, on_dismiss)
 }
 
 /// 紧凑版下拉菜单:行更矮、字号和图标更小,用于工具栏里的「更多」这类操作菜单。
@@ -511,7 +511,7 @@ pub fn dropdown_menu_compact(
     on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
     on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Deferred {
-    dropdown_menu_impl(id, items, selected, side, offset, true, MENU_MAX_H, on_pick, on_dismiss)
+    dropdown_menu_impl(id, items, selected, side, offset, true, MENU_MAX_H, None, on_pick, on_dismiss)
 }
 
 /// 下拉菜单的最大高度:选项再多也不超过它,超出的在菜单里滚动
@@ -525,10 +525,14 @@ fn dropdown_menu_impl(
     offset: f32,
     compact: bool,
     max_h: f32,
+    // 面板顶部固定的一行(搜索框);有它时列表单独滚动,它不跟着滚
+    header: Option<AnyElement>,
     on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
     on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Deferred {
     let on_pick = std::rc::Rc::new(on_pick);
+    let has_header = header.is_some();
+    let empty_list = items.is_empty();
     let menu = div()
         .id(id)
         .absolute()
@@ -538,7 +542,7 @@ fn dropdown_menu_impl(
         .when(matches!(side, MenuSide::Above), |d| d.bottom(px(offset)))
         .p(px(if compact { 3.0 } else { 4.0 }))
         .max_h(px(max_h))
-        .overflow_y_scroll()
+        .when(!has_header, |d| d.overflow_y_scroll())
         .flex()
         .flex_col()
         .gap(px(2.0))
@@ -548,8 +552,8 @@ fn dropdown_menu_impl(
         .border_color(c::dialog_border())
         .shadow_lg()
         .occlude()
-        .on_mouse_down_out(move |_, window, cx| on_dismiss(window, cx))
-        .children(items.into_iter().enumerate().map(|(i, it)| {
+        .on_mouse_down_out(move |_, window, cx| on_dismiss(window, cx));
+    let rows = items.into_iter().enumerate().map(|(i, it)| {
             let pick = on_pick.clone();
             div()
                 .id((id, i + 1))
@@ -578,7 +582,21 @@ fn dropdown_menu_impl(
                 )
                 .when(selected == Some(i), |d| d.child(icon(IconName::Check, 13.0, c::accent())))
                 .on_click(move |_, window, cx| pick(i, window, cx))
-        }));
+        });
+    let menu = match header {
+        None => menu.children(rows),
+        Some(h) => menu.child(h).child(
+            div()
+                .id((id, 100_000usize))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .max_h(px((max_h - 52.0).max(80.0)))
+                .overflow_y_scroll()
+                .children(rows)
+                .when(empty_list, |d| d.child(div().h(px(36.0)).px(px(12.0)).flex().items_center().text_size(px(t::TYPE_BODY)).text_color(c::ghost()).child("没有匹配的选项"))),
+        ),
+    };
     deferred(menu).with_priority(1)
 }
 
@@ -625,6 +643,41 @@ pub fn select_sized(
     on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
     trailing: Option<AnyElement>,
 ) -> Div {
+    select_impl(h, id, ic, items, selected, open, on_toggle, on_pick, on_dismiss, trailing, None)
+}
+
+/// 带搜索的下拉:展开后面板顶部固定一个搜索框,下面的选项按输入实时过滤(不分大小写,匹配标签或副标题)。
+/// `search` 是 (搜索框状态, 当前输入),输入由调用方在渲染时读出来传入;`on_pick` 收到的始终是**原 `items` 里的序号**。
+/// 调用方要在 `on_toggle` 展开时清空搜索框并聚焦它(`set_value("")` + `window.focus`)。
+pub fn select_search(
+    h: f32,
+    id: &'static str,
+    ic: IconName,
+    items: Vec<MenuItem>,
+    selected: usize,
+    open: bool,
+    search: (Entity<gpui_kit::component::input::InputState>, String),
+    on_toggle: impl Fn(&mut Window, &mut App) + 'static,
+    on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
+    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
+    trailing: Option<AnyElement>,
+) -> Div {
+    select_impl(h, id, ic, items, selected, open, on_toggle, on_pick, on_dismiss, trailing, Some(search))
+}
+
+fn select_impl(
+    h: f32,
+    id: &'static str,
+    ic: IconName,
+    items: Vec<MenuItem>,
+    selected: usize,
+    open: bool,
+    on_toggle: impl Fn(&mut Window, &mut App) + 'static,
+    on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
+    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
+    trailing: Option<AnyElement>,
+    search: Option<(Entity<gpui_kit::component::input::InputState>, String)>,
+) -> Div {
     let cur = items.get(selected).cloned().unwrap_or_else(|| MenuItem::new(""));
     let trigger = div()
         .id((id, 0usize))
@@ -665,7 +718,32 @@ pub fn select_sized(
         .when(open, |d| {
             let room = if matches!(side, MenuSide::Below) { below } else { above };
             let max_h = (room - (h + 4.0) - 16.0).clamp(120.0, MENU_MAX_H);
-            d.child(dropdown_menu_impl(id, items, Some(selected), side, h + 4.0, true, max_h, on_pick, on_dismiss))
+            match search {
+                None => d.child(dropdown_menu_impl(id, items, Some(selected), side, h + 4.0, true, max_h, None, on_pick, on_dismiss)),
+                Some((input, q)) => {
+                    use gpui_kit::component::input::Input;
+                    use gpui_kit::component::Sizable as _;
+                    let q = q.trim().to_lowercase();
+                    let map: Vec<usize> = items.iter().enumerate().filter(|(_, it)| q.is_empty() || it.label.to_lowercase().contains(&q) || it.sub.as_ref().is_some_and(|s| s.to_lowercase().contains(&q))).map(|(i, _)| i).collect();
+                    let shown: Vec<MenuItem> = map.iter().map(|&i| items[i].clone()).collect();
+                    let sel = map.iter().position(|&i| i == selected);
+                    let header = div()
+                        .h(px(34.0))
+                        .flex_shrink_0()
+                        .px(px(10.0))
+                        .mb(px(2.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .rounded(px(t::RADIUS_MD))
+                        .bg(c::field())
+                        .child(icon(IconName::Search, 14.0, c::ghost()))
+                        .child(div().flex_1().min_w_0().child(Input::new(&input).appearance(false).with_size(px(12.0 / 0.875))))
+                        .into_any_element();
+                    d.child(dropdown_menu_impl(id, shown, sel, side, h + 4.0, true, max_h, Some(header), move |pos, window, cx| on_pick(map.get(pos).copied().unwrap_or(0), window, cx), on_dismiss))
+                }
+            }
         })
 }
 

@@ -812,7 +812,9 @@ impl Home {
             .cursor_pointer()
             .hover(|s| s.opacity(0.88))
             .when(creating, |d| d.opacity(0.6))
-            .child(if creating { "创建中…" } else { "创建" })
+            .gap(px(8.0))
+            .when(creating, |d| d.child(crate::ui::dot_spinner(("create-ok-spin", 0), c::on_accent())))
+            .child(if creating { "创建中" } else { "创建" })
             .on_click(cx.listener(|this, _, _, cx| this.create_submit(cx)));
         let foot = div()
             .flex_shrink_0()

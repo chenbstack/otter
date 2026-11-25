@@ -202,13 +202,13 @@ fn ver_key(tag: &str) -> Option<Vec<u32>> {
     (1..=3).contains(&parts.len()).then_some(parts)
 }
 
-/// 从 Docker Hub 的 tags 接口响应里挑出稳定版本号(纯数字,不带 -alpine 等后缀),新的在前,最多 24 个。解析不出来返回 None
+/// 从 Docker Hub 的 tags 接口响应里挑出稳定版本号(纯数字,不带 -alpine 等后缀),新的在前,最多 60 个。解析不出来返回 None
 pub fn parse_tags(json: &str) -> Option<Vec<String>> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let mut tags: Vec<(Vec<u32>, String)> = v.get("results")?.as_array()?.iter().filter_map(|r| r.get("name")?.as_str()).filter_map(|n| ver_key(n).map(|k| (k, n.to_string()))).collect();
     tags.sort_by(|a, b| b.0.cmp(&a.0));
     tags.dedup_by(|a, b| a.1 == b.1);
-    let list: Vec<String> = tags.into_iter().take(24).map(|t| t.1).collect();
+    let list: Vec<String> = tags.into_iter().take(60).map(|t| t.1).collect();
     (!list.is_empty()).then_some(list)
 }
 

@@ -16,6 +16,8 @@ pub(crate) struct DbInstallUi {
     version: usize,
     ver_open: bool,
     ver_custom: Option<Entity<InputState>>,
+    /// 版本下拉展开时顶部的搜索框
+    ver_search: Option<Entity<InputState>>,
     public: bool,
     project: Option<Entity<InputState>>,
     container: Option<Entity<InputState>>,
@@ -69,6 +71,8 @@ impl Home {
         if self.dock.dbi.project.is_none() {
             let vc = mk("如 17.5-alpine", window, cx);
             self.dock.dbi.ver_custom = Some(vc);
+            let vs = mk("搜索版本,如 8.4", window, cx);
+            self.dock.dbi.ver_search = Some(vs);
             let (cp, me) = (mk("不限制", window, cx), mk("不限制", window, cx));
             self.dock.dbi.cpus = Some(cp);
             self.dock.dbi.memory = Some(me);
@@ -88,9 +92,9 @@ impl Home {
         u.error = None;
         u.public = false;
         u.kind = kind;
-        u.version = 0;
         u.ver_open = false;
         u.last_project.clear();
+        self.dock.dbi.version = self.dbi_default_version(kind);
         self.dbi_fill(window, cx);
         self.dbi_reset_limits(window, cx);
         if let Some(p) = self.dock.dbi.password.clone() {
@@ -98,6 +102,20 @@ impl Home {
         }
         self.dbi_fetch_tags(self.dock.dbi.kind, cx);
         cx.notify();
+    }
+
+    /// MySQL、MariaDB 默认选长期支持版(MySQL 8.4、MariaDB 11.8,即官方镜像 `lts` 标签指向的版本);最新的 MySQL 9.x/26.x、MariaDB 12.x/13.x 是滚动或创新版,不适合默认装生产库。其他取最新
+    fn default_version_in(k: usize, list: &[String]) -> usize {
+        let lts = match k {
+            1 => "8.4",
+            2 => "11.8",
+            _ => return 0,
+        };
+        list.iter().position(|v| v == lts).unwrap_or(0)
+    }
+
+    fn dbi_default_version(&self, k: usize) -> usize {
+        self.dock.dbi.tags.get(&k).map(|t| Self::default_version_in(k, &t.0)).unwrap_or(0)
     }
 
     /// 这个类型的版本列表:取到的真实列表,没取到(加载中或失败)是空的
@@ -138,7 +156,8 @@ impl Home {
             return;
         }
         if u.kind == k {
-            u.version = 0;
+            // MySQL 默认选长期支持版 8.4(最新的 9.x、26.x 是创新版,不适合默认装生产库);其他取最新
+            u.version = Self::default_version_in(k, &list);
         }
         u.tags.insert(k, (list, from));
         cx.notify();
@@ -348,7 +367,7 @@ impl Home {
                 super::syspages::chip(("dbi-kind", i), KINDS[i].label(), u.kind == i).on_click(cx.listener(move |this, _, window, cx| {
                     if this.dock.dbi.kind != i {
                         this.dock.dbi.kind = i;
-                        this.dock.dbi.version = 0;
+                        this.dock.dbi.version = this.dbi_default_version(i);
                         this.dbi_fill(window, cx);
                         this.dbi_fetch_tags(i, cx);
                         cx.notify();
@@ -367,21 +386,28 @@ impl Home {
             items.push(crate::ui::MenuItem::new("自定义版本号…"));
         }
         let (t1, t2, t3) = (cx.entity(), cx.entity(), cx.entity());
-        let select = crate::ui::select_sized(
-            34.0,
-            "dbi-ver",
-            IconName::Tag,
-            items,
-            if loading { 0 } else { u.version.min(vers.len()) },
-            u.ver_open && !loading,
-            move |_, cx| t1.update(cx, |h, cx| {
+        let search = u.ver_search.clone().map(|i| {
+            let q = i.read(cx).value().to_string();
+            (i, q)
+        });
+        let ver_toggle = move |window: &mut Window, cx: &mut App| {
+            t1.update(cx, |h, cx| {
                 let k = h.dock.dbi.kind;
                 if h.dock.dbi.tags.contains_key(&k) || h.dock.dbi.tag_fail.contains(&k) {
                     h.dock.dbi.ver_open = !h.dock.dbi.ver_open;
+                    if h.dock.dbi.ver_open {
+                        if let Some(s) = h.dock.dbi.ver_search.clone() {
+                            s.update(cx, |s, cx| s.set_value("", window, cx));
+                            let f = s.focus_handle(cx);
+                            window.focus(&f, cx);
+                        }
+                    }
                     cx.notify();
                 }
-            }),
-            move |i, window, cx| t2.update(cx, |h, cx| {
+            })
+        };
+        let ver_pick = move |i: usize, window: &mut Window, cx: &mut App| {
+            t2.update(cx, |h, cx| {
                 h.dock.dbi.version = i;
                 h.dock.dbi.ver_open = false;
                 if i >= h.dbi_versions(h.dock.dbi.kind).len() {
@@ -391,13 +417,20 @@ impl Home {
                     }
                 }
                 cx.notify();
-            }),
-            move |_, cx| t3.update(cx, |h, cx| {
+            })
+        };
+        let ver_dismiss = move |_: &mut Window, cx: &mut App| {
+            t3.update(cx, |h, cx| {
                 h.dock.dbi.ver_open = false;
                 cx.notify();
-            }),
-            loading.then(|| crate::ui::dot_spinner(("dbi-ver-load", 0), c::muted()).into_any_element()),
-        );
+            })
+        };
+        let spin = loading.then(|| crate::ui::dot_spinner(("dbi-ver-load", 0), c::muted()).into_any_element());
+        let (cur, open) = (if loading { 0 } else { u.version.min(vers.len()) }, u.ver_open && !loading);
+        let select = match search {
+            Some(sq) => crate::ui::select_search(34.0, "dbi-ver", IconName::Tag, items, cur, open, sq, ver_toggle, ver_pick, ver_dismiss, spin),
+            None => crate::ui::select_sized(34.0, "dbi-ver", IconName::Tag, items, cur, open, move |w, cx| ver_toggle(w, cx), ver_pick, ver_dismiss, spin),
+        };
         let ver_col = div().flex_1().min_w_0().flex().flex_col().gap(px(6.0)).child(label("版本")).child(div().h(px(34.0)).child(select));
         let src_note = match u.tags.get(&u.kind) {
             Some(t) => format!("版本列表来自{}的 Docker Hub", t.1),
@@ -582,7 +615,9 @@ impl Home {
             .cursor_pointer()
             .hover(|s| s.opacity(0.88))
             .when(creating, |d| d.opacity(0.6))
-            .child(if creating { "安装中…" } else { "安装" })
+            .gap(px(8.0))
+            .when(creating, |d| d.child(crate::ui::dot_spinner(("dbi-ok-spin", 0), c::on_accent())))
+            .child(if creating { "安装中" } else { "安装" })
             .on_click(cx.listener(|this, _, _, cx| this.dbi_submit(cx)));
         let foot = div()
             .flex_shrink_0()

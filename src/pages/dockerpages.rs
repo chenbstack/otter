@@ -254,7 +254,7 @@ impl Home {
         if !self.dock_visible() {
             return;
         }
-        let mut redraw = self.sys_due() || self.ct_due();
+        let mut redraw = self.sys_due() || self.ct_due() || (self.page == Page::Database && self.dbm_retry_due());
         // 点击后至少转 PENDING_MIN_MS,之后后台不再「进行中」就撤掉;兜底 PENDING_MAX_SECS
         if !self.dock.pending.is_empty() {
             let d = self.workspace.active.and_then(|a| self.workspace.tabs.get(a)).and_then(|t| t.docker.as_ref());
@@ -635,7 +635,8 @@ impl Home {
                         );
                     }
                 }
-                None => v.push(button("db-install", IconName::Plus, "安装数据库").on_click(cx.listener(|this, _, window, cx| this.dbi_open(window, cx))).into_any_element()),
+                // 没有实例时,「安装数据库」放在页面中间的空状态里(见 `database_page`)
+                None => {}
             }
         }
         if self.page == Page::Stacks {
