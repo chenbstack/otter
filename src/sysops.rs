@@ -9,8 +9,6 @@ pub enum Kind {
     Services,
     Storage,
     Cron,
-    /// 某个目录下最大的子目录
-    Top,
     /// 堆栈的 compose 文件内容
     ComposeFile,
     /// 堆栈的 env 文件内容
@@ -45,9 +43,36 @@ pub fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// 目录下一层子目录的占用,大的在前
-pub fn top_script(path: &str) -> String {
-    format!("du -xk --max-depth=1 {} 2>/dev/null | sort -rn | head -16", quote(path))
+/// 空间透镜:统计一个目录往下 `depth` 层的占用。`$1` 是目录(由调用方作为参数传入,不拼进脚本)。
+/// `nice`/`ionice` 有就用,降低对服务器的影响;`-x` 不跨文件系统;无权限的报错丢掉。
+/// `du` 是后序输出:一个目录的行出现,说明它整棵子树统计完了。
+pub fn lens_script(depth: u32) -> String {
+    format!("n=; command -v nice >/dev/null 2>&1 && n='nice -n 19'; command -v ionice >/dev/null 2>&1 && n=\"$n ionice -c3\"; $n du -xk -d{depth} -- \"$1\" 2>/dev/null; s=$?; $n find \"$1\" -xdev -maxdepth {depth} -type f -size +1024k -exec du -k -- {{}} + 2>/dev/null | sed 's/^/F:/'; exit $s")
+}
+
+/// 完整的 exec 命令:`sh -c <脚本> sh <目录>`
+pub fn lens_command(path: &str, depth: u32) -> String {
+    format!("sh -c {} sh {}", quote(&lens_script(depth)), quote(path))
+}
+
+/// 透镜扫描过程中从后台送给界面的事件
+#[derive(Clone, Debug, PartialEq)]
+pub enum LensEv {
+    /// 新统计完的目录:(KiB, 完整路径)
+    Lines { scan: u64, lines: Vec<(u64, String, bool)> },
+    /// 扫描结束:出错的原因,或用户主动停止
+    Done { scan: u64, err: Option<String>, stopped: bool },
+}
+
+/// 解析一行:`KiB<TAB>路径` 是目录;`F:KiB<TAB>路径` 是 ≥1 MiB 的文件(`du` 只列目录,文件由脚本里的 `find` 补)
+pub fn parse_lens_line(line: &str) -> Option<(u64, String, bool)> {
+    let (line, file) = match line.strip_prefix("F:") {
+        Some(r) => (r, true),
+        None => (line, false),
+    };
+    let (n, p) = line.split_once('\t')?;
+    let p = p.trim_end_matches('\r');
+    if p.is_empty() { None } else { Some((n.trim().parse().ok()?, p.to_string(), file)) }
 }
 
 /// systemd 单元名:只允许这些字符,避免拼进 shell 命令时出事
@@ -210,23 +235,6 @@ pub fn parse_storage(text: &str) -> Result<Vec<Mount>, String> {
     }
     out.sort_by(|a, b| a.mount.cmp(&b.mount));
     Ok(out)
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct DirSize {
-    pub kb: u64,
-    pub path: String,
-}
-
-pub fn parse_top(text: &str) -> Result<Vec<DirSize>, String> {
-    let out: Vec<DirSize> = text
-        .lines()
-        .filter_map(|l| {
-            let (n, p) = l.split_once(char::is_whitespace)?;
-            Some(DirSize { kb: n.parse().ok()?, path: p.trim().to_string() })
-        })
-        .collect();
-    if out.is_empty() { Err("没有读到目录大小".into()) } else { Ok(out) }
 }
 
 // ---- 计划任务 ----
@@ -455,10 +463,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_top_dirs() {
-        let d = parse_top("5000\t/var\n3000\t/var/lib\n10\t/var/tmp\n").unwrap();
-        assert_eq!(d[1], DirSize { kb: 3000, path: "/var/lib".into() });
-        assert!(parse_top("").is_err());
+    fn parses_lens_lines() {
+        assert_eq!(parse_lens_line("3000\t/var/lib"), Some((3000, "/var/lib".into(), false)));
+        assert_eq!(parse_lens_line("F:2048\t/var/big.log"), Some((2048, "/var/big.log".into(), true)));
+        assert_eq!(parse_lens_line("12\t/a b/c\r"), Some((12, "/a b/c".into(), false)));
+        assert_eq!(parse_lens_line("du: cannot read"), None);
+        assert_eq!(parse_lens_line("x\t/a"), None);
+        assert_eq!(parse_lens_line("5\t"), None);
+    }
+
+    #[test]
+    fn lens_command_quotes_the_path() {
+        let c = lens_command("/a b'c", 3);
+        assert!(c.starts_with("sh -c '") && c.ends_with(" sh '/a b'\\''c'"));
+        assert!(c.contains("du -xk -d3 -- "));
+        // 路径只作为参数,不出现在脚本里
+        assert!(!lens_script(3).contains("a b"));
     }
 
     #[test]
@@ -512,6 +532,5 @@ mod tests {
         assert!(safe_unit("nginx") && safe_unit("getty@tty1") && !safe_unit("a b") && !safe_unit("-x") && !safe_unit("a;b"));
         assert_eq!(fmt_kb(1024), "1.0 MB");
         assert_eq!(fmt_kb(50 * 1024 * 1024), "50.0 GB");
-        assert_eq!(top_script("/a b'c"), "du -xk --max-depth=1 '/a b'\\''c' 2>/dev/null | sort -rn | head -16");
     }
 }

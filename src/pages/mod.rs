@@ -12,3 +12,4 @@ pub mod registrypage;
 pub mod syspages;
 pub mod ctpanel;
 pub mod composeedit;
+pub mod spacelens;

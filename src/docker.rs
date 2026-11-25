@@ -580,6 +580,8 @@ enum Cmd {
     LoginHttp { registry: String, user: String, pass: zeroize::Zeroizing<String> },
     /// 运维页读一份数据(进程、服务……),结果用 `sys_take` 取
     Sys { kind: crate::sysops::Kind, script: String, root: bool },
+    /// 空间透镜:流式统计一个目录往下 depth 层的占用
+    Lens { path: String, depth: u32, scan: u64 },
     /// 容器抽屉读一份数据(日志、目录列表、文件内容),结果用 `ct_take` 取;`tag` 原样带回,界面靠它认出这是哪次请求
     Ct { kind: crate::ctfiles::CtKind, tag: String, args: Vec<String>, merge: bool },
     /// 数据库页:在数据库容器里 `docker exec` 一段脚本,SQL 等从 stdin 传入(密码只放在这里,不进命令行);结果用 `db_take` 按 `tag` 取
@@ -612,6 +614,10 @@ struct Shared {
     registries: Mutex<Option<Result<Vec<RegAuth>, String>>>,
     /// 运维页读到的原始输出,按种类存放;界面取走后清空
     sys: Mutex<HashMap<crate::sysops::Kind, Result<String, String>>>,
+    /// 空间透镜的事件队列,界面用 `lens_take` 取
+    lens_ev: Mutex<Vec<crate::sysops::LensEv>>,
+    /// 编号不大于它的扫描应当停止
+    lens_stop: std::sync::atomic::AtomicU64,
     /// 容器抽屉读到的内容:(请求的标签, 输出),按种类存放;界面取走后清空
     ct: Mutex<HashMap<crate::ctfiles::CtKind, (String, Result<String, String>)>>,
     /// 数据库页执行的结果,键是请求的 `tag`;界面取走后清空
@@ -687,6 +693,8 @@ impl Docker {
             daemon: Mutex::new(None),
             registries: Mutex::new(None),
             sys: Mutex::new(HashMap::new()),
+            lens_ev: Mutex::new(Vec::new()),
+            lens_stop: std::sync::atomic::AtomicU64::new(0),
             ct: Mutex::new(HashMap::new()),
             db: Mutex::new(HashMap::new()),
             fetch: Mutex::new(HashMap::new()),
@@ -853,6 +861,20 @@ impl Docker {
 
     pub fn db_take(&self, tag: &str) -> Option<Result<String, String>> {
         self.sh.db.lock().ok().and_then(|mut m| m.remove(tag))
+    }
+
+    /// 开始一次透镜扫描(编号 `scan` 由界面递增分配);结果用 `lens_take` 取
+    pub fn lens_scan(&self, path: &str, depth: u32, scan: u64) {
+        let _ = self.cmd.send(Cmd::Lens { path: path.to_string(), depth, scan });
+    }
+
+    /// 停止编号不大于 `scan` 的扫描
+    pub fn lens_stop(&self, scan: u64) {
+        self.sh.lens_stop.fetch_max(scan, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn lens_take(&self) -> Vec<crate::sysops::LensEv> {
+        self.sh.lens_ev.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
     }
 
     pub fn sys_take(&self, kind: crate::sysops::Kind) -> Option<Result<String, String>> {
@@ -1552,6 +1574,61 @@ async fn ctfs_list(r: &Runner, name: &str, sh: &crate::sftp::Shared, path: &str)
     crate::sftp::set_dir(sh, path, state);
 }
 
+/// 空间透镜:`du` 边跑边读,每攒够一批(或隔 150ms)就送一批给界面。
+/// 没有超时上限;停止时关掉通道,服务器端的 du 随连接断开结束。
+async fn lens_run(r: &Runner, sh: &Shared, path: &str, depth: u32, scan: u64) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let stopped = || sh.lens_stop.load(SeqCst) >= scan;
+    let push = |ev: crate::sysops::LensEv| {
+        sh.lens_ev.lock().unwrap().push(ev);
+        sh.bump();
+    };
+    let mut ch = match r.session.channel_open_session().await {
+        Ok(c) => c,
+        Err(e) => return push(crate::sysops::LensEv::Done { scan, err: Some(format!("打开通道失败:{e}")), stopped: false }),
+    };
+    if let Err(e) = ch.exec(true, crate::sysops::lens_command(path, depth)).await {
+        return push(crate::sysops::LensEv::Done { scan, err: Some(format!("执行失败:{e}")), stopped: false });
+    }
+    let (mut buf, mut batch, mut last, mut got) = (Vec::<u8>::new(), Vec::new(), Instant::now(), false);
+    let mut err = None;
+    loop {
+        if stopped() {
+            let _ = ch.close().await;
+            break;
+        }
+        // 每秒醒一次检查是否被停止
+        let msg = match tokio::time::timeout(Duration::from_secs(1), ch.wait()).await {
+            Err(_) => continue,
+            Ok(None) => break,
+            Ok(Some(m)) => m,
+        };
+        match msg {
+            ChannelMsg::Data { data } => {
+                buf.extend_from_slice(&data);
+                while let Some(i) = buf.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = buf.drain(..=i).collect();
+                    if let Some(x) = crate::sysops::parse_lens_line(String::from_utf8_lossy(&line).trim_end_matches('\n')) {
+                        got = true;
+                        batch.push(x);
+                    }
+                }
+                if !batch.is_empty() && (batch.len() >= 500 || last.elapsed() >= Duration::from_millis(150)) {
+                    last = Instant::now();
+                    push(crate::sysops::LensEv::Lines { scan, lines: std::mem::take(&mut batch) });
+                }
+            }
+            ChannelMsg::ExitStatus { exit_status } if exit_status != 0 && !got => err = Some("读取目录失败(没有权限,或目录不存在)".to_string()),
+            ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    if !batch.is_empty() {
+        push(crate::sysops::LensEv::Lines { scan, lines: batch });
+    }
+    push(crate::sysops::LensEv::Done { scan, err, stopped: stopped() });
+}
+
 /// 运维页读数据:输出原样存起来,解析在界面一侧
 async fn sys_load(r: &Runner, sh: &Shared, kind: crate::sysops::Kind, script: &str, root: bool) {
     let res = match sys_exec(r, script, root, None, Duration::from_secs(30)).await {
@@ -1967,6 +2044,10 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
                         let (r, sh2) = (sys.clone(), sh.clone());
                         tokio::spawn(async move { sys_load(&r, &sh2, kind, &script, root).await });
                     }
+                    Cmd::Lens { path, depth, scan } => {
+                        let (r, sh2) = (sys.clone(), sh.clone());
+                        tokio::spawn(async move { lens_run(&r, &sh2, &path, depth, scan).await });
+                    }
                     Cmd::Act(Action::Sys(job)) => {
                         let (r, sh2) = (sys.clone(), sh.clone());
                         tokio::spawn(async move { sys_job(&r, &sh2, job).await });
@@ -2020,6 +2101,11 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
                     Cmd::Sys { kind, script, root } => {
                         let (r, sh2) = (sys.clone(), sh.clone());
                         tokio::spawn(async move { sys_load(&r, &sh2, kind, &script, root).await });
+                        continue;
+                    }
+                    Cmd::Lens { path, depth, scan } => {
+                        let (r, sh2) = (sys.clone(), sh.clone());
+                        tokio::spawn(async move { lens_run(&r, &sh2, &path, depth, scan).await });
                         continue;
                     }
                     Cmd::Act(Action::Sys(job)) => {

@@ -14,7 +14,8 @@ use super::daemonpage::field;
 use super::super::*;
 use super::dockerpages::{DockAsk, head, icon_btn, icon_btn_busy, row, small, table_flow};
 use crate::docker::Action;
-use crate::sysops::{self, CronInfo, DirSize, Job, Kind, Mount, Proc, Service};
+use crate::sysops::{self, CronInfo, Job, Kind, Mount, Proc, Service};
+use super::spacelens::{LensStore, SCAN_DEPTH};
 
 /// 进程列表的刷新间隔
 fn proc_every() -> Duration {
@@ -49,8 +50,10 @@ pub(crate) struct SysUi {
     services: Option<Result<Vec<Service>, String>>,
     storage: Option<Result<Vec<Mount>, String>>,
     cron: Option<Result<CronInfo, String>>,
-    /// 存储页点开的目录和它的子目录大小(None 是还在读)
-    top: Option<(String, Option<Result<Vec<DirSize>, String>>)>,
+    /// 存储页的空间透镜(点开的挂载点和扫描结果)
+    pub(super) lens: Option<LensStore>,
+    /// 透镜扫描的编号,每次扫描加一
+    pub(super) lens_seq: u64,
     asked: HashMap<Kind, Instant>,
     inflight: HashSet<Kind>,
     sort: ProcSort,
@@ -64,6 +67,14 @@ pub(crate) struct SysUi {
     killed: HashMap<u32, Instant>,
     /// 刚点删除的计划任务所在行(crontab 行号),让转圈出现在这一行
     cron_row: Option<usize>,
+    /// 空间透镜里悬停的子目录下标(圆环高亮对应的一段)
+    pub(super) lens_hover: Option<String>,
+    /// 透镜里已经展开的块(完整路径)
+    pub(super) lens_open: HashSet<String>,
+    /// 双击放大的目录栈,最后一个当顶层;空是整个挂载点
+    pub(super) lens_zoom: Vec<String>,
+    /// 透镜画布的实际大小(像素,canvas 量出来的),色块按它排版
+    pub(super) lens_size: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
 }
 
 fn spec(p: Page) -> Option<(Kind, &'static str)> {
@@ -140,7 +151,7 @@ fn bar(frac: f32, w: f32, color: Rgba) -> Div {
 }
 
 impl Home {
-    fn sys_docker(&self) -> Option<&crate::docker::Docker> {
+    pub(super) fn sys_docker(&self) -> Option<&crate::docker::Docker> {
         self.workspace.active.and_then(|i| self.workspace.tabs.get(i)).and_then(|t| t.docker.as_ref())
     }
 
@@ -148,12 +159,12 @@ impl Home {
     pub(crate) fn sys_reset(&mut self) {
         self.dock.sys.asked.clear();
         self.dock.sys.inflight.clear();
-        if let Some((path, slot)) = &mut self.dock.sys.top {
-            if !self.demo {
-                *slot = None;
-                let p = path.clone();
-                self.sys_ask(Kind::Top, &sysops::top_script(&p), false);
-            }
+        // 透镜重新扫一遍挂载点
+        let root = self.dock.sys.lens.as_ref().filter(|l| !l.is_demo()).map(|l| (l.root.clone(), l.total));
+        if let Some((path, total)) = root {
+            self.lens_close();
+            self.dock.sys.lens = Some(LensStore::new(&path, total));
+            self.lens_start(&path, SCAN_DEPTH);
         }
     }
 
@@ -200,11 +211,6 @@ impl Home {
             Kind::Storage => s.storage = Some(res.and_then(|t| sysops::parse_storage(&t))),
             Kind::Cron => s.cron = Some(res.map(|t| sysops::parse_cron(&t))),
             Kind::ComposeFile | Kind::ComposeEnv => {}
-            Kind::Top => {
-                if let Some((_, slot)) = &mut s.top {
-                    *slot = Some(res.and_then(|t| sysops::parse_top(&t)));
-                }
-            }
         }
         let _ = (window, cx);
     }
@@ -222,7 +228,7 @@ impl Home {
             self.dock.sys.shown = Some(page);
             self.dock.sys.asked.remove(&kind);
             self.dock.sys.cron_form = None;
-            self.dock.sys.top = None;
+            self.lens_close();
             if let Some(s) = self.dock.sys.search.clone() {
                 s.update(cx, |s, cx| s.set_value("", window, cx));
             }
@@ -236,9 +242,10 @@ impl Home {
             return;
         }
         let got: Vec<(Kind, Result<String, String>)> = match self.sys_docker() {
-            Some(d) => [kind, Kind::Top].into_iter().filter_map(|k| d.sys_take(k).map(|r| (k, r))).collect(),
+            Some(d) => d.sys_take(kind).map(|r| (kind, r)).into_iter().collect(),
             None => return,
         };
+        self.lens_pump();
         for (k, r) in got {
             self.sys_store(k, r, window, cx);
         }
@@ -263,7 +270,10 @@ impl Home {
         s.storage = Some(sysops::parse_storage(DEMO_STORAGE));
         s.cron = Some(Ok(sysops::parse_cron(DEMO_CRON)));
         if std::env::var_os("OTTER_SYS_TOP").is_some() {
-            s.top = Some(("/var".into(), Some(sysops::parse_top(DEMO_TOP))));
+            s.lens = Some(LensStore::mock("/"));
+            // 截图用:OTTER_LENS_HOVER=/var/lib  OTTER_LENS_OPEN="/var/lib;/usr"
+            s.lens_hover = std::env::var("OTTER_LENS_HOVER").ok();
+            s.lens_open = std::env::var("OTTER_LENS_OPEN").map(|v| v.split(';').filter(|x| !x.is_empty()).map(str::to_string).collect()).unwrap_or_default();
         }
     }
 
@@ -527,12 +537,13 @@ impl Home {
             Some(Err(e)) => return message(IconName::TriangleAlert, "读取不了磁盘信息", e.clone()),
             Some(Ok(l)) => l,
         };
-        let picked = self.dock.sys.top.as_ref().map(|(p, _)| p.clone());
+        let picked = self.dock.sys.lens.as_ref().map(|l| l.root.clone());
         let header = div().child(head("挂载点").flex_1().min_w_0()).child(head("设备").w(px(150.0))).child(head("类型").w(px(64.0))).child(head("用量").w(px(190.0))).child(head("已用 / 总量").w(px(150.0))).child(head("使用率").w(px(56.0))).child(head("inode").w(px(52.0)));
         let mut rows = Vec::new();
         for (i, m) in list.iter().enumerate() {
             let sel = picked.as_deref() == Some(m.mount.as_str());
             let path = m.mount.clone();
+            let used_kb = m.used_kb;
             let inode = m.inode_pct.map(|p| format!("{p}%")).unwrap_or_else(|| "—".into());
             let inode_color = m.inode_pct.map_or(c::ghost(), |p| if p >= 90 { c::danger() } else { c::muted() });
             rows.push(
@@ -547,76 +558,20 @@ impl Home {
                     .child(mono_cell(56.0, format!("{}%", m.pct), usage_color(m.pct)))
                     .child(mono_cell(52.0, inode, inode_color))
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.lens_close();
                         if this.demo {
-                            this.dock.sys.top = Some((path.clone(), Some(sysops::parse_top(DEMO_TOP))));
+                            this.dock.sys.lens = Some(LensStore::mock(&path));
                         } else {
-                            this.dock.sys.top = Some((path.clone(), None));
-                            this.sys_ask(Kind::Top, &sysops::top_script(&path), false);
+                            this.dock.sys.lens = Some(LensStore::new(&path, used_kb));
+                            this.lens_start(&path, SCAN_DEPTH);
                         }
                         cx.notify();
                     })),
             );
         }
-        let mut col = div().flex_shrink_0().pb(px(14.0)).flex().flex_col().gap(px(12.0)).child(table_flow(header, rows));
-        if let Some((path, res)) = &self.dock.sys.top {
-            let body: AnyElement = match res {
-                None => div().flex_1().flex().items_center().justify_center().text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child("正在统计目录大小,大目录可能要几十秒…").into_any_element(),
-                Some(Err(e)) => div().flex_1().flex().items_center().justify_center().text_size(px(t::TYPE_CAPTION)).text_color(c::danger()).child(SharedString::from(e.clone())).into_any_element(),
-                Some(Ok(l)) => {
-                    let total = l.iter().find(|d| &d.path == path).map(|d| d.kb).or(l.first().map(|d| d.kb)).unwrap_or(1).max(1);
-                    let rows = l.iter().filter(|d| &d.path != path).enumerate().map(|(i, d)| {
-                        div()
-                            .id(("tp", i))
-                            .h(px(32.0))
-                            .flex_shrink_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(12.0))
-                            .px(px(16.0))
-                            .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CONTROL)).font_family(MONO).child(d.path.clone()))
-                            .child(bar(d.kb as f32 / total as f32, 160.0, c::accent()))
-                            .child(mono_cell(80.0, sysops::fmt_kb(d.kb), c::secondary()).text_right())
-                    });
-                    div().id("tp-list").flex_1().min_h_0().overflow_y_scroll().children(rows).into_any_element()
-                }
-            };
-            let total_text = match res {
-                Some(Ok(l)) => l.iter().find(|d| &d.path == path).map(|d| format!("共 {}", sysops::fmt_kb(d.kb))).unwrap_or_default(),
-                _ => String::new(),
-            };
-            col = col.child(
-                div()
-                    .flex_shrink_0()
-                    .h(px(250.0))
-                    .flex()
-                    .flex_col()
-                    .rounded(px(t::RADIUS_XL))
-                    .border_1()
-                    .border_color(c::dialog_border())
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .h(px(36.0))
-                            .flex_shrink_0()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0))
-                            .px(px(16.0))
-                            .border_b_1()
-                            .border_color(c::border())
-                            .child(div().text_size(px(t::TYPE_CONTROL)).font_weight(FontWeight::SEMIBOLD).child(SharedString::from(format!("{path} 下最大的目录"))))
-                            .child(small("只统计登录用户能读到的部分", c::ghost()))
-                            .child(div().flex_1())
-                            .child(small(total_text, c::muted()))
-                            .child(icon_btn(("tp-x", 0), IconName::X, c::muted()).on_click(cx.listener(|this, _, _, cx| {
-                                this.dock.sys.top = None;
-                                cx.notify();
-                            }))),
-                    )
-                    .child(body),
-            );
+        let mut col = div().flex_grow(1.0).flex_shrink_0().pb(px(14.0)).flex().flex_col().gap(px(12.0)).child(table_flow(header, rows));
+        if self.dock.sys.lens.is_some() {
+            col = col.child(self.lens_panel(cx));
         }
         col.into_any_element()
     }
@@ -884,14 +839,6 @@ Filesystem      Inodes   IUsed    IFree IUse% Mounted on\n\
 /dev/vda1      6553600  845678  5707922   13% /\n\
 /dev/vdb1     51539607   12011 51527596    1% /data\n\
 /dev/vdc1      1310720 1250000    60720   96% /backup\n";
-
-const DEMO_TOP: &str = "\
-41943040\t/var\n\
-31457280\t/var/lib\n\
-7340032\t/var/log\n\
-2097152\t/var/cache\n\
-524288\t/var/backups\n\
-10240\t/var/tmp\n";
 
 const DEMO_CRON: &str = "\
 @@USER\n\
