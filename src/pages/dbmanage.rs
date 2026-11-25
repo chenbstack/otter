@@ -32,6 +32,8 @@ pub(crate) struct DbMgr {
     reset_err: Option<String>,
     /// 等用户确认删除的库名
     drop_ask: Option<String>,
+    /// 备份与恢复弹窗(见 `dbbackup`)
+    pub(super) bk: Option<super::dbbackup::BackupDlg>,
     /// 新建用户弹窗、等用户确认删除的用户 (用户名, 主机)
     uform: Option<UserForm>,
     udrop_ask: Option<(String, String)>,
@@ -49,7 +51,7 @@ pub(crate) struct DbMgr {
     retry_at: Option<std::time::Instant>,
     tries: u32,
     /// 已发出还没收到结果的请求 tag
-    inflight: Vec<String>,
+    pub(super) inflight: Vec<String>,
 }
 
 /// 新建数据库抽屉里的输入
@@ -115,7 +117,7 @@ impl DbMgr {
 }
 
 impl Home {
-    fn dbm_docker(&self) -> Option<&crate::docker::Docker> {
+    pub(super) fn dbm_docker(&self) -> Option<&crate::docker::Docker> {
         self.workspace.active.and_then(|i| self.workspace.tabs.get(i)).and_then(|t| t.docker.as_ref())
     }
 
@@ -153,6 +155,10 @@ impl Home {
             let Some(r) = self.dbm_docker().and_then(|d| d.db_take(&tag)) else { continue };
             let m = &mut self.dock.dbm;
             m.inflight.retain(|t| *t != tag);
+            if tag.starts_with("dbm:bk") {
+                self.dbm_bk_result(&tag, r);
+                continue;
+            }
             if tag.starts_with("dbm:conn:") {
                 m.conn = Some(r.map(|o| {
                     let (u, p) = o.split_once('\n').unwrap_or(("", &o));
@@ -293,6 +299,7 @@ impl Home {
         }
         self.dbm_request_uform(&inst);
         self.dbm_want_addrs(&inst);
+        self.dbm_bk_request();
 
         let mut page = div().flex_1().min_h_0().pb(px(14.0)).flex().flex_col().gap(px(12.0));
         // 同一类型有多个实例时,按端口切换
@@ -388,7 +395,7 @@ impl Home {
     /// 清掉已读的库/用户/信息,下次渲染重新读(顶部「刷新」调用)
     /// 重试时间到了:让页面重绘一次,重新发起读取
     pub(crate) fn dbm_retry_due(&self) -> bool {
-        self.dock.dbm.retry_at.is_some_and(|t| std::time::Instant::now() >= t)
+        self.dock.dbm.retry_at.is_some_and(|t| std::time::Instant::now() >= t) || self.dock.dbm.bk.as_ref().is_some_and(|b| b.poll_due())
     }
 
     pub(crate) fn dbm_invalidate(&mut self) {
@@ -422,7 +429,7 @@ impl Home {
         )
     }
 
-    fn dbm_inst(&self) -> Option<DbInstance> {
+    pub(super) fn dbm_inst(&self) -> Option<DbInstance> {
         dbinst::detect(&self.dock.snap.containers).into_iter().find(|d| d.container.name == self.dock.dbm.cur)
     }
 
@@ -1095,6 +1102,31 @@ impl Home {
                 }
             }
             "conn" => self.dbm_conn_open(cx),
+            "backup" => self.dbm_bk_open("app".into(), cx),
+            "backing" => {
+                self.dbm_bk_open("app".into(), cx);
+                if let Some(b) = self.dock.dbm.bk.as_mut() {
+                    b.starting = true;
+                    if let Some(Ok(d)) = b.data.as_mut() {
+                        d.running.push(("app_20261125-102000.dump.part".into(), 3_400_000));
+                    }
+                    b.dl = Some(("app_20261125-101500.dump".into(), "x".into()));
+                    b.restoring = true;
+                    b.rs_file = Some("app_20261124-030000-pre.dump".into());
+                }
+            }
+            "backup0" => {
+                self.dbm_bk_open("app".into(), cx);
+                if let Some(b) = self.dock.dbm.bk.as_mut() {
+                    b.data = Some(Ok(Default::default()));
+                }
+            }
+            "restore" => {
+                self.dbm_bk_open("app".into(), cx);
+                if let Some(b) = self.dock.dbm.bk.as_mut() {
+                    b.restore_ask = Some("app_20261125-101500.dump".into());
+                }
+            }
             "created" | "reset" | "usercreated" => {
                 self.dock.dbm.done = Some((if kind == "reset" { String::new() } else { "app".into() }, "app_user".into(), "Xk3-demo-password-9aQ".into()));
                 self.dock.dbm.done_kind = match kind {
@@ -1325,6 +1357,7 @@ impl Home {
         v.extend(self.dbm_udrop_dialog(cx));
         v.extend(self.dbm_user_dialog(window, cx));
         v.extend(self.dbm_conn_dialog(cx));
+        v.extend(self.dbm_bk_overlays(cx));
         v
     }
 
@@ -1518,7 +1551,7 @@ impl Home {
         if !pg {
             header = header.child(head("表数").w(px(60.0)));
         }
-        header = header.child(head("连接").w(px(60.0))).child(head("大小").w(px(90.0))).child(head(if pg { "描述" } else { "" }).flex_1().min_w_0()).child(head("操作").w(px(80.0)).text_right());
+        header = header.child(head("连接").w(px(60.0))).child(head("大小").w(px(90.0))).child(head(if pg { "描述" } else { "" }).flex_1().min_w_0()).child(head("操作").w(px(110.0)).text_right());
         let admin = self.dock.dbm.cred.clone();
         let body = rows
             .iter()
@@ -1546,12 +1579,16 @@ impl Home {
                 use super::syspages::tip;
                 r.child(
                     div()
-                        .w(px(80.0))
+                        .w(px(110.0))
                         .flex()
                         .flex_row()
                         .justify_end()
                         .items_center()
                         .gap(px(2.0))
+                        .child(tip(icon_btn_c(("dbm-db-bk", i), IconName::DatabaseBackup, c::muted()), "备份与恢复").on_click(cx.listener({
+                            let n = name.clone();
+                            move |this, _, _, cx| this.dbm_bk_open(n.clone(), cx)
+                        })))
                         .children(can_reset.then(|| {
                             tip(icon_btn_c(("dbm-db-reset", i), IconName::KeyRound, c::muted()), "重置密码").on_click(cx.listener(move |this, _, _, cx| {
                                 this.dock.dbm.reset_ask = Some((owner.clone(), String::new()));

@@ -586,6 +586,10 @@ enum Cmd {
     Db { tag: String, args: Vec<String>, input: Option<zeroize::Zeroizing<String>> },
     /// 在服务器上跑一段无需 root 的只读脚本(如查镜像 tag),结果存进 `Shared.db[tag]`
     Shell { tag: String, script: String },
+    /// 数据库备份/恢复:在服务器上以 root(docker 要 sudo 时)或登录用户跑一段脚本,长任务由脚本自己脱离运行,这里只等它「启动」;结果存进 `Shared.db[tag]`
+    HostSh { tag: String, script: String, secs: u64 },
+    /// 把服务器上的一个文件下载到本地(整个读进内存,上限 `FETCH_MAX`);结果是本地路径
+    Fetch { tag: String, remote: String, local: std::path::PathBuf },
     /// 容器里的文件操作:界面是 SFTP 那套文件管理,命令在这里换成 docker exec / docker cp
     CtFs { name: String, sh: Arc<crate::sftp::Shared>, cmd: crate::sftp::Cmd },
 }
@@ -612,6 +616,8 @@ struct Shared {
     ct: Mutex<HashMap<crate::ctfiles::CtKind, (String, Result<String, String>)>>,
     /// 数据库页执行的结果,键是请求的 `tag`;界面取走后清空
     db: Mutex<HashMap<String, Result<String, String>>>,
+    /// 正在下载的文件进度:tag → (已下载, 总大小)
+    fetch: Mutex<HashMap<String, (u64, u64)>>,
     /// 等用户确认的 HTTP 仓库登录:(仓库, 用户名, 密码),确认或取消后清掉
     pending_login: Mutex<Option<(String, String, zeroize::Zeroizing<String>)>>,
     /// 需要向用户确认的 HTTP 仓库地址;界面取走后清空
@@ -683,6 +689,7 @@ impl Docker {
             sys: Mutex::new(HashMap::new()),
             ct: Mutex::new(HashMap::new()),
             db: Mutex::new(HashMap::new()),
+            fetch: Mutex::new(HashMap::new()),
             pending_login: Mutex::new(None),
             insecure_ask: Mutex::new(None),
             version: AtomicU64::new(1),
@@ -827,6 +834,21 @@ impl Docker {
     /// 在服务器上跑一段脚本(普通用户),结果用 `db_take(tag)` 取
     pub fn shell_run(&self, tag: &str, script: &str) {
         let _ = self.cmd.send(Cmd::Shell { tag: tag.to_string(), script: script.to_string() });
+    }
+
+    /// 备份/恢复脚本(见 `Cmd::HostSh`)
+    pub fn host_run(&self, tag: &str, script: String, secs: u64) {
+        let _ = self.cmd.send(Cmd::HostSh { tag: tag.to_string(), script, secs });
+    }
+
+    /// 下载进度 (已下载, 总大小);没有在下载返回 None
+    pub fn fetch_progress(&self, tag: &str) -> Option<(u64, u64)> {
+        self.sh.fetch.lock().ok().and_then(|m| m.get(tag).copied())
+    }
+
+    /// 下载服务器上的文件到本地路径 `local`
+    pub fn fetch(&self, tag: &str, remote: &str, local: std::path::PathBuf) {
+        let _ = self.cmd.send(Cmd::Fetch { tag: tag.to_string(), remote: remote.to_string(), local });
     }
 
     pub fn db_take(&self, tag: &str) -> Option<Result<String, String>> {
@@ -1276,6 +1298,54 @@ pub fn parse_registries(text: &str) -> Result<Vec<RegAuth>, String> {
 /// 跑一段 shell:`root` 时走 sudo,否则以登录用户的身份(包一层 `sh -c`,不依赖用户的登录 shell)
 async fn sys_exec(r: &Runner, script: &str, root: bool, input: Option<&str>, t: Duration) -> Result<Output, String> {
     if root { r.root(script, input, t).await } else { exec(&r.session, &format!("sh -c {}", shell_quote(script)), input.map(str::as_bytes), t).await }
+}
+
+/// 下载一个文件:先查大小,再 `cat` 边收边写到本地(先写临时文件,完整了才改名),进度放进 `Shared.fetch`
+async fn fetch_file(r: &Runner, sh: &Shared, tag: &str, remote: &str, local: &std::path::Path) -> Result<String, String> {
+    use std::io::Write as _;
+    let q = shell_quote(remote);
+    let o = exec(&r.session, &format!("stat -c %s {q}"), None, Duration::from_secs(15)).await?;
+    let size: u64 = o.stdout.trim().parse().map_err(|_| "找不到这个备份文件".to_string())?;
+    sh.fetch.lock().unwrap().insert(tag.to_string(), (0, size));
+    sh.bump();
+    let tmp = local.with_extension("otter-part");
+    let mut f = std::fs::File::create(&tmp).map_err(|e| format!("保存失败:{e}"))?;
+    let mut ch = r.session.channel_open_session().await.map_err(|e| format!("打开通道失败:{e}"))?;
+    ch.exec(true, format!("cat {q}")).await.map_err(|e| format!("执行失败:{e}"))?;
+    let (mut done, mut code, mut last) = (0u64, None, Instant::now());
+    let res: Result<(), String> = async {
+        loop {
+            // 一直没数据(连接卡住)超过 60 秒就放弃
+            let Some(msg) = tokio::time::timeout(Duration::from_secs(60), ch.wait()).await.map_err(|_| "下载超时,请重试".to_string())? else { break };
+            match msg {
+                ChannelMsg::Data { data } => {
+                    f.write_all(&data).map_err(|e| format!("保存失败:{e}"))?;
+                    done += data.len() as u64;
+                    if last.elapsed() >= Duration::from_millis(150) {
+                        last = Instant::now();
+                        sh.fetch.lock().unwrap().insert(tag.to_string(), (done, size));
+                        sh.bump();
+                    }
+                }
+                ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    .await;
+    drop(f);
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if code != Some(0) || done != size {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("下载中断,请重试".into());
+    }
+    std::fs::rename(&tmp, local).map_err(|e| format!("保存失败:{e}"))?;
+    Ok(local.display().to_string())
 }
 
 fn last_line(o: &Output) -> String {
@@ -1975,6 +2045,31 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
                                 Ok(o) => Err(last_line(&o)),
                                 Err(e) => Err(e),
                             };
+                            sh2.db.lock().unwrap().insert(tag, res);
+                            sh2.bump();
+                        });
+                        continue;
+                    }
+                    Cmd::HostSh { tag, script, secs } => {
+                        let (r, sh2) = (runner.clone(), sh.clone());
+                        tokio::spawn(async move {
+                            let t = Duration::from_secs(secs);
+                            let res = if matches!(r.sudo, Sudo::No) { sys_exec(&r, &script, false, None, t).await } else { r.root(&script, None, t).await };
+                            let res = match res {
+                                Ok(o) if o.code == 0 => Ok(o.stdout),
+                                Ok(o) => Err(last_line(&o)),
+                                Err(e) => Err(e),
+                            };
+                            sh2.db.lock().unwrap().insert(tag, res);
+                            sh2.bump();
+                        });
+                        continue;
+                    }
+                    Cmd::Fetch { tag, remote, local } => {
+                        let (r, sh2) = (sys.clone(), sh.clone());
+                        tokio::spawn(async move {
+                            let res = fetch_file(&r, &sh2, &tag, &remote, &local).await;
+                            sh2.fetch.lock().unwrap().remove(&tag);
                             sh2.db.lock().unwrap().insert(tag, res);
                             sh2.bump();
                         });

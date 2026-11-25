@@ -2,6 +2,7 @@
 
 pub mod dockerpages;
 pub mod dbpages;
+pub mod dbbackup;
 pub mod dbinstallui;
 pub mod dbmanage;
 pub mod stacks;

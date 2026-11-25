@@ -820,6 +820,214 @@ pub fn fmt_size(b: u64) -> String {
     crate::docker::fmt_bytes(b)
 }
 
+// ---- 备份与恢复 -----------------------------------------------------------------
+//
+// 备份文件放服务器 `~/otter-backups/<容器名>/`,文件名 `<库名>_<YYYYmmdd-HHMMSS>[-pre].(dump|sql.gz)`。
+// 脚本在服务器上跑:`docker exec` 容器里的 pg_dump / mysqldump,账号密码在容器里读容器自己的环境变量(沿用 `client_script`),
+// 不经过 Otter。长任务脚本自己脱离运行(忽略 HUP),先写 `.part`,成功才改名;失败留 `.fail`(里面是原因)。
+
+/// 备份目录里的文件名只允许这些字符(删除、恢复、下载前校验,防止 `../` 之类)
+pub fn valid_backup_file(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 120 && !s.starts_with('.') && !s.contains("..") && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '.' | '-'))
+}
+
+/// 容器名(docker 的命名规则)
+pub fn valid_container(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 128 && s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// 单引号包起来,里面的单引号转义
+fn sq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// 一份备份(列表里的一行)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackupFile {
+    pub name: String,
+    pub db: String,
+    pub size: u64,
+    /// 修改时间(Unix 秒)
+    pub mtime: u64,
+    /// 恢复前自动做的那份
+    pub pre: bool,
+}
+
+/// 备份列表脚本的解析结果(已按库过滤)
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Backups {
+    /// 服务器上登录用户的主目录(下载要用绝对路径)
+    pub home: String,
+    pub files: Vec<BackupFile>,
+    /// 正在写的 `.part`:(文件名, 已写大小)
+    pub running: Vec<(String, u64)>,
+    /// 失败的备份:(文件名, 原因)
+    pub failed: Vec<(String, String)>,
+    /// 这个库的恢复状态:`running` / `ok` / `fail <原因>`
+    pub restore: Option<String>,
+}
+
+impl DbKind {
+    /// 备份文件扩展名;Redis 不支持
+    pub fn backup_ext(self) -> Option<&'static str> {
+        match self {
+            DbKind::Postgres => Some("dump"),
+            DbKind::Mysql | DbKind::Mariadb => Some("sql.gz"),
+            DbKind::Redis => None,
+        }
+    }
+
+    /// 容器里导出一个库(库名从环境变量 `OTG_DB` 取),数据写到 stdout
+    fn dump_script(self) -> &'static str {
+        match self {
+            DbKind::Postgres => concat!(pg_pw_script!(), r#"[ -n "$p" ] && export PGPASSWORD="$p"; exec pg_dump -Fc -U "$u" -d "$OTG_DB""#),
+            DbKind::Mysql | DbKind::Mariadb => concat!(
+                my_pw_script!(),
+                r#"[ -n "$p" ] && export MYSQL_PWD="$p"; c=$(command -v mariadb-dump || command -v mysqldump) || { echo "容器里没有 mysqldump" >&2; exit 1; }; exec "$c" -uroot --single-transaction --routines --triggers --events "$OTG_DB""#
+            ),
+            DbKind::Redis => "exit 1",
+        }
+    }
+
+    /// 容器里导入一个库(从 stdin 读备份内容)。PG 用单个事务,失败整体回滚
+    fn restore_inner(self) -> &'static str {
+        match self {
+            DbKind::Postgres => concat!(
+                pg_pw_script!(),
+                r#"[ -n "$p" ] && export PGPASSWORD="$p"; exec pg_restore --clean --if-exists --single-transaction --exit-on-error -U "$u" -d "$OTG_DB""#
+            ),
+            DbKind::Mysql | DbKind::Mariadb => {
+                concat!(my_pw_script!(), r#"[ -n "$p" ] && export MYSQL_PWD="$p"; c=$(command -v mariadb || command -v mysql) || { echo "容器里没有 mysql 客户端" >&2; exit 1; }; exec "$c" -uroot "$OTG_DB""#)
+            }
+            DbKind::Redis => "exit 1",
+        }
+    }
+
+    /// 脚本开头:算出备份目录 `$D`(登录用户主目录下),必要时建好,磁盘够用
+    fn backup_prelude(ctr: &str) -> String {
+        format!(
+            r#"command -v docker >/dev/null 2>&1 || {{ echo "找不到 docker" >&2; exit 1; }}; U="${{SUDO_USER:-$(id -un)}}"; H=$(getent passwd "$U" | cut -d: -f6); [ -n "$H" ] || H="$HOME"; D="$H/otter-backups/{ctr}"; umask 077; mkdir -p "$D" || exit 1; chown "$U" "$H/otter-backups" "$D" 2>/dev/null; "#
+        )
+    }
+
+    /// `dump_to <文件名>`:导出 `OTG_DB` 到 `$D` 下的文件;成功改名,失败留 `<文件名>.fail`(原因)
+    fn dump_fn(self, ctr: &str, db: &str) -> String {
+        let s = sq(self.dump_script());
+        let run = format!(r#"docker exec -e OTG_DB={db} {ctr} sh -c {s}"#);
+        if self == DbKind::Postgres {
+            format!(
+                r#"dump_to() {{ {run} >"$1.part" 2>"$1.err" </dev/null; r=$?; if [ "$r" = 0 ]; then mv "$1.part" "$1"; rm -f "$1.err"; else rm -f "$1.part"; mv "$1.err" "$1.fail"; fi; chown "$U" "$1" "$1.fail" 2>/dev/null; return "$r"; }}; "#
+            )
+        } else {
+            format!(
+                r#"dump_to() {{ {{ {run} 2>"$1.err" </dev/null; echo $? >"$1.rc"; }} | gzip >"$1.part"; r=$(cat "$1.rc" 2>/dev/null); rm -f "$1.rc"; if [ "$r" = 0 ]; then mv "$1.part" "$1"; rm -f "$1.err"; else r=1; rm -f "$1.part"; mv "$1.err" "$1.fail"; fi; chown "$U" "$1" "$1.fail" 2>/dev/null; return "$r"; }}; "#
+            )
+        }
+    }
+
+    /// 立即备份一个库:脚本检查磁盘、启动后台导出就返回(输出 `started`)
+    pub fn backup_script(self, ctr: &str, db: &str) -> Result<String, String> {
+        let ext = self.backup_ext().ok_or("Redis 不支持备份")?;
+        if !valid_container(ctr) || !valid_ident(db) {
+            return Err("容器名或库名里有不支持的字符,请到终端里处理".into());
+        }
+        Ok(format!(
+            r#"{}a=$(df -Pk "$D" | awk 'NR==2{{print $4}}'); [ "${{a:-0}}" -ge 102400 ] || {{ echo "服务器磁盘剩余空间不足 100MB,无法备份" >&2; exit 1; }}; {}F="{db}_$(date +%Y%m%d-%H%M%S).{ext}"; ( sh -c 'echo $PPID' >"$D/.pid-$F"; trap '' HUP; cd "$D" || exit 1; dump_to "$F"; rm -f "$D/.pid-$F" ) </dev/null >/dev/null 2>&1 & echo started
+"#,
+            Self::backup_prelude(ctr),
+            self.dump_fn(ctr, db)
+        ))
+    }
+
+    /// 恢复:先自动做一份「恢复前」备份(失败就取消),再导入。进度写在 `$D/.restore-<库>`
+    pub fn restore_script(self, ctr: &str, db: &str, file: &str) -> Result<String, String> {
+        let ext = self.backup_ext().ok_or("Redis 不支持恢复")?;
+        if !valid_container(ctr) || !valid_ident(db) || !valid_backup_file(file) {
+            return Err("容器名、库名或文件名里有不支持的字符".into());
+        }
+        if !file.starts_with(&format!("{db}_")) || !file.ends_with(&format!(".{ext}")) {
+            return Err("这份备份不属于这个库".into());
+        }
+        let s = sq(self.restore_inner());
+        let feed = if self == DbKind::Postgres { format!(r#"docker exec -i -e OTG_DB={db} {ctr} sh -c {s} <"$F" 2>"$ST.err""#) } else { format!(r#"gunzip -c "$F" | docker exec -i -e OTG_DB={db} {ctr} sh -c {s} 2>"$ST.err""#) };
+        Ok(format!(
+            r#"{}a=$(df -Pk "$D" | awk 'NR==2{{print $4}}'); [ "${{a:-0}}" -ge 102400 ] || {{ echo "服务器磁盘剩余空间不足 100MB,无法先做恢复前备份" >&2; exit 1; }}; {}F={file_q}; [ -f "$D/$F" ] || {{ echo "备份文件不存在" >&2; exit 1; }}; ST="$D/.restore-{db}"; case "$F" in *.sql.gz) gzip -t "$D/$F" || {{ echo "备份文件已损坏(gzip 校验失败)" >&2; exit 1; }};; esac; if [ -f "$ST" ] && [ "$(head -n1 "$ST")" = running ]; then echo "这个库正在恢复中" >&2; exit 1; fi; st() {{ printf '%s\n' "$1" >"$ST"; chown "$U" "$ST" 2>/dev/null; }}; st running; ( trap '' HUP; cd "$D" || exit 1; P="{db}_$(date +%Y%m%d-%H%M%S)-pre.{ext}"; if ! dump_to "$P"; then st "fail 恢复前备份失败,已取消恢复"; exit 1; fi; F="$D/$F"; if {feed}; then st ok; else m=$(tail -n1 "$ST.err" 2>/dev/null | tr '\t' ' '); st "fail ${{m:-恢复失败}}"; fi; rm -f "$ST.err" ) </dev/null >/dev/null 2>&1 & echo started
+"#,
+            Self::backup_prelude(ctr),
+            self.dump_fn(ctr, db),
+            file_q = sq(file),
+        ))
+    }
+}
+
+/// 备份列表脚本(登录用户身份即可):`H` 主目录、`F` 完成的备份、`P` 进行中、`E` 失败、`R` 恢复状态
+pub fn backup_list_script(ctr: &str) -> Result<String, String> {
+    if !valid_container(ctr) {
+        return Err("容器名里有不支持的字符".into());
+    }
+    Ok(format!(
+        r#"printf 'H\t%s\n' "$HOME"; D="$HOME/otter-backups/{ctr}"; cd "$D" 2>/dev/null || exit 0; for f in *; do [ -f "$f" ] || continue; case "$f" in *.part) printf 'P\t%s\t%s\n' "$f" "$(stat -c %s "$f")";; *.fail) printf 'E\t%s\t%s\n' "$f" "$(tail -n1 "$f" | tr '\t' ' ')";; *.err|*.rc) ;; *) printf 'F\t%s\t%s\t%s\n' "$f" "$(stat -c %s "$f")" "$(stat -c %Y "$f")";; esac; done; for f in .restore-*; do [ -f "$f" ] && printf 'R\t%s\t%s\n' "${{f#.restore-}}" "$(head -n1 "$f" | tr '\t' ' ')"; done; true
+"#
+    ))
+}
+
+/// 中止一个进行中的备份(`.part` 文件):杀掉后台进程树、清掉半截文件。进程在服务器上脱离运行,靠备份时写的 `.pid-<文件名>` 找到它
+pub fn backup_cancel_script(ctr: &str, part: &str) -> Result<String, String> {
+    if !valid_container(ctr) || !valid_backup_file(part) || !part.ends_with(".part") {
+        return Err("文件名里有不支持的字符".into());
+    }
+    let base = part.trim_end_matches(".part");
+    let db = base.split('.').next().and_then(|st| st.rsplit_once('_')).map(|(d, _)| d).filter(|d| valid_ident(d)).ok_or("文件名里没有库名")?;
+    // 容器里的导出进程是 `docker exec -e OTG_DB=<库>` 起的,靠环境变量认出来一并结束(只杀导出程序)
+    let inner = sq(&format!(r#"for d in /proc/[0-9]*; do tr '\0' '\n' <"$d/environ" 2>/dev/null | grep -qx 'OTG_DB={db}' || continue; case "$(cat "$d/comm" 2>/dev/null)" in pg_dump|mysqldump|mariadb-dump) kill "${{d#/proc/}}";; esac; done"#));
+    Ok(format!(
+        r#"U="${{SUDO_USER:-$(id -un)}}"; H=$(getent passwd "$U" | cut -d: -f6); [ -n "$H" ] || H="$HOME"; D="$H/otter-backups/{ctr}"; B='{base}'; P="$D/.pid-$B"; kids() {{ ps -eo pid=,ppid= | awk -v p="$1" '$2==p{{print $1}}'; }}; kt() {{ for c in $(kids "$1"); do kt "$c"; done; kill "$1" 2>/dev/null; }}; if [ -f "$P" ]; then pid=$(cat "$P"); case "$pid" in ''|*[!0-9]*) ;; *) n=$(ps -o comm= -p "$pid" 2>/dev/null); case "$n" in sh|dash|bash|ash) ks=$(kids "$pid"); kill "$pid" 2>/dev/null; for k in $ks; do kt "$k"; done;; esac;; esac; fi; docker exec {ctr} sh -c {inner} >/dev/null 2>&1; sleep 1; rm -f "$D/$B.part" "$D/$B.err" "$D/$B.rc" "$P"; echo cancelled
+"#
+    ))
+}
+
+/// 删除一份备份(或一条失败记录)
+pub fn backup_delete_script(ctr: &str, file: &str) -> Result<String, String> {
+    if !valid_container(ctr) || !valid_backup_file(file) || file.ends_with(".part") {
+        return Err("文件名里有不支持的字符".into());
+    }
+    Ok(format!("rm -f \"$HOME/otter-backups/{ctr}/\"{}\n", sq(file)))
+}
+
+/// 服务器上的备份文件绝对路径
+pub fn backup_remote_path(home: &str, ctr: &str, file: &str) -> Option<String> {
+    (valid_container(ctr) && valid_backup_file(file) && home.starts_with('/') && !home.contains(['\'', '\n'])).then(|| format!("{}/otter-backups/{ctr}/{file}", home.trim_end_matches('/')))
+}
+
+/// 解析 `backup_list_script` 的输出,只留属于 `db` 的
+pub fn parse_backups(out: &str, db: &str) -> Backups {
+    let mut b = Backups::default();
+    let mine = |name: &str| name.strip_prefix(db).is_some_and(|r| r.starts_with('_'));
+    // 文件名 = <库名>_<时间戳>[-pre].<扩展名>;库名里可以有下划线,所以从右边切
+    let owner = |name: &str| -> Option<(String, bool)> {
+        let stem = name.split('.').next()?;
+        let (d, ts) = stem.rsplit_once('_')?;
+        Some((d.to_string(), ts.ends_with("-pre")))
+    };
+    for l in out.lines() {
+        let f: Vec<&str> = l.trim_end_matches('\r').split('\t').collect();
+        match f.as_slice() {
+            ["H", h] => b.home = h.to_string(),
+            ["F", name, size, mtime] if mine(name) => {
+                if let Some((d, pre)) = owner(name).filter(|(d, _)| d == db) {
+                    b.files.push(BackupFile { name: name.to_string(), db: d, size: size.parse().unwrap_or(0), mtime: mtime.parse().unwrap_or(0), pre });
+                }
+            }
+            ["P", name, size] if mine(name) && owner(name).is_some_and(|(d, _)| d == db) => b.running.push((name.to_string(), size.parse().unwrap_or(0))),
+            ["E", name, msg] if mine(name) && owner(name).is_some_and(|(d, _)| d == db) => b.failed.push((name.to_string(), msg.to_string())),
+            ["R", d, state] if *d == db => b.restore = Some(state.to_string()),
+            _ => {}
+        }
+    }
+    b.files.sort_by(|a, c| c.mtime.cmp(&a.mtime).then(c.name.cmp(&a.name)));
+    b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1087,5 +1295,62 @@ mod tests {
         assert_eq!(publ, ["db.example.com"]);
         // 节点地址是本机回环(如 OrbStack 的 127.0.0.1)不算
         assert!(classify_addrs("", "127.0.0.1").1.is_empty());
+    }
+
+    #[test]
+    fn backup_scripts_are_valid_and_safe() {
+        for k in [DbKind::Postgres, DbKind::Mysql, DbKind::Mariadb] {
+            let ext = k.backup_ext().unwrap();
+            let b = k.backup_script("my-db.1", "shop").unwrap();
+            let r = k.restore_script("my-db.1", "shop", &format!("shop_20260101-101010.{ext}")).unwrap();
+            for s in [&b, &r] {
+                assert!(std::process::Command::new("sh").arg("-n").arg("-c").arg(s).status().unwrap().success(), "{k:?}: {s}");
+                // 密码不会出现在脚本里,只在容器里读环境变量
+                assert!(!s.contains("PASSWORD=") || s.contains("\"$p\""));
+            }
+            assert!(b.contains("otter-backups/my-db.1") && b.contains(&format!("shop_$(date +%Y%m%d-%H%M%S).{ext}")));
+            assert!(r.contains("-pre.") && r.contains(".restore-shop"));
+            if let Ok(dir) = std::env::var("OTTER_DUMP_SCRIPTS") {
+                let n = if k == DbKind::Postgres { "pg" } else if k == DbKind::Mysql { "my" } else { "maria" };
+                std::fs::write(format!("{dir}/bk-{n}.sh"), &b).unwrap();
+                std::fs::write(format!("{dir}/rs-{n}.sh"), k.restore_script("my-db.1", "shop", &format!("shop_20260101-101010.{ext}")).unwrap()).unwrap();
+                std::fs::write(format!("{dir}/ls.sh"), backup_list_script("my-db.1").unwrap()).unwrap();
+                std::fs::write(format!("{dir}/cancel.sh"), backup_cancel_script("my-db.1", "shop_X.dump.part").unwrap()).unwrap();
+            }
+        }
+        assert!(DbKind::Redis.backup_script("c", "x").is_err());
+        assert!(DbKind::Postgres.backup_script("c;rm", "x").is_err());
+        assert!(DbKind::Postgres.backup_script("c", "x y").is_err());
+        // 恢复只接受属于这个库、扩展名对得上的文件
+        assert!(DbKind::Postgres.restore_script("c", "shop", "other_20260101-101010.dump").is_err());
+        assert!(DbKind::Postgres.restore_script("c", "shop", "shop_2026.sql.gz").is_err());
+        assert!(DbKind::Postgres.restore_script("c", "shop", "../shop_1.dump").is_err());
+        assert!(std::process::Command::new("sh").arg("-n").arg("-c").arg(backup_list_script("c").unwrap()).status().unwrap().success());
+    }
+
+    #[test]
+    fn backup_file_names_are_validated() {
+        assert!(valid_backup_file("shop_20260101-101010.dump") && valid_backup_file("a$b_1.sql.gz"));
+        for bad in ["", "../x", "a/b", ".restore-x", "a b", "a;b", "a..b", "a\nb"] {
+            assert!(!valid_backup_file(bad), "{bad}");
+        }
+        assert!(backup_cancel_script("c", "shop_1.dump.part").is_ok() && backup_cancel_script("c", "shop_1.dump").is_err() && backup_cancel_script("c", "../x.part").is_err());
+        assert!(std::process::Command::new("sh").arg("-n").arg("-c").arg(backup_cancel_script("c", "shop_1.dump.part").unwrap()).status().unwrap().success());
+        assert!(backup_delete_script("c", "x.part").is_err() && backup_delete_script("c", "x/y").is_err());
+        assert_eq!(backup_remote_path("/home/u", "c", "shop_1.dump").as_deref(), Some("/home/u/otter-backups/c/shop_1.dump"));
+        assert!(backup_remote_path("rel", "c", "shop_1.dump").is_none());
+    }
+
+    #[test]
+    fn parses_backup_list() {
+        let out = "H\t/home/u\nF\tshop_20260101-101010.dump\t2048\t1000\nF\tshop_20260102-101010-pre.dump\t4096\t2000\nF\tshop_old_20260101-101010.dump\t1\t1\nF\tother_20260101-101010.dump\t1\t1\nP\tshop_20260103-101010.dump.part\t99\nE\tshop_20260104-101010.dump.fail\tpg_dump: error\nR\tshop\trunning\nR\tother\tok\n";
+        let b = parse_backups(out, "shop");
+        assert_eq!(b.home, "/home/u");
+        assert_eq!(b.files.iter().map(|f| (f.name.as_str(), f.pre)).collect::<Vec<_>>(), [("shop_20260102-101010-pre.dump", true), ("shop_20260101-101010.dump", false)]);
+        assert_eq!(b.running, [("shop_20260103-101010.dump.part".to_string(), 99)]);
+        assert_eq!(b.failed.len(), 1);
+        assert_eq!(b.restore.as_deref(), Some("running"));
+        // 库名里带下划线时不会和前缀相同的库混在一起
+        assert_eq!(parse_backups(out, "shop_old").files.len(), 1);
     }
 }
