@@ -581,7 +581,7 @@ enum Cmd {
     /// 运维页读一份数据(进程、服务……),结果用 `sys_take` 取
     Sys { kind: crate::sysops::Kind, script: String, root: bool },
     /// 空间透镜:流式统计一个目录往下 depth 层的占用
-    Lens { path: String, depth: u32, scan: u64 },
+    Lens { path: String, depth: u32, scan: u64, files: bool, root: bool },
     /// 容器抽屉读一份数据(日志、目录列表、文件内容),结果用 `ct_take` 取;`tag` 原样带回,界面靠它认出这是哪次请求
     Ct { kind: crate::ctfiles::CtKind, tag: String, args: Vec<String>, merge: bool },
     /// 数据库页:在数据库容器里 `docker exec` 一段脚本,SQL 等从 stdin 传入(密码只放在这里,不进命令行);结果用 `db_take` 按 `tag` 取
@@ -864,8 +864,8 @@ impl Docker {
     }
 
     /// 开始一次透镜扫描(编号 `scan` 由界面递增分配);结果用 `lens_take` 取
-    pub fn lens_scan(&self, path: &str, depth: u32, scan: u64) {
-        let _ = self.cmd.send(Cmd::Lens { path: path.to_string(), depth, scan });
+    pub fn lens_scan(&self, path: &str, depth: u32, scan: u64, files: bool, root: bool) {
+        let _ = self.cmd.send(Cmd::Lens { path: path.to_string(), depth, scan, files, root });
     }
 
     /// 停止编号不大于 `scan` 的扫描
@@ -1576,7 +1576,7 @@ async fn ctfs_list(r: &Runner, name: &str, sh: &crate::sftp::Shared, path: &str)
 
 /// 空间透镜:`du` 边跑边读,每攒够一批(或隔 150ms)就送一批给界面。
 /// 没有超时上限;停止时关掉通道,服务器端的 du 随连接断开结束。
-async fn lens_run(r: &Runner, sh: &Shared, path: &str, depth: u32, scan: u64) {
+async fn lens_run(r: &Runner, sh: &Shared, path: &str, depth: u32, scan: u64, files: bool, root: bool) {
     use std::sync::atomic::Ordering::SeqCst;
     let stopped = || sh.lens_stop.load(SeqCst) >= scan;
     let push = |ev: crate::sysops::LensEv| {
@@ -1587,8 +1587,20 @@ async fn lens_run(r: &Runner, sh: &Shared, path: &str, depth: u32, scan: u64) {
         Ok(c) => c,
         Err(e) => return push(crate::sysops::LensEv::Done { scan, err: Some(format!("打开通道失败:{e}")), stopped: false }),
     };
-    if let Err(e) = ch.exec(true, crate::sysops::lens_command(path, depth)).await {
+    let base = crate::sysops::lens_command(path, depth, files);
+    // 以 root 统计:已经是 root 直接跑,否则 sudo(免密,或经 stdin 交密码)
+    let (cmd, pw) = match (root, &r.sudo) {
+        (false, _) => (base, None),
+        (true, Sudo::WithPassword) => (format!("sudo -k; sudo -S -p '' {base}"), Some(format!("{}\n", r.password.as_deref().map(String::as_str).unwrap_or("")))),
+        (true, _) => (format!("if [ \"$(id -u)\" = 0 ]; then {base}; else sudo -n {base}; fi"), None),
+    };
+    if let Err(e) = ch.exec(true, cmd).await {
         return push(crate::sysops::LensEv::Done { scan, err: Some(format!("执行失败:{e}")), stopped: false });
+    }
+    if let Some(pw) = pw {
+        if ch.data(pw.as_bytes()).await.is_err() {
+            return push(crate::sysops::LensEv::Done { scan, err: Some("写入失败".into()), stopped: false });
+        }
     }
     let (mut buf, mut batch, mut last, mut got) = (Vec::<u8>::new(), Vec::new(), Instant::now(), false);
     let mut err = None;
@@ -1609,7 +1621,7 @@ async fn lens_run(r: &Runner, sh: &Shared, path: &str, depth: u32, scan: u64) {
                 while let Some(i) = buf.iter().position(|b| *b == b'\n') {
                     let line: Vec<u8> = buf.drain(..=i).collect();
                     if let Some(x) = crate::sysops::parse_lens_line(String::from_utf8_lossy(&line).trim_end_matches('\n')) {
-                        got = true;
+                        got |= x.2 != crate::sysops::LineKind::Listed;
                         batch.push(x);
                     }
                 }
@@ -2044,9 +2056,9 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
                         let (r, sh2) = (sys.clone(), sh.clone());
                         tokio::spawn(async move { sys_load(&r, &sh2, kind, &script, root).await });
                     }
-                    Cmd::Lens { path, depth, scan } => {
+                    Cmd::Lens { path, depth, scan, files, root } => {
                         let (r, sh2) = (sys.clone(), sh.clone());
-                        tokio::spawn(async move { lens_run(&r, &sh2, &path, depth, scan).await });
+                        tokio::spawn(async move { lens_run(&r, &sh2, &path, depth, scan, files, root).await });
                     }
                     Cmd::Act(Action::Sys(job)) => {
                         let (r, sh2) = (sys.clone(), sh.clone());
@@ -2103,9 +2115,9 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
                         tokio::spawn(async move { sys_load(&r, &sh2, kind, &script, root).await });
                         continue;
                     }
-                    Cmd::Lens { path, depth, scan } => {
+                    Cmd::Lens { path, depth, scan, files, root } => {
                         let (r, sh2) = (sys.clone(), sh.clone());
-                        tokio::spawn(async move { lens_run(&r, &sh2, &path, depth, scan).await });
+                        tokio::spawn(async move { lens_run(&r, &sh2, &path, depth, scan, files, root).await });
                         continue;
                     }
                     Cmd::Act(Action::Sys(job)) => {

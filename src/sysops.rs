@@ -9,6 +9,8 @@ pub enum Kind {
     Services,
     Storage,
     Cron,
+    /// 空间透镜扫描前的访问检查
+    Probe,
     /// 堆栈的 compose 文件内容
     ComposeFile,
     /// 堆栈的 env 文件内容
@@ -46,33 +48,80 @@ pub fn quote(s: &str) -> String {
 /// 空间透镜:统计一个目录往下 `depth` 层的占用。`$1` 是目录(由调用方作为参数传入,不拼进脚本)。
 /// `nice`/`ionice` 有就用,降低对服务器的影响;`-x` 不跨文件系统;无权限的报错丢掉。
 /// `du` 是后序输出:一个目录的行出现,说明它整棵子树统计完了。
-pub fn lens_script(depth: u32) -> String {
-    format!("n=; command -v nice >/dev/null 2>&1 && n='nice -n 19'; command -v ionice >/dev/null 2>&1 && n=\"$n ionice -c3\"; $n du -xk -d{depth} -- \"$1\" 2>/dev/null; s=$?; $n find \"$1\" -xdev -maxdepth {depth} -type f -size +1024k -exec du -k -- {{}} + 2>/dev/null | sed 's/^/F:/'; exit $s")
+pub fn lens_script(depth: u32, files: bool) -> String {
+    let find = if files { format!(" $n find \"$1\" -xdev -maxdepth {depth} -type f -size +1024k -exec du -k -- {{}} + 2>/dev/null | sed 's/^/F:/';") } else { String::new() };
+    // 先列一层子目录(很快,界面据此先画出占位卡片),再 du;stdbuf 有就用,让 du 的输出逐行而不是攒满 4K 才出来
+    format!("n=; command -v nice >/dev/null 2>&1 && n='nice -n 19'; command -v ionice >/dev/null 2>&1 && n=\"$n ionice -c3\"; $n find \"$1\" -xdev -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed 's/^/D:/'; command -v stdbuf >/dev/null 2>&1 && n=\"$n stdbuf -oL\"; $n du -xk -d{depth} -- \"$1\" 2>/dev/null; s=$?;{find} exit $s")
 }
 
-/// 完整的 exec 命令:`sh -c <脚本> sh <目录>`
-pub fn lens_command(path: &str, depth: u32) -> String {
-    format!("sh -c {} sh {}", quote(&lens_script(depth)), quote(path))
+/// 完整的 exec 命令:`sh -c <脚本> sh <目录>`。`files` 为 false 时不额外找大文件(网络存储上少遍历一遍)
+pub fn lens_command(path: &str, depth: u32, files: bool) -> String {
+    format!("sh -c {} sh {}", quote(&lens_script(depth, files)), quote(path))
+}
+
+/// 扫描前检查:登录用户能不能读这个目录。整个检查最多 5 秒(对端不响应时不会卡住);
+/// 在 `sh -c` 里跑,用 `test`/`ls` 真的去访问一次——网络存储上权限位不可靠,要问对端才准。输出一个词。
+pub fn probe_script(path: &str) -> String {
+    format!("p={}; t=; command -v timeout >/dev/null 2>&1 && t='timeout 5'; $t sh -c '[ -d \"$1\" ] || exit 3; test -r \"$1\" && test -x \"$1\" || exit 4; ls -A -- \"$1\" >/dev/null 2>&1 || exit 4' sh \"$p\" 2>/dev/null; case $? in 0) echo OK;; 124) echo TIMEOUT;; 3) echo MISSING;; *) echo DENIED;; esac", quote(path))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Probe {
+    Ok,
+    Denied,
+    Missing,
+    Timeout,
+}
+
+pub fn parse_probe(out: &str) -> Probe {
+    match out.trim() {
+        "DENIED" => Probe::Denied,
+        "MISSING" => Probe::Missing,
+        "TIMEOUT" => Probe::Timeout,
+        // 其他(包括读不出来)按可读处理,真有问题扫描时自然会报
+        _ => Probe::Ok,
+    }
+}
+
+/// 网络/远程文件系统:遍历要走网络,慢且会给对端加负担
+pub fn is_network_fs(fstype: &str) -> bool {
+    let t = fstype.to_ascii_lowercase();
+    t.starts_with("nfs") || matches!(t.as_str(), "cifs" | "smb3" | "smbfs" | "afs" | "ceph" | "glusterfs" | "9p" | "davfs") || t.starts_with("fuse.sshfs") || t.starts_with("fuse.s3") || t.starts_with("fuse.rclone") || t.starts_with("fuse.gluster")
+}
+
+/// 扫描输出的一行是什么
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LineKind {
+    /// `du` 统计完的目录
+    Dir,
+    /// ≥1 MiB 的文件
+    File,
+    /// 只知道有这个子目录,大小还没统计出来(用来先画占位卡片)
+    Listed,
 }
 
 /// 透镜扫描过程中从后台送给界面的事件
 #[derive(Clone, Debug, PartialEq)]
 pub enum LensEv {
     /// 新统计完的目录:(KiB, 完整路径)
-    Lines { scan: u64, lines: Vec<(u64, String, bool)> },
+    Lines { scan: u64, lines: Vec<(u64, String, LineKind)> },
     /// 扫描结束:出错的原因,或用户主动停止
     Done { scan: u64, err: Option<String>, stopped: bool },
 }
 
-/// 解析一行:`KiB<TAB>路径` 是目录;`F:KiB<TAB>路径` 是 ≥1 MiB 的文件(`du` 只列目录,文件由脚本里的 `find` 补)
-pub fn parse_lens_line(line: &str) -> Option<(u64, String, bool)> {
-    let (line, file) = match line.strip_prefix("F:") {
-        Some(r) => (r, true),
-        None => (line, false),
+/// 解析一行:`KiB<TAB>路径` 是目录;`F:KiB<TAB>路径` 是 ≥1 MiB 的文件(`du` 只列目录,文件由脚本里的 `find` 补);
+/// `D:路径` 是先列出来的子目录(还没有大小)
+pub fn parse_lens_line(line: &str) -> Option<(u64, String, LineKind)> {
+    let line = line.trim_end_matches('\r');
+    if let Some(p) = line.strip_prefix("D:") {
+        return if p.is_empty() { None } else { Some((0, p.to_string(), LineKind::Listed)) };
+    }
+    let (line, kind) = match line.strip_prefix("F:") {
+        Some(r) => (r, LineKind::File),
+        None => (line, LineKind::Dir),
     };
     let (n, p) = line.split_once('\t')?;
-    let p = p.trim_end_matches('\r');
-    if p.is_empty() { None } else { Some((n.trim().parse().ok()?, p.to_string(), file)) }
+    if p.is_empty() { None } else { Some((n.trim().parse().ok()?, p.to_string(), kind)) }
 }
 
 /// systemd 单元名:只允许这些字符,避免拼进 shell 命令时出事
@@ -464,21 +513,39 @@ mod tests {
 
     #[test]
     fn parses_lens_lines() {
-        assert_eq!(parse_lens_line("3000\t/var/lib"), Some((3000, "/var/lib".into(), false)));
-        assert_eq!(parse_lens_line("F:2048\t/var/big.log"), Some((2048, "/var/big.log".into(), true)));
-        assert_eq!(parse_lens_line("12\t/a b/c\r"), Some((12, "/a b/c".into(), false)));
+        assert_eq!(parse_lens_line("3000\t/var/lib"), Some((3000, "/var/lib".into(), LineKind::Dir)));
+        assert_eq!(parse_lens_line("F:2048\t/var/big.log"), Some((2048, "/var/big.log".into(), LineKind::File)));
+        assert_eq!(parse_lens_line("D:/var/lib"), Some((0, "/var/lib".into(), LineKind::Listed)));
+        assert_eq!(parse_lens_line("D:"), None);
+        assert_eq!(parse_lens_line("12\t/a b/c\r"), Some((12, "/a b/c".into(), LineKind::Dir)));
         assert_eq!(parse_lens_line("du: cannot read"), None);
         assert_eq!(parse_lens_line("x\t/a"), None);
         assert_eq!(parse_lens_line("5\t"), None);
     }
 
     #[test]
+    fn probe_script_and_parse() {
+        let sc = probe_script("/mnt/a b'c");
+        assert!(sc.starts_with("p='/mnt/a b'\\''c';") && sc.contains("timeout 5"));
+        assert_eq!(parse_probe("OK\n"), Probe::Ok);
+        assert_eq!(parse_probe("DENIED"), Probe::Denied);
+        assert_eq!(parse_probe(" MISSING "), Probe::Missing);
+        assert_eq!(parse_probe("TIMEOUT"), Probe::Timeout);
+        assert_eq!(parse_probe(""), Probe::Ok);
+    }
+
+    #[test]
     fn lens_command_quotes_the_path() {
-        let c = lens_command("/a b'c", 3);
+        let c = lens_command("/a b'c", 3, true);
         assert!(c.starts_with("sh -c '") && c.ends_with(" sh '/a b'\\''c'"));
         assert!(c.contains("du -xk -d3 -- "));
         // 路径只作为参数,不出现在脚本里
-        assert!(!lens_script(3).contains("a b"));
+        assert!(!lens_script(3, true).contains("a b"));
+        // 网络存储不跑 find
+        assert!(lens_script(3, true).contains("-size +1024k") && !lens_script(3, false).contains("-size +1024k"));
+        // 都会先列一层子目录
+        assert!(lens_script(3, false).contains("sed 's/^/D:/'"));
+        assert!(is_network_fs("nfs4") && is_network_fs("cifs") && !is_network_fs("ext4") && !is_network_fs("xfs"));
     }
 
     #[test]

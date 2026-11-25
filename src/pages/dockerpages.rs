@@ -752,6 +752,9 @@ impl Home {
         if let Some(m) = self.cron_dialog(cx) {
             v.push(m.into_any_element());
         }
+        if let Some(m) = self.lens_confirm_dialog(cx) {
+            v.push(m.into_any_element());
+        }
         if let Some(m) = self.create_drawer(window, cx) {
             v.push(m.into_any_element());
         }

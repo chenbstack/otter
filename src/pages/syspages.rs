@@ -15,7 +15,7 @@ use super::super::*;
 use super::dockerpages::{DockAsk, head, icon_btn, icon_btn_busy, row, small, table_flow};
 use crate::docker::Action;
 use crate::sysops::{self, CronInfo, Job, Kind, Mount, Proc, Service};
-use super::spacelens::{LensStore, SCAN_DEPTH};
+use super::spacelens::LensStore;
 
 /// 进程列表的刷新间隔
 fn proc_every() -> Duration {
@@ -48,7 +48,7 @@ pub(crate) struct SysUi {
     shown: Option<Page>,
     procs: Option<Result<Vec<Proc>, String>>,
     services: Option<Result<Vec<Service>, String>>,
-    storage: Option<Result<Vec<Mount>, String>>,
+    pub(super) storage: Option<Result<Vec<Mount>, String>>,
     cron: Option<Result<CronInfo, String>>,
     /// 存储页的空间透镜(点开的挂载点和扫描结果)
     pub(super) lens: Option<LensStore>,
@@ -73,6 +73,10 @@ pub(crate) struct SysUi {
     pub(super) lens_open: HashSet<String>,
     /// 双击放大的目录栈,最后一个当顶层;空是整个挂载点
     pub(super) lens_zoom: Vec<String>,
+    /// 扫描前等确认的大存储:(挂载点, 已用 KiB, 是不是网络存储)
+    pub(super) lens_ask: Option<(String, u64, bool)>,
+    /// 正在做访问检查的挂载点:(路径, 已用 KiB, 是不是网络存储, 这次是不是用 root 检查)
+    pub(super) lens_probe: Option<(String, u64, bool, bool)>,
     /// 透镜画布的实际大小(像素,canvas 量出来的),色块按它排版
     pub(super) lens_size: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
 }
@@ -160,11 +164,9 @@ impl Home {
         self.dock.sys.asked.clear();
         self.dock.sys.inflight.clear();
         // 透镜重新扫一遍挂载点
-        let root = self.dock.sys.lens.as_ref().filter(|l| !l.is_demo()).map(|l| (l.root.clone(), l.total));
-        if let Some((path, total)) = root {
-            self.lens_close();
-            self.dock.sys.lens = Some(LensStore::new(&path, total));
-            self.lens_start(&path, SCAN_DEPTH);
+        let root = self.dock.sys.lens.as_ref().filter(|l| !l.is_demo() && !l.probing).map(|l| (l.root.clone(), l.total, l.as_root));
+        if let Some((path, total, as_root)) = root {
+            self.lens_begin_as(&path, total, as_root);
         }
     }
 
@@ -184,7 +186,7 @@ impl Home {
         }
     }
 
-    fn sys_ask(&mut self, kind: Kind, script: &str, root: bool) {
+    pub(super) fn sys_ask(&mut self, kind: Kind, script: &str, root: bool) {
         self.dock.sys.asked.insert(kind, Instant::now());
         self.dock.sys.inflight.insert(kind);
         if let Some(d) = self.sys_docker() {
@@ -211,6 +213,7 @@ impl Home {
             Kind::Storage => s.storage = Some(res.and_then(|t| sysops::parse_storage(&t))),
             Kind::Cron => s.cron = Some(res.map(|t| sysops::parse_cron(&t))),
             Kind::ComposeFile | Kind::ComposeEnv => {}
+            Kind::Probe => self.lens_probed(res, cx),
         }
         let _ = (window, cx);
     }
@@ -242,7 +245,7 @@ impl Home {
             return;
         }
         let got: Vec<(Kind, Result<String, String>)> = match self.sys_docker() {
-            Some(d) => d.sys_take(kind).map(|r| (kind, r)).into_iter().collect(),
+            Some(d) => [kind, Kind::Probe].into_iter().filter_map(|k| d.sys_take(k).map(|r| (k, r))).collect(),
             None => return,
         };
         self.lens_pump();
@@ -538,7 +541,7 @@ impl Home {
             Some(Ok(l)) => l,
         };
         let picked = self.dock.sys.lens.as_ref().map(|l| l.root.clone());
-        let header = div().child(head("挂载点").flex_1().min_w_0()).child(head("设备").w(px(150.0))).child(head("类型").w(px(64.0))).child(head("用量").w(px(190.0))).child(head("已用 / 总量").w(px(150.0))).child(head("使用率").w(px(56.0))).child(head("inode").w(px(52.0)));
+        let header = div().child(head("挂载点").flex_1().min_w_0()).child(head("设备").w(px(260.0))).child(head("类型").w(px(64.0))).child(head("用量").w(px(190.0))).child(head("已用 / 总量").w(px(150.0))).child(head("使用率").w(px(56.0))).child(head("inode").w(px(52.0)));
         let mut rows = Vec::new();
         for (i, m) in list.iter().enumerate() {
             let sel = picked.as_deref() == Some(m.mount.as_str());
@@ -551,21 +554,14 @@ impl Home {
                     .cursor_pointer()
                     .when(sel, |d| d.bg(c::field_hover()))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::MEDIUM).child(m.mount.clone()))
-                    .child(mono_cell(150.0, m.dev.clone(), c::muted()))
+                    .child(mono_cell(260.0, m.dev.clone(), c::muted()))
                     .child(cell(64.0, m.fstype.clone()))
                     .child(div().w(px(190.0)).flex_shrink_0().child(bar(m.pct as f32 / 100.0, 170.0, usage_color(m.pct))))
                     .child(mono_cell(150.0, format!("{} / {}", sysops::fmt_kb(m.used_kb), sysops::fmt_kb(m.total_kb)), c::secondary()))
                     .child(mono_cell(56.0, format!("{}%", m.pct), usage_color(m.pct)))
                     .child(mono_cell(52.0, inode, inode_color))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.lens_close();
-                        if this.demo {
-                            this.dock.sys.lens = Some(LensStore::mock(&path));
-                        } else {
-                            this.dock.sys.lens = Some(LensStore::new(&path, used_kb));
-                            this.lens_start(&path, SCAN_DEPTH);
-                        }
-                        cx.notify();
+                        this.lens_request(&path, used_kb, cx);
                     })),
             );
         }
