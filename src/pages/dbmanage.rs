@@ -32,6 +32,11 @@ pub(crate) struct DbMgr {
     reset_err: Option<String>,
     /// 等用户确认删除的库名
     drop_ask: Option<String>,
+    /// 新建用户弹窗、等用户确认删除的用户 (用户名, 主机)
+    uform: Option<UserForm>,
+    udrop_ask: Option<(String, String)>,
+    /// 一次性结果弹窗的种类:0 数据库已创建,1 密码已重置,2 用户已创建
+    done_kind: u8,
     /// 连接信息弹窗:打开时才从容器环境变量读 (用户名, 密码),只放内存,关掉就丢
     conn_open: bool,
     conn: Option<Result<(String, zeroize::Zeroizing<String>), String>>,
@@ -56,6 +61,22 @@ struct DbForm {
     desc: Entity<TextareaState>,
     superuser: bool,
     show_pw: bool,
+}
+
+/// 新建用户弹窗里的输入
+#[derive(Clone)]
+struct UserForm {
+    name: Entity<InputState>,
+    host: Entity<InputState>,
+    password: Entity<InputState>,
+    /// 授权的库和各自的权限档位,空 = 不授权
+    grants: Vec<dbinst::Grant>,
+    add_open: bool,
+    show_pw: bool,
+    /// 编辑已有用户:(用户名, 主机);新建时为 None
+    edit: Option<(String, String)>,
+    /// 编辑时读回来的现有授权(读到之前为 None,保存时拿它和 `grants` 比出差异)
+    orig: Option<Vec<dbinst::Grant>>,
 }
 
 /// 凭据卡片的内容(见 `dbm_cred_card`)
@@ -170,10 +191,58 @@ impl Home {
                 }
                 continue;
             }
+            if tag.starts_with("dbm:ugrants:") {
+                match r {
+                    Ok(o) => {
+                        if let Some(f) = m.uform.as_mut() {
+                            f.grants = kind.parse_grants(&o);
+                            f.orig = Some(f.grants.clone());
+                        }
+                    }
+                    Err(e) => m.form_err = Some(e),
+                }
+                continue;
+            }
+            if tag.starts_with("dbm:updateuser:") {
+                m.busy = false;
+                match r {
+                    Ok(_) => {
+                        m.uform = None;
+                        m.form_err = None;
+                    }
+                    Err(e) => m.form_err = Some(e),
+                }
+                continue;
+            }
+            if tag.starts_with("dbm:dropuser:") {
+                m.busy = false;
+                match r {
+                    Ok(_) => m.users = None,
+                    Err(e) => m.reset_err = Some(e),
+                }
+                continue;
+            }
+            if tag.starts_with("dbm:newuser:") {
+                m.busy = false;
+                match r {
+                    Ok(_) => {
+                        m.uform = None;
+                        m.form_err = None;
+                        m.users = None;
+                        m.done = m.pending.take();
+                        m.done_kind = 2;
+                    }
+                    Err(e) => m.form_err = Some(e),
+                }
+                continue;
+            }
             if tag.starts_with("dbm:reset:") {
                 m.busy = false;
                 match r {
-                    Ok(_) => m.done = m.pending.take(),
+                    Ok(_) => {
+                        m.done = m.pending.take();
+                        m.done_kind = 1;
+                    }
                     Err(e) => {
                         m.pending = None;
                         m.reset_err = Some(e);
@@ -190,6 +259,7 @@ impl Home {
                         m.dbs = None;
                         m.users = None;
                         m.done = m.pending.take();
+                        m.done_kind = 0;
                     }
                     Err(e) => m.form_err = Some(e),
                 }
@@ -215,6 +285,7 @@ impl Home {
             self.dbm_poll(inst.kind);
             self.dbm_request(&inst);
         }
+        self.dbm_request_uform(&inst);
         self.dbm_want_addrs(&inst);
 
         let mut page = div().flex_1().min_h_0().pb(px(14.0)).flex().flex_col().gap(px(12.0));
@@ -299,7 +370,11 @@ impl Home {
                     })),
             );
         }
-        let tabs = tabs.child(div().flex_1()).child(div().flex().flex_row().items_center().gap(px(8.0)).child(conn_btn).child(button("dbm-new-db", IconName::Plus, "新建数据库").on_click(cx.listener(|this, _, window, cx| this.dbm_open_form(window, cx)))));
+        let tabs = tabs.child(div().flex_1()).child(div().flex().flex_row().items_center().gap(px(8.0)).child(conn_btn).child(if self.dock.dbm.sub == 0 {
+            button("dbm-new-db", IconName::Plus, "新建数据库").on_click(cx.listener(|this, _, window, cx| this.dbm_open_form(window, cx)))
+        } else {
+            button("dbm-new-user", IconName::Plus, "新建用户").on_click(cx.listener(|this, _, window, cx| this.dbm_open_uform(window, cx)))
+        }));
         page = page.child(tabs);
         page.child(if self.dock.dbm.sub == 0 { self.dbm_db_table(inst.kind, cx) } else { self.dbm_user_table(inst.kind, cx) }).into_any_element()
     }
@@ -397,6 +472,7 @@ impl Home {
         if self.demo {
             self.dock.dbm.form = None;
             self.dock.dbm.done = Some((name, user, pw));
+            self.dock.dbm.done_kind = 0;
             cx.notify();
             return;
         }
@@ -427,6 +503,7 @@ impl Home {
         };
         if self.demo {
             self.dock.dbm.done = Some((String::new(), user, pw));
+            self.dock.dbm.done_kind = 1;
             cx.notify();
             return;
         }
@@ -531,6 +608,505 @@ impl Home {
                     .child(button("dbm-reset-ok", IconName::RefreshCw, "重置").on_click(cx.listener(move |this, _, _, cx| this.dbm_reset_run(u2.clone(), host.clone(), cx)))),
             );
         Some(crate::ui::modal_glass("dbm-reset-ask", 440.0, |_, _, _| {}, [body.into_any_element()]).into_any_element())
+    }
+
+    fn dbm_open_uform(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("例如 app_user"));
+        let host = cx.new(|cx| InputState::new(window, cx).placeholder("%").default_value("%"));
+        let password = cx.new(|cx| InputState::new(window, cx).placeholder("密码").masked(true).default_value(crate::dbinstall::gen_password()));
+        let fh = name.focus_handle(cx);
+        window.focus(&fh, cx);
+        let m = &mut self.dock.dbm;
+        m.uform = Some(UserForm { name, host, password, grants: Vec::new(), add_open: false, show_pw: false, edit: None, orig: None });
+        m.busy = false;
+        m.form_err = None;
+        cx.notify();
+    }
+
+    /// 编辑已有用户的按库授权:先弹窗,现有授权在 `dbm_request_uform` 里读回来
+    fn dbm_open_edit(&mut self, user: String, host: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.dbm_open_uform(window, cx);
+        if let Some(f) = self.dock.dbm.uform.as_mut() {
+            f.edit = Some((user, host));
+        }
+        if self.demo {
+            if let Some(f) = self.dock.dbm.uform.as_mut() {
+                f.grants = vec![dbinst::Grant { db: "app".into(), level: dbinst::Level::Write, perms: 0 }];
+                f.orig = Some(f.grants.clone());
+            }
+        }
+        cx.notify();
+    }
+
+    /// 新建/编辑用户弹窗要用的数据:库列表(添加数据库的候选)、编辑时用户现有的授权
+    fn dbm_request_uform(&mut self, inst: &DbInstance) {
+        let m = &self.dock.dbm;
+        let Some(f) = &m.uform else { return };
+        if self.demo || !inst.container.running() {
+            return;
+        }
+        let kind = inst.kind;
+        let dbs_tag = format!("dbm:dbs:{}", m.cur);
+        let mut jobs: Vec<(String, String)> = Vec::new();
+        if m.dbs.is_none() && !m.inflight.contains(&dbs_tag) {
+            jobs.push((dbs_tag, kind.list_dbs_sql().to_string()));
+        }
+        let gtag = format!("dbm:ugrants:{}", m.cur);
+        if let (Some((u, h)), None) = (&f.edit, &f.orig) {
+            let names: Option<Vec<String>> = match &m.dbs {
+                Some(Ok(v)) => Some(v.iter().map(|d| d.name.clone()).collect()),
+                Some(Err(_)) => Some(Vec::new()),
+                None => (kind != DbKind::Postgres).then(Vec::new),
+            };
+            if let (Some(names), false, None) = (names, m.inflight.contains(&gtag), &m.form_err) {
+                match kind.read_grants_sql(u, h, &names) {
+                    Ok(q) => jobs.push((gtag, q)),
+                    Err(e) => {
+                        self.dock.dbm.form_err = Some(e);
+                        return;
+                    }
+                }
+            }
+        }
+        for (tag, sql) in jobs {
+            if let Some(d) = self.dbm_docker() {
+                d.db_run(&tag, kind.exec_args(&inst.container.name), Some(sql));
+                self.dock.dbm.inflight.push(tag);
+            }
+        }
+    }
+
+    fn dbm_close_uform(&mut self, cx: &mut Context<Self>) {
+        self.dock.dbm.uform = None;
+        cx.notify();
+    }
+
+    /// 提交新建用户:可顺带授予一个库的全部权限
+    fn dbm_user_submit(&mut self, cx: &mut Context<Self>) {
+        let Some(f) = self.dock.dbm.uform.clone() else { return };
+        if self.dock.dbm.busy {
+            return;
+        }
+        let Some(inst) = self.dbm_inst() else { return };
+        if let Some((user, host)) = f.edit.clone() {
+            // 编辑:拿读回来的授权和现在的比,只改有变化的
+            let Some(orig) = f.orig.clone() else { return };
+            let sql = match inst.kind.update_grants_sql(&user, &host, &orig, &f.grants) {
+                Ok(q) => q,
+                Err(e) => {
+                    self.dock.dbm.form_err = Some(e);
+                    cx.notify();
+                    return;
+                }
+            };
+            if sql.is_empty() || self.demo {
+                self.dock.dbm.uform = None;
+                cx.notify();
+                return;
+            }
+            let tag = format!("dbm:updateuser:{}", inst.container.name);
+            if let Some(d) = self.dbm_docker() {
+                d.db_run(&tag, inst.kind.exec_args(&inst.container.name), Some(sql));
+                let m = &mut self.dock.dbm;
+                m.inflight.push(tag);
+                m.busy = true;
+                m.form_err = None;
+            }
+            cx.notify();
+            return;
+        }
+        let name = f.name.read(cx).value().trim().to_string();
+        let host = if inst.kind == DbKind::Postgres { String::new() } else { f.host.read(cx).value().trim().to_string() };
+        let pw = f.password.read(cx).value().to_string();
+        let sql = match inst.kind.create_user_with_grants_sql(&name, &host, &pw, &f.grants) {
+            Ok(q) => q,
+            Err(e) => {
+                self.dock.dbm.form_err = Some(e);
+                cx.notify();
+                return;
+            }
+        };
+        if self.demo {
+            let m = &mut self.dock.dbm;
+            m.uform = None;
+            m.done = Some((f.grants.iter().map(|g| g.db.as_str()).collect::<Vec<_>>().join(", "), name, pw));
+            m.done_kind = 2;
+            cx.notify();
+            return;
+        }
+        let tag = format!("dbm:newuser:{}", inst.container.name);
+        if let Some(d) = self.dbm_docker() {
+            d.db_run(&tag, inst.kind.exec_args(&inst.container.name), Some(sql));
+            let m = &mut self.dock.dbm;
+            m.inflight.push(tag);
+            m.busy = true;
+            m.form_err = None;
+            m.pending = Some((f.grants.iter().map(|g| g.db.as_str()).collect::<Vec<_>>().join(", "), name, pw));
+        }
+        cx.notify();
+    }
+
+    /// 确认后删除用户
+    fn dbm_udrop_run(&mut self, user: String, host: String, cx: &mut Context<Self>) {
+        self.dock.dbm.udrop_ask = None;
+        let Some(inst) = self.dbm_inst() else { return };
+        let sql = match inst.kind.drop_user_sql(&user, &host) {
+            Ok(q) => q,
+            Err(e) => {
+                self.dock.dbm.reset_err = Some(e);
+                cx.notify();
+                return;
+            }
+        };
+        if self.demo {
+            if let Some(Ok(v)) = &mut self.dock.dbm.users {
+                v.retain(|u| !(u.name == user && u.host == host));
+            }
+            cx.notify();
+            return;
+        }
+        let tag = format!("dbm:dropuser:{}", inst.container.name);
+        if let Some(d) = self.dbm_docker() {
+            d.db_run(&tag, inst.kind.exec_args(&inst.container.name), Some(sql));
+            let m = &mut self.dock.dbm;
+            m.inflight.push(tag);
+            m.busy = true;
+            m.reset_err = None;
+        }
+        cx.notify();
+    }
+
+    fn dbm_udrop_dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (user, host) = self.dock.dbm.udrop_ask.clone()?;
+        let inst = self.dbm_inst()?;
+        let mysql = inst.kind != DbKind::Postgres;
+        let spec = crate::confirm::Confirm {
+            ids: ["dbm-udrop-cancel", "dbm-udrop-ok"],
+            title: "删除用户",
+            tile: Self::icon_tile(IconName::Users, c::danger(), c::danger().opacity(0.18)).into_any_element(),
+            name: if mysql { format!("{user}@{host}").into() } else { user.clone().into() },
+            detail: inst.kind.label().into(),
+            points: vec![
+                (IconName::KeyRound, c::danger(), "用这个用户连接的应用会立即连不上".into()),
+                (IconName::Database, c::accent(), if mysql { "它的库不会被删除".into() } else { "它还拥有库或对象时会删除失败,需要先转移或删除那些库".into() }),
+            ],
+            ok_label: "删除用户",
+            compact: false,
+            kind: crate::confirm::ConfirmKind::Danger,
+            extra: None,
+        };
+        Some(self.delete_confirm("dbm-udrop-dialog", spec, |this| this.dock.dbm.udrop_ask = None, move |this, cx| this.dbm_udrop_run(user.clone(), host.clone(), cx), cx).into_any_element())
+    }
+
+    /// 「新建用户」弹窗:用户名、(MySQL)主机、密码,可选授权一个库
+    fn dbm_user_dialog(&mut self, _window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let f = self.dock.dbm.uform.clone()?;
+        let inst = self.dbm_inst()?;
+        let mysql = inst.kind != DbKind::Postgres;
+        let busy = self.dock.dbm.busy;
+        let input = |i: &Entity<InputState>| div().flex_1().min_w_0().child(Input::new(i).appearance(false).with_size(px(12.0 / 0.875))).into_any_element();
+        let col = |label: &'static str, inner: AnyElement| div().w_full().flex_none().child(super::composeedit::field_col_with(label, None, inner, false, false, None));
+        let eye = super::syspages::tip(
+            super::dockerpages::icon_btn(("dbm-uf-eye", 0), if f.show_pw { IconName::EyeOff } else { IconName::Eye }, c::muted()).on_click(cx.listener(|this, _, window, cx| {
+                if let Some(f) = this.dock.dbm.uform.as_mut() {
+                    f.show_pw = !f.show_pw;
+                    let (masked, pw) = (!f.show_pw, f.password.clone());
+                    pw.update(cx, |s, cx| s.set_masked(masked, window, cx));
+                }
+                cx.notify();
+            })),
+            if f.show_pw { "隐藏密码" } else { "显示密码" },
+        );
+        let regen = super::syspages::tip(
+            super::dockerpages::icon_btn(("dbm-uf-regen", 0), IconName::RefreshCw, c::muted()).on_click(cx.listener(|this, _, window, cx| {
+                if let Some(f) = this.dock.dbm.uform.as_ref() {
+                    f.password.update(cx, |s, cx| s.set_value(&crate::dbinstall::gen_password(), window, cx));
+                }
+            })),
+            "重新生成",
+        );
+        let pw_inner = div().flex_1().min_w_0().flex().flex_row().items_center().gap(px(4.0)).child(input(&f.password)).child(eye).child(regen).into_any_element();
+
+        // 授权:每个库一行(库名 + 四档权限),自定义档展开勾选项;下面「添加数据库」选还没加的库
+        let pg = !mysql;
+        // 一个库一张卡:第一行库名 + 移除;第二行四档分段(等宽);一句话说明这一档;自定义时再多一行等宽的勾选项
+        let seg = |id: (&'static str, usize), text: &'static str, on: bool| {
+            div()
+                .id(id)
+                .flex_1()
+                .h(px(28.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(t::RADIUS_SM))
+                .cursor_pointer()
+                .text_size(px(t::TYPE_CONTROL))
+                .when(on, |d| d.bg(c::accent().opacity(0.22)).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
+                .when(!on, |d| d.text_color(c::muted()).hover(|s| s.bg(c::field_hover()).text_color(c::text())))
+                .child(text)
+        };
+        let mut rows = div().flex().flex_col().gap(px(8.0));
+        for (i, g) in f.grants.iter().enumerate() {
+            let levels = [(dbinst::Level::Read, "只读"), (dbinst::Level::Write, "读写"), (dbinst::Level::All, "全部"), (dbinst::Level::Custom, "自定义")];
+            let mut segs = div().flex().flex_row().items_center().gap(px(2.0)).p(px(2.0)).rounded(px(t::RADIUS_MD)).bg(c::field_hover());
+            for (k, (lv, text)) in levels.into_iter().enumerate() {
+                segs = segs.child(seg(("dbm-ug-lv", i * 4 + k), text, g.level == lv).on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(g) = this.dock.dbm.uform.as_mut().and_then(|f| f.grants.get_mut(i)) {
+                        if lv == dbinst::Level::Custom && g.level != dbinst::Level::Custom && g.perms == 0 {
+                            g.perms = g.level.bits(0).max(dbinst::P_SELECT);
+                        }
+                        g.level = lv;
+                    }
+                    cx.notify();
+                })));
+            }
+            let note = match g.level {
+                dbinst::Level::Read => "只能查询数据",
+                dbinst::Level::Write => "查询、新增、修改、删除数据,不能改表结构",
+                dbinst::Level::All => if pg { "包括建表、改表、删表,拥有这个库的全部权限" } else { "包括建表、改表、删表、建索引等,拥有这个库的全部权限" },
+                dbinst::Level::Custom => "勾选下面允许的操作",
+            };
+            let mut card = div()
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .p(px(12.0))
+                .rounded(px(t::RADIUS_MD))
+                .border_1()
+                .border_color(c::field_border())
+                .bg(c::field())
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(icon(IconName::Database, 14.0, c::secondary()))
+                        .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_size(px(t::TYPE_BODY)).child(g.db.clone()))
+                        .child(super::syspages::tip(
+                            super::dockerpages::icon_btn(("dbm-ug-rm", i), IconName::X, c::muted()).on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(f) = this.dock.dbm.uform.as_mut() {
+                                    if i < f.grants.len() {
+                                        f.grants.remove(i);
+                                    }
+                                }
+                                cx.notify();
+                            })),
+                            "移除这个库",
+                        )),
+                )
+                .child(segs)
+                .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(note));
+            if g.level == dbinst::Level::Custom {
+                let mut chips = div().flex().flex_row().gap(px(6.0));
+                let all = [(dbinst::P_SELECT, "查询"), (dbinst::P_INSERT, "新增"), (dbinst::P_UPDATE, "修改"), (dbinst::P_DELETE, "删除"), (dbinst::P_STRUCT, if pg { "建表" } else { "表结构" })];
+                for (k, (bit, text)) in all.into_iter().enumerate() {
+                    let on = g.perms & bit != 0;
+                    chips = chips.child(
+                        div()
+                            .id(("dbm-ug-p", i * 8 + k))
+                            .flex_1()
+                            .h(px(30.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(5.0))
+                            .rounded(px(t::RADIUS_SM))
+                            .cursor_pointer()
+                            .border_1()
+                            .border_color(if on { c::accent() } else { c::field_border() })
+                            .when(on, |d| d.bg(c::accent().opacity(0.12)))
+                            .when(!on, |d| d.hover(|s| s.bg(c::field_hover())))
+                            .text_size(px(t::TYPE_CONTROL))
+                            .text_color(if on { c::text() } else { c::muted() })
+                            .when(on, |d| d.child(icon(IconName::Check, 12.0, c::accent())))
+                            .child(text)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(g) = this.dock.dbm.uform.as_mut().and_then(|f| f.grants.get_mut(i)) {
+                                    g.perms ^= bit;
+                                }
+                                cx.notify();
+                            })),
+                    );
+                }
+                card = card.child(chips);
+            }
+            rows = rows.child(card);
+        }
+        // 还能添加的库
+        let free: Vec<String> = match &self.dock.dbm.dbs {
+            Some(Ok(v)) => v.iter().filter(|d| !d.system && !f.grants.iter().any(|g| g.db == d.name)).map(|d| d.name.clone()).collect(),
+            _ => Vec::new(),
+        };
+        let add_btn = div()
+            .id("dbm-ug-add")
+            .w_full()
+            .h(px(36.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .gap(px(6.0))
+            .rounded(px(t::RADIUS_MD))
+            .border_1()
+            .border_dashed()
+            .border_color(c::field_border())
+            .text_size(px(t::TYPE_CONTROL))
+            .when(!free.is_empty(), |d| d.cursor_pointer().text_color(c::secondary()).hover(|s| s.bg(c::field_hover()).text_color(c::text())))
+            .when(free.is_empty(), |d| d.text_color(c::ghost()))
+            .child(icon(IconName::Plus, 13.0, if free.is_empty() { c::ghost() } else { c::secondary() }))
+            .child(if free.is_empty() { if f.grants.is_empty() { "还没有可授权的数据库" } else { "没有更多数据库了" } } else { "添加数据库" })
+            .when(!free.is_empty(), |d| {
+                d.on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(f) = this.dock.dbm.uform.as_mut() {
+                        f.add_open = !f.add_open;
+                    }
+                    cx.notify();
+                }))
+            });
+        let add_menu = (f.add_open && !free.is_empty()).then(|| {
+            let (t1, t2) = (cx.entity(), cx.entity());
+            let items: Vec<crate::ui::MenuItem> = free.iter().map(|n| crate::ui::MenuItem::new(n.clone())).collect();
+            crate::ui::dropdown_menu(
+                "dbm-ug-menu",
+                items,
+                None,
+                crate::ui::MenuSide::Below,
+                34.0,
+                move |i, _, cx| {
+                    t1.update(cx, |h, cx| {
+                        if let (Some(f), Some(n)) = (h.dock.dbm.uform.as_mut(), free.get(i)) {
+                            f.grants.push(dbinst::Grant { db: n.clone(), level: dbinst::Level::Read, perms: dbinst::P_SELECT });
+                            f.add_open = false;
+                        }
+                        cx.notify();
+                    })
+                },
+                move |_, cx| {
+                    t2.update(cx, |h, cx| {
+                        if let Some(f) = h.dock.dbm.uform.as_mut() {
+                            f.add_open = false;
+                        }
+                        cx.notify();
+                    })
+                },
+            )
+        });
+        let hint = if pg { "只对现有的库授权;表权限覆盖现有和以后管理员建的表" } else { "只对现有的库授权,以后新建的库不会自动授权" };
+        let grant = div()
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child("数据库权限(可不选)"))
+            .child(div().id("dbm-ug-rows").max_h(px(300.0)).overflow_y_scroll().child(rows))
+            .child(div().relative().child(add_btn).children(add_menu))
+            .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(hint));
+        let err = self.dock.dbm.form_err.clone();
+        let ok = div()
+            .id("dbm-uf-ok")
+            .h(px(34.0))
+            .px(px(18.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(t::RADIUS_MD))
+            .text_size(px(t::TYPE_CONTROL))
+            .font_weight(FontWeight::SEMIBOLD)
+            .bg(c::accent())
+            .text_color(c::on_accent())
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.88))
+            .when(busy, |d| d.opacity(0.6))
+            .when(busy, |d| d.child(crate::ui::dot_spinner(("dbm-uf-spin", 0), c::on_accent())))
+            .child(if f.edit.is_some() { if busy { "保存中" } else { "保存" } } else if busy { "创建中" } else { "创建" })
+            .when(f.edit.is_some() && f.orig.is_none(), |d| d.opacity(0.5))
+            .on_click(cx.listener(|this, _, _, cx| this.dbm_user_submit(cx)));
+        let body = div()
+            .p(px(20.0))
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::BOLD).child(if f.edit.is_some() { "编辑用户" } else { "新建用户" }))
+            .children(match &f.edit {
+                Some((u, h)) => vec![div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(icon(IconName::Users, 14.0, c::muted()))
+                    .child(div().font_family(MONO).text_size(px(t::TYPE_BODY)).child(if mysql { format!("{u}@{h}") } else { u.clone() }))
+                    .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child("(改密码请用「重置密码」)"))
+                    .into_any_element()],
+                None => {
+                    let mut v = vec![col("用户名", input(&f.name)).into_any_element()];
+                    if mysql {
+                        v.push(col("允许连接的主机(% 表示任意)", input(&f.host)).into_any_element());
+                    }
+                    v.push(col("密码", pw_inner).into_any_element());
+                    v
+                }
+            })
+            .child(if f.edit.is_some() && f.orig.is_none() && self.dock.dbm.form_err.is_none() { div().py(px(12.0)).child(loading("正在读取现有权限…")).into_any_element() } else { grant.into_any_element() })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CAPTION)).text_color(if err.is_some() { c::danger() } else { c::ghost() }).child(err.unwrap_or_else(|| if f.edit.is_some() { "只改有变化的库的权限".into() } else { "密码只在创建成功后显示一次".into() })))
+                    .child(button("dbm-uf-cancel", IconName::X, "取消").on_click(cx.listener(|this, _, _, cx| this.dbm_close_uform(cx))))
+                    .child(ok),
+            );
+        let esc = cx.listener(|this: &mut Self, e: &KeyDownEvent, _, cx| {
+            if e.keystroke.key == "escape" {
+                this.dbm_close_uform(cx);
+                cx.stop_propagation();
+            }
+        });
+        Some(crate::ui::modal("dbm-uform", 440.0, esc, [body.into_any_element()]).into_any_element())
+    }
+
+    /// 调试(截图用):演示数据下直接打开某个弹层
+    pub(crate) fn debug_dbm(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(inst) = self.dbm_current() else { return };
+        self.dock.dbm.reset(&inst.container.name);
+        self.dbm_demo(&inst);
+        match kind {
+            "newdb" => self.dbm_open_form(window, cx),
+            "newuser" | "newuser2" => {
+                self.dock.dbm.sub = 1;
+                self.dbm_open_uform(window, cx);
+                if kind == "newuser2" {
+                    if let Some(f) = self.dock.dbm.uform.as_mut() {
+                        f.grants = vec![
+                            dbinst::Grant { db: "app".into(), level: dbinst::Level::Custom, perms: dbinst::P_SELECT | dbinst::P_INSERT },
+                            dbinst::Grant { db: "analytics".into(), level: dbinst::Level::Read, perms: 0 },
+                            dbinst::Grant { db: "billing".into(), level: dbinst::Level::Write, perms: 0 },
+                        ];
+                    }
+                }
+            }
+            "conn" => self.dbm_conn_open(cx),
+            "created" | "reset" | "usercreated" => {
+                self.dock.dbm.done = Some((if kind == "reset" { String::new() } else { "app".into() }, "app_user".into(), "Xk3-demo-password-9aQ".into()));
+                self.dock.dbm.done_kind = match kind {
+                    "created" => 0,
+                    "reset" => 1,
+                    _ => 2,
+                };
+            }
+            "edituser" => {
+                self.dock.dbm.sub = 1;
+                self.dbm_open_edit("app_owner".into(), "%".into(), window, cx);
+            }
+            "udrop" => {
+                self.dock.dbm.sub = 1;
+                self.dock.dbm.udrop_ask = Some(("app_user".into(), "%".into()));
+            }
+            _ => {}
+        }
     }
 
     /// 凭据卡片要用到服务器的网卡地址(内网/公网连接串):弹窗出现时读一次
@@ -740,6 +1316,8 @@ impl Home {
         v.extend(self.dbm_done_dialog(cx));
         v.extend(self.dbm_reset_dialog(cx));
         v.extend(self.dbm_drop_dialog(cx));
+        v.extend(self.dbm_udrop_dialog(cx));
+        v.extend(self.dbm_user_dialog(window, cx));
         v.extend(self.dbm_conn_dialog(cx));
         v
     }
@@ -887,10 +1465,14 @@ impl Home {
     /// 创建数据库 / 重置密码成功后,一次性显示账号和密码(库里只存哈希,之后读不回来)
     fn dbm_done_dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (db, user, pw) = self.dock.dbm.done.clone()?;
-        let reset = db.is_empty();
+        let kind = self.dock.dbm.done_kind;
         let card = CredCard {
-            title: if reset { "密码已重置" } else { "数据库已创建" },
-            desc: Some(if reset { "原密码已立即失效,使用旧密码的应用需要改成新密码。新密码只在这里显示这一次,Otter 不会保存。" } else { "密码只在这里显示这一次,Otter 不会保存,数据库里也只存哈希,请现在复制。忘了只能重置密码。" }),
+            title: ["数据库已创建", "密码已重置", "用户已创建"][kind.min(2) as usize],
+            desc: Some(match kind {
+                1 => "原密码已立即失效,使用旧密码的应用需要改成新密码。新密码只在这里显示这一次,Otter 不会保存。",
+                2 => "用户已创建。密码只在这里显示这一次,Otter 不会保存,数据库里也只存哈希,请现在复制。忘了只能重置密码。",
+                _ => "密码只在这里显示这一次,Otter 不会保存,数据库里也只存哈希,请现在复制。忘了只能重置密码。",
+            }),
             db: Some(db),
             user,
             pw: Some(pw),
@@ -986,7 +1568,7 @@ impl Home {
         }
         let Some(Ok(rows)) = &self.dock.dbm.users else { return div().into_any_element() };
         let mysql = kind != DbKind::Postgres;
-        let header = div().child(head("用户").flex_1().min_w_0()).child(head(if mysql { "主机" } else { "权限" }).w(px(240.0))).child(head("操作").w(px(80.0)).text_right());
+        let header = div().child(head("用户").flex_1().min_w_0()).child(head(if mysql { "主机" } else { "权限" }).w(px(240.0))).child(head("操作").w(px(110.0)).text_right());
         let body = rows
             .iter()
             .enumerate()
@@ -996,12 +1578,29 @@ impl Home {
                     .child(div().w(px(240.0)).truncate().text_size(px(t::TYPE_CONTROL)).font_family(MONO).text_color(c::muted()).child(if mysql { u.host.clone() } else { u.flags.clone() }))
                     .child({
                         let (n, h) = (u.name.clone(), u.host.clone());
-                        div().w(px(80.0)).flex().flex_row().justify_end().items_center().children(u.system.then(|| tag("系统"))).children((!u.system).then(|| {
-                            super::syspages::tip(super::dockerpages::icon_btn_c(("dbm-reset", i), IconName::KeyRound, c::muted()), "重置密码").on_click(cx.listener(move |this, _, _, cx| {
-                                this.dock.dbm.reset_ask = Some((n.clone(), h.clone()));
-                                cx.notify();
+                        let (n2, h2, n3, h3) = (u.name.clone(), u.host.clone(), u.name.clone(), u.host.clone());
+                        div()
+                            .w(px(110.0))
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .items_center()
+                            .children(u.system.then(|| tag("系统")))
+                            .children((!u.system).then(|| {
+                                super::syspages::tip(super::dockerpages::icon_btn_c(("dbm-uedit", i), IconName::Pencil, c::muted()), "编辑权限").on_click(cx.listener(move |this, _, window, cx| this.dbm_open_edit(n3.clone(), h3.clone(), window, cx)))
                             }))
-                        }))
+                            .children((!u.system).then(|| {
+                                super::syspages::tip(super::dockerpages::icon_btn_c(("dbm-reset", i), IconName::KeyRound, c::muted()), "重置密码").on_click(cx.listener(move |this, _, _, cx| {
+                                    this.dock.dbm.reset_ask = Some((n.clone(), h.clone()));
+                                    cx.notify();
+                                }))
+                            }))
+                            .children((!u.system).then(|| {
+                                super::syspages::tip(super::dockerpages::icon_btn_c(("dbm-udel", i), IconName::Trash, c::danger()), "删除用户").on_click(cx.listener(move |this, _, _, cx| {
+                                    this.dock.dbm.udrop_ask = Some((n2.clone(), h2.clone()));
+                                    cx.notify();
+                                }))
+                            }))
                     })
             })
             .collect();

@@ -46,6 +46,48 @@ macro_rules! my_pw_script {
     };
 }
 
+/// 一个库上的权限档位
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    /// 只读:只能查询
+    Read,
+    /// 读写:查询、新增、修改、删除数据,不能改表结构
+    Write,
+    /// 全部权限
+    All,
+    /// 自定义:按 `Grant::perms` 里勾的项
+    Custom,
+}
+
+/// 自定义权限的位:查询、新增、修改、删除、表结构(MySQL:建表/改表/删表/索引;PostgreSQL:在 public 里建表)
+pub const P_SELECT: u8 = 1;
+pub const P_INSERT: u8 = 2;
+pub const P_UPDATE: u8 = 4;
+pub const P_DELETE: u8 = 8;
+pub const P_STRUCT: u8 = 16;
+/// 读回来的授权带「可授权」(WITH GRANT OPTION):只用来在收回时一并去掉,不属于任何档位
+pub const P_GRANTOPT: u8 = 32;
+
+/// 给用户在某个库上授予的权限
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Grant {
+    pub db: String,
+    pub level: Level,
+    pub perms: u8,
+}
+
+impl Level {
+    /// 这一档实际包含的权限位
+    pub fn bits(self, custom: u8) -> u8 {
+        match self {
+            Level::Read => P_SELECT,
+            Level::Write => P_SELECT | P_INSERT | P_UPDATE | P_DELETE,
+            Level::All => P_SELECT | P_INSERT | P_UPDATE | P_DELETE | P_STRUCT,
+            Level::Custom => custom & 31,
+        }
+    }
+}
+
 impl DbKind {
     pub fn label(self) -> &'static str {
         match self {
@@ -314,6 +356,191 @@ impl DbKind {
             }
             DbKind::Redis => return Err("Redis 不在这里管理用户".into()),
         })
+    }
+
+    /// 新建用户并按列表授权(每个库一档权限;只对现有的库授权,以后新建的库不会自动授权)
+    pub fn create_user_with_grants_sql(self, name: &str, host: &str, password: &str, grants: &[Grant]) -> Result<String, String> {
+        let mut q = self.create_user_sql(name, host, password, "")?;
+        q += &self.grants_sql(name, host, grants)?;
+        Ok(q)
+    }
+
+    pub fn grants_sql(self, user: &str, host: &str, grants: &[Grant]) -> Result<String, String> {
+        let mut q = String::new();
+        for g in grants {
+            if !valid_ident(&g.db) {
+                return Err("库名里有不支持的字符,请到终端里处理".into());
+            }
+            let bits = g.level.bits(g.perms);
+            if bits == 0 {
+                return Err(format!("库 {} 还没有勾选任何权限", g.db));
+            }
+            let db = &g.db;
+            match self {
+                DbKind::Mysql | DbKind::Mariadb => {
+                    let host = if host.is_empty() { "%" } else { host };
+                    if !valid_host(host) {
+                        return Err("主机只能用字母、数字和 . % : - _".into());
+                    }
+                    let privs = if g.level == Level::All {
+                        "ALL PRIVILEGES".to_string()
+                    } else {
+                        let mut v: Vec<&str> = Vec::new();
+                        for (b, n) in [(P_SELECT, "SELECT"), (P_INSERT, "INSERT"), (P_UPDATE, "UPDATE"), (P_DELETE, "DELETE")] {
+                            if bits & b != 0 {
+                                v.push(n);
+                            }
+                        }
+                        if g.level == Level::Read {
+                            v.push("SHOW VIEW");
+                        }
+                        if bits & P_STRUCT != 0 {
+                            v.extend(["CREATE", "ALTER", "DROP", "INDEX"]);
+                        }
+                        v.join(", ")
+                    };
+                    q += &format!("GRANT {privs} ON `{db}`.* TO '{user}'@'{host}';\n");
+                }
+                DbKind::Postgres => {
+                    if g.level == Level::All {
+                        q += &format!("GRANT ALL PRIVILEGES ON DATABASE \"{db}\" TO \"{user}\";\n");
+                    } else {
+                        q += &format!("GRANT CONNECT ON DATABASE \"{db}\" TO \"{user}\";\n");
+                    }
+                    // 表和序列在库里面授权:连进这个库再授(psql 的 \c 沿用 PGPASSWORD)
+                    q += &format!("\\c \"{db}\"\n");
+                    let schema = if bits & P_STRUCT != 0 { "USAGE, CREATE" } else { "USAGE" };
+                    q += &format!("GRANT {schema} ON SCHEMA public TO \"{user}\";\n");
+                    let tbl: Vec<&str> = [(P_SELECT, "SELECT"), (P_INSERT, "INSERT"), (P_UPDATE, "UPDATE"), (P_DELETE, "DELETE")].iter().filter(|(b, _)| bits & b != 0).map(|(_, n)| *n).collect();
+                    if !tbl.is_empty() {
+                        let t = if g.level == Level::All { "ALL PRIVILEGES".to_string() } else { tbl.join(", ") };
+                        let seq = if g.level == Level::All { "ALL PRIVILEGES" } else if bits & (P_INSERT | P_UPDATE) != 0 { "USAGE, SELECT" } else { "SELECT" };
+                        q += &format!("GRANT {t} ON ALL TABLES IN SCHEMA public TO \"{user}\";\n");
+                        q += &format!("GRANT {seq} ON ALL SEQUENCES IN SCHEMA public TO \"{user}\";\n");
+                        q += &format!("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT {t} ON TABLES TO \"{user}\";\n");
+                        q += &format!("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT {seq} ON SEQUENCES TO \"{user}\";\n");
+                    }
+                }
+                DbKind::Redis => return Err("Redis 不在这里管理用户".into()),
+            }
+        }
+        Ok(q)
+    }
+
+    /// 读一个用户现有的按库授权(PostgreSQL 要逐库连进去查,所以要传库名列表;MySQL 查 `mysql.db`)。输出用 `parse_grants` 解析
+    pub fn read_grants_sql(self, user: &str, host: &str, dbs: &[String]) -> Result<String, String> {
+        if !valid_ident(user) {
+            return Err("用户名里有不支持的字符,请到终端里处理".into());
+        }
+        match self {
+            DbKind::Mysql | DbKind::Mariadb => {
+                if !valid_host(host) {
+                    return Err("主机里有不支持的字符,请到终端里处理".into());
+                }
+                Ok(format!("SELECT Db, Select_priv, Insert_priv, Update_priv, Delete_priv, Create_priv, Drop_priv, Alter_priv, Index_priv, Show_view_priv, References_priv, Create_tmp_table_priv, Lock_tables_priv, Create_view_priv, Create_routine_priv, Alter_routine_priv, Execute_priv, Event_priv, Trigger_priv, Grant_priv FROM mysql.db WHERE User = '{user}' AND Host = '{host}' ORDER BY Db;\n"))
+            }
+            DbKind::Postgres => {
+                let mut q = String::new();
+                for d in dbs.iter().filter(|d| valid_ident(d)) {
+                    q += &format!("\\c \"{d}\"\n");
+                    // 字段:库名、是否有显式授权、库上 CREATE、public 上 CREATE、表的 SELECT/INSERT/UPDATE/DELETE(有表看表,没表看默认权限)
+                    let role = format!("(SELECT oid FROM pg_roles WHERE rolname = '{user}')");
+                    let tbl = |p: &str| format!("COALESCE((SELECT bool_and(has_table_privilege('{user}', c.oid, '{p}')) FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r','p')), EXISTS (SELECT 1 FROM pg_default_acl d, aclexplode(d.defaclacl) a WHERE a.grantee = {role} AND d.defaclobjtype = 'r' AND d.defaclnamespace = 'public'::regnamespace AND a.privilege_type = '{p}'))");
+                    q += &format!(
+                        "SELECT current_database(), EXISTS (SELECT 1 FROM pg_database x, aclexplode(x.datacl) a WHERE x.datname = current_database() AND a.grantee = {role}) OR EXISTS (SELECT 1 FROM pg_database x WHERE x.datname = current_database() AND x.datdba = {role}), has_database_privilege('{user}', current_database(), 'CREATE'), EXISTS (SELECT 1 FROM pg_namespace n, aclexplode(n.nspacl) a WHERE n.nspname = 'public' AND a.grantee = {role} AND a.privilege_type = 'CREATE') OR EXISTS (SELECT 1 FROM pg_database x WHERE x.datname = current_database() AND x.datdba = {role}), {}, {}, {}, {};\n",
+                        tbl("SELECT"),
+                        tbl("INSERT"),
+                        tbl("UPDATE"),
+                        tbl("DELETE")
+                    );
+                }
+                Ok(q)
+            }
+            DbKind::Redis => Err("Redis 不在这里管理用户".into()),
+        }
+    }
+
+    /// 解析 `read_grants_sql` 的输出成按库授权;MySQL 带通配符的库名(如 `app\_%`)不是单个库,跳过
+    pub fn parse_grants(self, out: &str) -> Vec<Grant> {
+        let mut v = Vec::new();
+        for l in out.lines() {
+            let f: Vec<&str> = l.trim_end_matches('\r').split('\t').collect();
+            match self {
+                DbKind::Postgres => {
+                    if f.len() < 8 || f[1] != "t" {
+                        continue;
+                    }
+                    let b = |i: usize| f[i] == "t";
+                    let (dbc, sch) = (b(2), b(3));
+                    let bits = u8::from(b(4)) * P_SELECT | u8::from(b(5)) * P_INSERT | u8::from(b(6)) * P_UPDATE | u8::from(b(7)) * P_DELETE | u8::from(sch) * P_STRUCT;
+                    let level = if dbc && sch && bits == 31 {
+                        Level::All
+                    } else if bits == P_SELECT {
+                        Level::Read
+                    } else if bits == Level::Write.bits(0) {
+                        Level::Write
+                    } else {
+                        Level::Custom
+                    };
+                    v.push(Grant { db: f[0].to_string(), level, perms: bits });
+                }
+                DbKind::Mysql | DbKind::Mariadb => {
+                    if f.len() < 20 || f[0].contains(['%', '*']) {
+                        continue;
+                    }
+                    let y = |i: usize| f[i] == "Y";
+                    let bits = u8::from(y(1)) * P_SELECT | u8::from(y(2)) * P_INSERT | u8::from(y(3)) * P_UPDATE | u8::from(y(4)) * P_DELETE | u8::from(y(5) || y(6) || y(7) || y(8)) * P_STRUCT;
+                    let level = if (1..19).all(y) {
+                        Level::All
+                    } else if bits == P_SELECT && y(9) && (10..19).all(|i| !y(i)) {
+                        Level::Read
+                    } else if bits == Level::Write.bits(0) && (9..19).all(|i| !y(i)) && !(y(5) || y(6) || y(7) || y(8)) {
+                        Level::Write
+                    } else {
+                        Level::Custom
+                    };
+                    v.push(Grant { db: f[0].replace("\\_", "_"), level, perms: bits | if y(19) { P_GRANTOPT } else { 0 } });
+                }
+                DbKind::Redis => {}
+            }
+        }
+        v
+    }
+
+    /// 把用户的按库授权从 `old` 改成 `new`:没变的不动,变了或移除的先收回再按新的授;新加的直接授
+    pub fn update_grants_sql(self, user: &str, host: &str, old: &[Grant], new: &[Grant]) -> Result<String, String> {
+        let same = |a: &Grant, b: &Grant| a.db == b.db && a.level == b.level && a.level.bits(a.perms) == b.level.bits(b.perms);
+        let mut q = String::new();
+        for g in old {
+            if new.iter().any(|n| same(n, g)) {
+                continue;
+            }
+            if !valid_ident(&g.db) {
+                return Err("库名里有不支持的字符,请到终端里处理".into());
+            }
+            let db = &g.db;
+            match self {
+                DbKind::Mysql | DbKind::Mariadb => {
+                    let host = if host.is_empty() { "%" } else { host };
+                    if !valid_host(host) {
+                        return Err("主机里有不支持的字符,请到终端里处理".into());
+                    }
+                    q += &format!("REVOKE ALL PRIVILEGES ON `{db}`.* FROM '{user}'@'{host}';\n");
+                    if g.perms & P_GRANTOPT != 0 {
+                        q += &format!("REVOKE GRANT OPTION ON `{db}`.* FROM '{user}'@'{host}';\n");
+                    }
+                }
+                DbKind::Postgres => {
+                    q += &format!("REVOKE ALL ON DATABASE \"{db}\" FROM \"{user}\";\n\\c \"{db}\"\n");
+                    q += &format!("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM \"{user}\";\nREVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM \"{user}\";\nREVOKE ALL ON SCHEMA public FROM \"{user}\";\n");
+                    q += &format!("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM \"{user}\";\nALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM \"{user}\";\n");
+                }
+                DbKind::Redis => return Err("Redis 不在这里管理用户".into()),
+            }
+        }
+        let add: Vec<Grant> = new.iter().filter(|n| !old.iter().any(|o| same(n, o))).cloned().collect();
+        q += &self.grants_sql(user, host, &add)?;
+        Ok(q)
     }
 
     pub fn alter_password_sql(self, name: &str, host: &str, password: &str) -> Result<String, String> {
@@ -771,8 +998,83 @@ mod tests {
         if let Ok(dir) = std::env::var("OTTER_DUMP_SCRIPTS") {
             for (n, k) in [("pg", DbKind::Postgres), ("my", DbKind::Mysql)] {
                 std::fs::write(format!("{dir}/{n}.sh"), k.conn_args("c").last().unwrap()).unwrap();
+                std::fs::write(format!("{dir}/{n}-client.sh"), k.exec_args("c").last().unwrap()).unwrap();
             }
+            {
+                let g = |db: &str, level, perms| Grant { db: db.into(), level, perms };
+                let gs = [g("otg_a", Level::Read, 0), g("otg_b", Level::Write, 0), g("otg_c", Level::All, 0), g("otg_d", Level::Custom, P_SELECT | P_STRUCT)];
+                for (n, k) in [("pg", DbKind::Postgres), ("my", DbKind::Mysql)] {
+                    let mut q = String::new();
+                    for d in ["otg_a", "otg_b", "otg_c", "otg_d"] {
+                        q += &if n == "pg" { format!("CREATE DATABASE {d};\n") } else { format!("CREATE DATABASE {d};\n") };
+                    }
+                    q += &k.create_user_with_grants_sql("otg_u", "%", "Pw7-abc", &gs).unwrap();
+                    std::fs::write(format!("{dir}/{n}-grants.sql"), q).unwrap();
+                    let dbs: Vec<String> = ["otg_a", "otg_b", "otg_c", "otg_d"].iter().map(|s| s.to_string()).collect();
+                    std::fs::write(format!("{dir}/{n}-read.sql"), k.read_grants_sql("otg_u", "%", &dbs).unwrap()).unwrap();
+                    // 改成:a 全部、b 去掉、c 只读、d 不变
+                    let new = [g("otg_a", Level::All, 0), g("otg_c", Level::Read, 0), g("otg_d", Level::Custom, P_SELECT | P_STRUCT)];
+                    std::fs::write(format!("{dir}/{n}-update.sql"), k.update_grants_sql("otg_u", "%", &gs, &new).unwrap()).unwrap();
+                }
+            }
+            let k = DbKind::Postgres;
+            std::fs::write(format!("{dir}/pg-user.sql"), format!("CREATE DATABASE otpg_t;\n{}", k.create_user_sql("otpg_u", "", "Pw5-abc'x", "otpg_t").unwrap())).unwrap();
+            std::fs::write(format!("{dir}/pg-user2.sql"), k.create_user_sql("otpg_plain", "", "Pw6-abc", "").unwrap()).unwrap();
+            std::fs::write(format!("{dir}/pg-drop-u.sql"), k.drop_user_sql("otpg_u", "").unwrap()).unwrap();
+            std::fs::write(format!("{dir}/pg-drop-plain.sql"), k.drop_user_sql("otpg_plain", "").unwrap()).unwrap();
+            let k = DbKind::Mysql;
+            std::fs::write(format!("{dir}/my-create.sql"), k.create_db_with_user_sql("otdb_full", "otuser_full", "Pw1-abc'\\x", true, "").unwrap()).unwrap();
+            std::fs::write(format!("{dir}/my-create2.sql"), k.create_db_with_user_sql("otdb_lim", "otuser_lim", "Pw2-abc", false, "").unwrap()).unwrap();
+            std::fs::write(format!("{dir}/my-user.sql"), k.create_user_sql("otuser_x", "%", "Pw3-abc", "otdb_lim").unwrap()).unwrap();
+            std::fs::write(format!("{dir}/my-alter.sql"), k.alter_password_sql("otuser_x", "%", "Pw4-new'q").unwrap()).unwrap();
+            std::fs::write(format!("{dir}/my-dropuser.sql"), format!("{}{}", k.drop_user_sql("otuser_x", "%").unwrap(), k.drop_user_sql("otuser_lim", "%").unwrap() + &k.drop_user_sql("otuser_full", "%").unwrap())).unwrap();
+            std::fs::write(format!("{dir}/my-dropdb.sql"), format!("{}{}", k.drop_db_sql("otdb_full").unwrap(), k.drop_db_sql("otdb_lim").unwrap())).unwrap();
         }
+    }
+
+    #[test]
+    fn grants_sql_levels() {
+        let g = |db: &str, level, perms| Grant { db: db.into(), level, perms };
+        let my = DbKind::Mysql.grants_sql("u", "%", &[g("a", Level::Read, 0), g("b", Level::Write, 0), g("c", Level::All, 0), g("d", Level::Custom, P_SELECT | P_STRUCT)]).unwrap();
+        assert!(my.contains("GRANT SELECT, SHOW VIEW ON `a`.* TO 'u'@'%';"));
+        assert!(my.contains("GRANT SELECT, INSERT, UPDATE, DELETE ON `b`.*"));
+        assert!(my.contains("GRANT ALL PRIVILEGES ON `c`.*"));
+        assert!(my.contains("GRANT SELECT, CREATE, ALTER, DROP, INDEX ON `d`.*"));
+        let pg = DbKind::Postgres.grants_sql("u", "", &[g("a", Level::Read, 0), g("b", Level::All, 0)]).unwrap();
+        assert!(pg.contains("GRANT CONNECT ON DATABASE \"a\" TO \"u\";"));
+        assert!(pg.contains("GRANT SELECT ON ALL SEQUENCES IN SCHEMA public"));
+        assert!(pg.contains("GRANT ALL PRIVILEGES ON DATABASE \"b\""));
+        assert!(pg.matches("\\c ").count() == 2);
+        // 自定义只勾「表结构」:不授表数据权限
+        let only = DbKind::Postgres.grants_sql("u", "", &[g("a", Level::Custom, P_STRUCT)]).unwrap();
+        assert!(only.contains("USAGE, CREATE ON SCHEMA") && !only.contains("ON ALL TABLES"));
+        assert!(DbKind::Mysql.grants_sql("u", "%", &[g("a", Level::Custom, 0)]).is_err());
+        assert!(DbKind::Mysql.grants_sql("u", "%", &[g("a`b", Level::Read, 0)]).is_err());
+        assert!(DbKind::Mysql.grants_sql("u", "%", &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parses_grants_and_diffs() {
+        // MySQL:库 a 只读、b 读写、c 全部、d 自定义(查询+建表)、通配符库跳过
+        let row = |db: &str, v: &str| format!("{db}\t{}\n", v.chars().map(|c| c.to_string()).collect::<Vec<_>>().join("\t"));
+        let out = row("a", "YNNNNNNNYNNNNNNNNNN") + &row("b", "YYYYNNNNNNNNNNNNNNN") + &row("c", "YYYYYYYYYYYYYYYYYYN") + &row("d", "YNNNYNNNNNNNNNNNNNN") + &row("app\\_%", "YNNNNNNNNNNNNNNNNNN");
+        let g = DbKind::Mysql.parse_grants(&out);
+        assert_eq!(g.iter().map(|x| (x.db.as_str(), x.level)).collect::<Vec<_>>(), [("a", Level::Read), ("b", Level::Write), ("c", Level::All), ("d", Level::Custom)]);
+        assert_eq!(g[3].perms, P_SELECT | P_STRUCT);
+        // 带「可授权」的全部权限:档位还是「全部」,收回时多一句 REVOKE GRANT OPTION
+        let go = DbKind::Mysql.parse_grants(&row("e", "YYYYYYYYYYYYYYYYYYY"));
+        assert_eq!((go[0].level, go[0].perms & P_GRANTOPT), (Level::All, P_GRANTOPT));
+        assert!(DbKind::Mysql.update_grants_sql("u", "%", &go, &[]).unwrap().contains("REVOKE GRANT OPTION ON `e`.*"));
+        // PostgreSQL:没有显式授权的库不算
+        let pg = DbKind::Postgres.parse_grants("a\tt\tf\tf\tt\tf\tf\tf\nb\tf\tf\tf\tt\tt\tt\tt\nc\tt\tt\tt\tt\tt\tt\tt\n");
+        assert_eq!(pg.iter().map(|x| (x.db.as_str(), x.level)).collect::<Vec<_>>(), [("a", Level::Read), ("c", Level::All)]);
+        // 差异:只收回变了的、只授新的
+        let gr = |db: &str, level| Grant { db: db.into(), level, perms: 0 };
+        let q = DbKind::Mysql.update_grants_sql("u", "%", &[gr("a", Level::Read), gr("b", Level::Write)], &[gr("a", Level::Read), gr("b", Level::All), gr("c", Level::Read)]).unwrap();
+        assert!(q.contains("REVOKE ALL PRIVILEGES ON `b`.*"));
+        assert!(!q.contains("`a`") && q.contains("GRANT ALL PRIVILEGES ON `b`.*") && q.contains("GRANT SELECT, SHOW VIEW ON `c`.*"));
+        let pq = DbKind::Postgres.update_grants_sql("u", "", &[gr("a", Level::Read)], &[]).unwrap();
+        assert!(pq.contains("REVOKE ALL ON DATABASE \"a\"") && pq.contains("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES"));
     }
 
     #[test]

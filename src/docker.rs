@@ -2181,6 +2181,10 @@ async fn run_action(r: &Runner, sh: &Shared, a: Action) {
 /// 用 mock 的堆栈拼一份快照,外加几条镜像和存储卷,让各页在演示和截图里有内容
 pub fn demo_snapshot(stacks: &[Stack]) -> Snapshot {
     let mut snap = Snapshot::default();
+    // 调试:OTTER_DBM 截图时补一个 PostgreSQL 容器,数据库页才有实例可看
+    if std::env::var_os("OTTER_DBM").is_some() {
+        snap.containers.push(Container { id: "demo-pg".into(), name: "demo-postgres".into(), image: "postgres:16".into(), state: "running".into(), status: "Up 3 days".into(), ports: vec!["127.0.0.1:5432->5432".into()], project: None, service: None, panel: None, mounts: vec![] });
+    }
     for (si, s) in stacks.iter().enumerate() {
         for (i, svc) in s.services.iter().enumerate() {
             let id = format!("{:012x}", (si * 100 + i + 1) * 7919);

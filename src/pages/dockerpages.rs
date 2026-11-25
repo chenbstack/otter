@@ -40,6 +40,8 @@ pub(crate) struct DockAsk {
 pub(crate) struct DockUi {
     /// 当前页读的快照(真实或 demo)
     pub snap: Arc<Snapshot>,
+    /// 调试:截图时等数据库实例出现后再打开的弹层(见 `debug_dbm`)
+    pub dbm_dbg: Option<String>,
     search: Option<Entity<InputState>>,
     pull: Option<Entity<InputState>>,
     pub(super) pull_open: bool,
@@ -83,7 +85,7 @@ const PENDING_MAX_SECS: u64 = 60;
 
 impl DockUi {
     pub fn new() -> Self {
-        Self { snap: Arc::new(Snapshot::default()), search: None, pull: None, pull_open: false, pull_reg: None, pull_reg_open: false, inst_src: None, inst_src_open: false, inst_accel: false, inst_log_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), comp: Default::default(), dbi: Default::default(), dbm: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, pending: Vec::new(), polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
+        Self { snap: Arc::new(Snapshot::default()), dbm_dbg: None, search: None, pull: None, pull_open: false, pull_reg: None, pull_reg_open: false, inst_src: None, inst_src_open: false, inst_accel: false, inst_log_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), comp: Default::default(), dbi: Default::default(), dbm: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, pending: Vec::new(), polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
     }
 }
 
@@ -204,6 +206,11 @@ impl Home {
             self.sys_sync(window, cx);
             self.ct_sync(window, cx);
             self.comp_sync(window, cx);
+            if self.dock.dbm_dbg.is_some() && self.dbm_current().is_some() {
+                if let Some(k) = self.dock.dbm_dbg.take() {
+                    self.debug_dbm(&k, window, cx);
+                }
+            }
             return;
         }
         // 这个标签的终端已连上就复用它的连接;没连上等它(连接页显示终端的进度);没有终端才自己连。

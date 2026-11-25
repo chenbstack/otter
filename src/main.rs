@@ -633,6 +633,10 @@ fn main() {
                     h.page = Page::ALL[p.min(Page::ALL.len() - 1)];
                 }
                 h.shot = shot.clone().map(|p| (p, 0));
+                // 调试:OTTER_DBM=newdb|newuser|conn|created|reset|udrop 截图时直接打开数据库页对应的弹层
+                if let Ok(k) = std::env::var("OTTER_DBM") {
+                    h.dock.dbm_dbg = Some(k);
+                }
                 // 截图/调试:假装发现了新版本(OTTER_FAKE_UPDATE=<版本号>)
                 if let Ok(v) = std::env::var("OTTER_FAKE_UPDATE") {
                     h.update = update::State::Available(update::Update { version: v, page: "https://github.com/".into(), asset: None });
