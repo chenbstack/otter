@@ -12,6 +12,8 @@ A native SSH client: terminal, files (SFTP) and server management (Docker, datab
 
 ![App store](assets/screenshots/store.png)
 
+![Storage space lens](assets/screenshots/storage.png)
+
 ![Files](assets/screenshots/files.png)
 
 ![Agent takeover approval](assets/screenshots/takeover.png)

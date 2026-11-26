@@ -12,6 +12,8 @@
 
 ![应用商店](assets/screenshots/store.png)
 
+![存储空间透镜](assets/screenshots/storage.png)
+
 ![文件管理](assets/screenshots/files.png)
 
 ![Agent 接管确认](assets/screenshots/takeover.png)
