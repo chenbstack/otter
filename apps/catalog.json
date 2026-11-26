@@ -614,7 +614,7 @@
           }
         }
       ],
-      "compose": "services:\n  app:\n    image: louislam/uptime-kuma:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:3001\"\n    volumes:\n      - ${container}-data:/app/data\n    labels:\n      otter.managed: app\n      otter.app: uptime-kuma\nvolumes:\n  ${container}-data:\n",
+      "compose": "services:\n  app:\n    image: louislam/uptime-kuma:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:3001\"\n    volumes:\n      - ./data:/app/data\n    labels:\n      otter.managed: app\n      otter.app: uptime-kuma\n",
       "post": {
         "notes": "第一次打开页面时创建管理员账号",
         "url": "http://<服务器>:${port}"
@@ -705,7 +705,7 @@
           }
         }
       ],
-      "compose": "services:\n  app:\n    image: neosmemo/memos:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:5230\"\n    volumes:\n      - ${container}-data:/var/opt/memos\n    labels:\n      otter.managed: app\n      otter.app: memos\nvolumes:\n  ${container}-data:\n",
+      "compose": "services:\n  app:\n    image: neosmemo/memos:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:5230\"\n    volumes:\n      - ./data:/var/opt/memos\n    labels:\n      otter.managed: app\n      otter.app: memos\n",
       "post": {
         "notes": "第一次打开页面时注册的账号就是管理员",
         "url": "http://<服务器>:${port}"
@@ -789,7 +789,7 @@
           }
         }
       ],
-      "compose": "services:\n  app:\n    image: minio/minio:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    command: [\"server\", \"/data\", \"--console-address\", \":9001\"]\n    ports:\n      - \"${bind}${api_port}:9000\"\n      - \"${bind}${console_port}:9001\"\n    volumes:\n      - ${container}-data:/data\n    environment:\n      MINIO_ROOT_USER: \"${user}\"\n      MINIO_ROOT_PASSWORD: ${env.password}\n    labels:\n      otter.managed: app\n      otter.app: minio\nvolumes:\n  ${container}-data:\n",
+      "compose": "services:\n  app:\n    image: minio/minio:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    command: [\"server\", \"/data\", \"--console-address\", \":9001\"]\n    ports:\n      - \"${bind}${api_port}:9000\"\n      - \"${bind}${console_port}:9001\"\n    volumes:\n      - ./data:/data\n    environment:\n      MINIO_ROOT_USER: \"${user}\"\n      MINIO_ROOT_PASSWORD: ${env.password}\n    labels:\n      otter.managed: app\n      otter.app: minio\n",
       "post": {
         "notes": "控制台用上面的账号密码登录;密码只显示这一次",
         "url": "http://<服务器>:${console_port}",
