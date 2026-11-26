@@ -273,10 +273,13 @@ impl Home {
         for (k, r) in got {
             self.sys_store(k, r, window, cx);
         }
+        if kind == Kind::Web {
+            self.web_entered(window.is_window_active());
+        }
         let idle = !self.dock.sys.inflight.contains(&kind);
         let due = match self.dock.sys.asked.get(&kind) {
             None => true,
-            Some(t) => kind == Kind::Procs && t.elapsed() >= proc_every(),
+            Some(t) => (kind == Kind::Procs && t.elapsed() >= proc_every()) || (kind == Kind::Web && self.web_reload_due()),
         };
         if idle && due {
             if kind == Kind::Web {

@@ -1654,11 +1654,21 @@ async fn sys_load(r: &Runner, sh: &Shared, kind: crate::sysops::Kind, script: &s
         crate::sysops::Kind::WebOp => Duration::from_secs(180),
         _ => Duration::from_secs(30),
     };
+    let t0 = Instant::now();
     let res = match sys_exec(r, script, root, None, t).await {
         Ok(o) if o.code == 0 || !o.stdout.trim().is_empty() => Ok(o.stdout),
         Ok(o) => Err(last_line(&o)),
         Err(e) => Err(e),
     };
+    // 读取状态卡住或失败时留线索(日志页能看到):失败/超过 5 秒记警告,网站页的每次读取记调试
+    let secs = t0.elapsed().as_secs_f32();
+    let what = format!("{kind:?}");
+    match &res {
+        Err(e) => logs::push(logs::Level::Warn, "服务器", format!("读取{what}失败(用时 {secs:.1} 秒):{e}")),
+        Ok(o) if secs >= 5.0 => logs::push(logs::Level::Warn, "服务器", format!("读取{what}较慢:{secs:.1} 秒,返回 {} 字节", o.len())),
+        Ok(o) if matches!(kind, crate::sysops::Kind::Web) => logs::push(logs::Level::Debug, "服务器", format!("读取{what}完成:{secs:.1} 秒,{} 字节", o.len())),
+        _ => {}
+    }
     sh.sys.lock().unwrap().insert(kind, res);
     sh.bump();
 }

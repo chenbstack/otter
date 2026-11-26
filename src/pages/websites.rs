@@ -34,6 +34,10 @@ const COL_CERT_USE: f32 = 70.0;
 const COL_CERT_ACT: f32 = 60.0;
 
 /// 后台任务的轮询间隔
+/// 网站页停留时自动重读状态的间隔
+const RELOAD_EVERY: Duration = Duration::from_secs(20);
+/// 离开网站页超过这么久再回来,算重新进入
+const ENTER_GAP: Duration = Duration::from_millis(1500);
 const POLL_EVERY: Duration = Duration::from_secs(2);
 /// 任务日志面板显示的行数
 const JOB_LINES: usize = 12;
@@ -78,7 +82,6 @@ enum Pending {
     DeleteDns(String),
     DeleteAcme(String),
     Adopt(web::Target),
-    Unadopt,
 }
 
 struct WebConfirm {
@@ -118,6 +121,12 @@ struct LForm {
 pub(crate) struct WebUi {
     tab: u8,
     st: Option<Result<WebState, String>>,
+    /// 上一次在前台渲染网站页的时间:隔了一会儿再回来就重读一次状态
+    seen: Option<Instant>,
+    /// 窗口当前是否在前台(只有前台才自动重读)
+    active: bool,
+    /// 窗口失去过焦点:重新获得焦点时重读一次
+    blurred: bool,
     busy: Option<&'static str>,
     tag: OpTag,
     err: Option<String>,
@@ -449,7 +458,33 @@ impl Home {
 
     /// 页面前台时要不要重绘:后台任务到了该轮询的时间
     pub(crate) fn web_due(&self) -> bool {
-        self.page == Page::Websites && !self.demo && self.web_ui().job.as_ref().is_some_and(|j| j.done.is_none() && j.last.elapsed() >= POLL_EVERY) && !self.dock.sys.inflight.contains(&Kind::WebPoll)
+        self.page == Page::Websites && !self.demo && (self.web_job_due() || self.web_reload_due())
+    }
+
+    fn web_job_due(&self) -> bool {
+        self.web_ui().job.as_ref().is_some_and(|j| j.done.is_none() && j.last.elapsed() >= POLL_EVERY) && !self.dock.sys.inflight.contains(&Kind::WebPoll)
+    }
+
+    /// 自动重读状态:页面在前台、没在操作(没有抽屉、弹窗、任务、进行中的读取),距上次读取超过 `RELOAD_EVERY`
+    pub(crate) fn web_reload_due(&self) -> bool {
+        let w = self.web_ui();
+        w.active && w.sd.is_none() && w.dlg.is_none() && w.job.is_none() && w.busy.is_none() && !self.dock.sys.inflight.contains(&Kind::Web) && self.dock.sys.asked.get(&Kind::Web).is_some_and(|t| t.elapsed() >= RELOAD_EVERY)
+    }
+
+    /// 每次渲染前(`sys_sync` 调用):窗口在后台不读;重新获得焦点、或离开网站页一会儿再回来,马上重读一次(类似 SWR 的 revalidate on focus)
+    pub(crate) fn web_entered(&mut self, active: bool) {
+        let back = self.web_ui().seen.is_none_or(|t| t.elapsed() >= ENTER_GAP);
+        let w = self.web_mut();
+        w.active = active;
+        if !active {
+            w.blurred = true;
+            return;
+        }
+        let refocus = std::mem::take(&mut w.blurred);
+        w.seen = Some(Instant::now());
+        if (back || refocus) && !self.demo {
+            self.web_refresh();
+        }
     }
 
     /// 每次渲染前:到时间就去轮询后台任务
@@ -898,7 +933,6 @@ impl Home {
                 Ok(s) => self.web_run("接管 OpenResty", s, OpTag::Plain, cx),
                 Err(e) => self.web_notice(e, cx),
             },
-            Pending::Unadopt => self.web_run("取消接管", web::unadopt_script(), OpTag::Plain, cx),
             Pending::DeleteAcme(id) => {
                 let (all, certs) = self.web_state().map(|s| (s.acme.clone(), s.certs.clone())).unwrap_or_default();
                 match web::acme_account_delete_script(&id, &all, &certs) {
@@ -1136,8 +1170,12 @@ impl Home {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .child(empty_state(IconName::TriangleAlert, "读取不了网站信息", "要 root 权限(免密 sudo,或在节点里保存密码)。处理后点右上角「刷新」重试"))
-                    .child(div().pb(px(60.0)).px(px(24.0)).flex().justify_center().text_size(px(t::TYPE_CAPTION)).text_color(c::danger()).child(SharedString::from(e.clone())))
+                    .child(empty_state(IconName::TriangleAlert, "读取不了网站信息", "要 root 权限(免密 sudo,或在节点里保存密码)。处理后点「重试」"))
+                    .child(div().px(px(24.0)).pb(px(16.0)).flex().justify_center().text_size(px(t::TYPE_CAPTION)).text_color(c::danger()).child(SharedString::from(e.clone())))
+                    .child(div().pb(px(60.0)).flex().justify_center().child(button("web-retry", IconName::RefreshCw, "重试").on_click(cx.listener(|this, _, _, cx| {
+                        this.web_refresh();
+                        cx.notify();
+                    }))))
                     .into_any_element();
             }
             Some(Ok(s)) => s.clone(),
@@ -1165,7 +1203,7 @@ impl Home {
                 missing.push("静态站点目录");
             }
             if st.panel.is_some() {
-                col = col.child(self.web_banner(IconName::Info, c::warn(), "这台服务器由面板管理:这里只改站点,证书和申请续期不在这里做,请用面板的证书功能。"));
+                col = col.child(self.web_banner(IconName::Info, c::warn(), "这台服务器由面板管理:这里只能直接改站点的配置原文,证书和申请续期请用面板。想用 Otter 完整管理(表单编辑、证书、自动续期),可以卸载面板的 OpenResty 后用 Otter 重新安装。"));
             } else if !missing.is_empty() {
                 col = col.child(self.web_banner(IconName::Info, c::warn(), &format!("这个容器没有挂载{}:对应功能不可用(要用得先重建容器加挂载)。", missing.join("、"))));
             }
@@ -1518,7 +1556,7 @@ impl Home {
 
     // ---- 设置 ----
 
-    /// 引擎控制按钮(重启、停止/启动、错误日志、卸载/取消接管):放在设置页签的页头右侧
+    /// 引擎控制按钮(重启、停止/启动、错误日志、卸载):放在设置页签的页头右侧
     fn web_ctl_buttons(&self, st: &WebState, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let busy = self.web_ui().busy.is_some();
         // 页头上的图标按钮,文字放在悬停提示里;卸载是红色纯文字按钮(和数据库页的卸载一样,悬停才有底色)
@@ -1554,16 +1592,20 @@ impl Home {
         }
         ctl.push(btn("web-log-err", IconName::ScrollText, "错误日志").on_click(cx.listener(|this, _, _, cx| this.web_open_logs(None, true, cx))).into_any_element());
         if st.target.adopted {
-            ctl.push(btn("web-unadopt", IconName::X, "取消接管").on_click(cx.listener(|this, _, _, cx| {
+            ctl.push(btn("web-uninstall", IconName::Trash, "卸载").on_click(cx.listener(|this, _, _, cx| {
                 this.web_ask(
                     WebConfirm {
-                        title: "取消接管",
+                        title: "卸载 OpenResty",
                         name: this.web_target().container,
-                        detail: "OpenResty/nginx 容器".into(),
-                        points: vec![(IconName::Check, c::online(), "容器、站点配置和证书都保持原样,继续运行".into()), (IconName::TriangleAlert, c::warn(), "Otter 之后不再管理它;自动续期任务会改用 Otter 自己的目录,建议先关闭".into())],
-                        label: "取消接管",
-                        danger: false,
-                        act: Pending::Unadopt,
+                        detail: "面板创建的容器".into(),
+                        points: vec![
+                            (IconName::Trash, c::danger(), "删除这个容器,它上面的所有站点会立刻无法访问".into()),
+                            (IconName::TriangleAlert, c::warn(), "面板里这个应用会显示异常;面板里的站点、证书、配置文件都不会删除".into()),
+                            (IconName::Check, c::online(), "卸载后可以用 Otter 重新安装,再在 Otter 里新建站点,完整管理".into()),
+                        ],
+                        label: "卸载",
+                        danger: true,
+                        act: Pending::Act(ConfAct::Uninstall),
                     },
                     cx,
                 );

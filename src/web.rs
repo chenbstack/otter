@@ -95,7 +95,7 @@ impl Target {
         Ok(format!(
             "# managed by otter (layout {})\n# {}\n{}OT_HTTP={}\nOT_HTTPS={}\nOT_CONTAINER={}\nOT_BIN={}\nOT_CONF={}\n{}{}{}",
             srvdata::LAYOUT,
-            if self.adopted { "接管的 OpenResty/nginx 容器;删掉这个文件就是取消接管" } else { "Otter 安装的 OpenResty:记录容器名和端口" },
+            if self.adopted { "接管的 OpenResty/nginx 容器;删掉这个文件会在下次读取时被自动重新接入" } else { "Otter 安装的 OpenResty:记录容器名和端口" },
             if self.adopted { "" } else { "OT_OWN=1\n" },
             self.ports.0,
             self.ports.1,
@@ -2787,18 +2787,10 @@ pub fn adopt_script(t: &Target) -> Result<String, String> {
     )))
 }
 
-/// 取消接管:只删 `target.env`,容器、配置、证书都不动
-pub fn unadopt_script() -> String {
-    format!("rm -f {}/target.env; echo OK", srvdata::WEB)
-}
-
 /// 容器控制:reload / restart / test / stop / start
 pub fn ctl_script(action: &str, t: &Target) -> Result<String, String> {
     let n = quote(&t.container);
     let b = &t.bin;
-    if t.adopted && action == "remove" {
-        return Err("接管的容器不是 Otter 装的,不能在这里删除".into());
-    }
     Ok(match action {
         "test" => format!("o=$(docker exec {n} {b} -t 2>&1) && {{ echo \"$o\"; echo OK; }} || echo \"ERR:$o\""),
         "reload" => format!("o=$(docker exec {n} {b} -s reload 2>&1) && echo OK || echo \"ERR:$o\""),
@@ -2806,6 +2798,8 @@ pub fn ctl_script(action: &str, t: &Target) -> Result<String, String> {
         "stop" => format!("o=$(docker stop {n} 2>&1) && echo OK || echo \"ERR:$o\""),
         "start" => format!("o=$(docker start {n} 2>&1) && echo OK || echo \"ERR:$o\""),
         // 卸载只删容器,配置、站点、证书都保留
+        // 接管的容器(面板装的)也能卸载:同时删 target.env,页面回到「未安装」,可以用 Otter 重装
+        "remove" if t.adopted => format!("o=$(docker rm -f {n} 2>&1) && {{ rm -f {}/target.env; echo OK; }} || echo \"ERR:$o\"", srvdata::WEB),
         "remove" => format!("o=$(docker rm -f {n} 2>&1) && echo OK || echo \"ERR:$o\""),
         _ => return Err("不支持的操作".into()),
     })
@@ -3682,7 +3676,9 @@ mod tests {
         let t = fp_target();
         let r = render_site(&proxy("a.example.com"), &t);
         assert!(!r.contains("$connection_upgrade") && !r.contains(" main"));
-        assert!(ctl_script("remove", &t).is_err());
+        let rm = ctl_script("remove", &t).unwrap();
+        assert!(rm.contains("docker rm -f") && rm.contains("target.env"));
+        assert!(!ctl_script("remove", &Target::own()).unwrap().contains("target.env"));
         let a = adopt_script(&t).unwrap();
         assert!(a.contains("target.env") && a.contains(&srvdata::b64(t.env_text().unwrap().as_bytes())));
     }
@@ -3722,7 +3718,6 @@ mod tests {
         w("aa-cron", cron_script(17, 3));
         let req = IssueReq { name: "a.test".into(), domains: vec!["a.test".into()], ca: "letsencrypt".into(), email: "x@example.com".into(), method: "http".into(), dns: None, staging: false, auto: true };
         w("ab-issue", issue_job_script(&req, &[]).unwrap());
-        w("ac-unadopt", unadopt_script());
     }
 
     /// 把真实脚本写到 `$OTTER_DUMP` 目录,供在真机上跑(`cargo test dump_scripts -- --ignored`)

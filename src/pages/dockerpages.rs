@@ -253,6 +253,9 @@ impl Home {
         self.conf_sync(window, cx);
         self.reg_sync(window, cx);
         self.sys_sync(window, cx);
+        if self.page == Page::Database {
+            self.dbm_entered(window.is_window_active());
+        }
         self.ct_sync(window, cx);
         self.comp_sync(window, cx);
     }
@@ -710,6 +713,10 @@ impl Home {
                     }))
                     .into_any_element(),
             );
+        }
+        // 网站页、数据库页自己会自动重读(进入页面、重新获得焦点、停留每 20 秒),不需要手动刷新
+        if matches!(self.page, Page::Websites | Page::Database) {
+            return v;
         }
         v.push(div().id("dock-refresh").size(px(30.0)).flex().items_center().justify_center().cursor_pointer().child(icon(IconName::RefreshCw, 15.0, c::muted())).hover(|s| s.opacity(0.7)).on_click(cx.listener(|this, _, _, cx| {
             if this.page == Page::Database {

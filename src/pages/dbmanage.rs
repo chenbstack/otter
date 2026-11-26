@@ -52,6 +52,14 @@ pub(crate) struct DbMgr {
     tries: u32,
     /// 已发出还没收到结果的请求 tag
     pub(super) inflight: Vec<String>,
+    /// 当前页的数据要重读(旧数据继续显示,读回来再替换)
+    stale: bool,
+    /// 最近一次读回库/用户/信息的时间,自动重读以它为准
+    loaded_at: Option<std::time::Instant>,
+    /// 上一次在前台渲染数据库页的时间、窗口是否在前台、是否失去过焦点
+    seen: Option<std::time::Instant>,
+    active: bool,
+    blurred: bool,
 }
 
 /// 新建数据库抽屉里的输入
@@ -108,6 +116,19 @@ enum CredClose {
     Done,
 }
 
+/// 新结果替换旧的;新结果是错误而旧的是好数据时,保留旧的
+fn keep_old<T>(slot: &mut Loaded<T>, new: Result<T, String>) {
+    if new.is_err() && matches!(slot, Some(Ok(_))) {
+        return;
+    }
+    *slot = Some(new);
+}
+
+/// 数据库页停留时自动重读的间隔
+const RELOAD_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
+/// 离开数据库页超过这么久再回来,算重新进入
+const ENTER_GAP: std::time::Duration = std::time::Duration::from_millis(1500);
+
 const SUBS: [&str; 2] = ["数据库", "用户"];
 
 impl DbMgr {
@@ -139,10 +160,12 @@ impl Home {
         }
         let m = &self.dock.dbm;
         let tag = format!("dbm:{what}:{}", m.cur);
+        let have = have && !m.stale;
         if have || m.inflight.contains(&tag) || !inst.container.running() || m.retry_at.is_some_and(|t| std::time::Instant::now() < t) {
             return;
         }
         self.dock.dbm.retry_at = None;
+        self.dock.dbm.stale = false;
         if let Some(d) = self.dbm_docker() {
             d.db_run(&tag, inst.kind.exec_args(&inst.container.name), Some(sql.to_string()));
             self.dock.dbm.inflight.push(tag);
@@ -271,10 +294,12 @@ impl Home {
                 }
                 continue;
             }
+            // 重读失败时旧数据继续显示(SWR),等下一轮再试;第一次读失败才显示错误
+            m.loaded_at = Some(std::time::Instant::now());
             match tag.split(':').nth(1) {
-                Some("dbs") => m.dbs = Some(r.map(|o| dbinst::parse_dbs(kind, &o))),
-                Some("users") => m.users = Some(r.map(|o| dbinst::parse_users(kind, &o))),
-                _ => m.redis = Some(r.and_then(|o| dbinst::redis_check(&o).map(|_| dbinst::parse_redis(&o)))),
+                Some("dbs") => keep_old(&mut m.dbs, r.map(|o| dbinst::parse_dbs(kind, &o))),
+                Some("users") => keep_old(&mut m.users, r.map(|o| dbinst::parse_users(kind, &o))),
+                _ => keep_old(&mut m.redis, r.and_then(|o| dbinst::redis_check(&o).map(|_| dbinst::parse_redis(&o)))),
             }
         }
     }
@@ -294,6 +319,9 @@ impl Home {
         if self.demo {
             self.dbm_demo(&inst);
         } else {
+            if self.dbm_reload_due() {
+                self.dock.dbm.stale = true;
+            }
             self.dbm_poll(inst.kind);
             self.dbm_request(&inst);
         }
@@ -357,7 +385,7 @@ impl Home {
             .child("连接信息")
             .on_click(cx.listener(|this, _, _, cx| this.dbm_conn_open(cx)));
         if inst.kind == DbKind::Redis {
-            return page.child(div().flex().flex_row().justify_end().child(conn_btn)).child(self.dbm_redis()).into_any_element();
+            return page.child(div().flex().flex_row().justify_end().child(conn_btn)).child(self.dbm_redis(cx)).into_any_element();
         }
 
         // 数据库 / 用户
@@ -395,7 +423,42 @@ impl Home {
     /// 清掉已读的库/用户/信息,下次渲染重新读(顶部「刷新」调用)
     /// 重试时间到了:让页面重绘一次,重新发起读取
     pub(crate) fn dbm_retry_due(&self) -> bool {
-        self.dock.dbm.retry_at.is_some_and(|t| std::time::Instant::now() >= t) || self.dock.dbm.bk.as_ref().is_some_and(|b| b.poll_due())
+        self.dock.dbm.retry_at.is_some_and(|t| std::time::Instant::now() >= t) || self.dock.dbm.bk.as_ref().is_some_and(|b| b.poll_due()) || self.dbm_reload_due()
+    }
+
+    /// 自动重读:窗口在前台、没在操作(没有抽屉、弹窗、确认、请求在路上),距上次读回超过 `RELOAD_EVERY`
+    pub(crate) fn dbm_reload_due(&self) -> bool {
+        let m = &self.dock.dbm;
+        m.active
+            && !self.demo
+            && !m.stale
+            && m.inflight.is_empty()
+            && m.form.is_none()
+            && m.uform.is_none()
+            && m.bk.is_none()
+            && !m.conn_open
+            && m.done.is_none()
+            && m.reset_ask.is_none()
+            && m.drop_ask.is_none()
+            && m.udrop_ask.is_none()
+            && !m.busy
+            && m.loaded_at.is_some_and(|t| t.elapsed() >= RELOAD_EVERY)
+    }
+
+    /// 每次渲染前(数据库页在前台时调用):窗口在后台不读;重新获得焦点、或离开数据库页一会儿再回来,马上重读一次(类似 SWR 的 revalidate on focus)
+    pub(crate) fn dbm_entered(&mut self, active: bool) {
+        let m = &mut self.dock.dbm;
+        let back = m.seen.is_none_or(|t| t.elapsed() >= ENTER_GAP);
+        m.active = active;
+        if !active {
+            m.blurred = true;
+            return;
+        }
+        let refocus = std::mem::take(&mut m.blurred);
+        m.seen = Some(std::time::Instant::now());
+        if (back || refocus) && m.loaded_at.is_some() {
+            m.stale = true;
+        }
     }
 
     pub(crate) fn dbm_invalidate(&mut self) {
@@ -1521,16 +1584,24 @@ impl Home {
         self.dbm_cred_card(card, cx)
     }
 
-    fn dbm_state<T>(r: &Loaded<T>) -> Option<AnyElement> {
+    fn dbm_state<T>(r: &Loaded<T>, cx: &mut Context<Self>) -> Option<AnyElement> {
         match r {
             None => Some(loading("正在读取…").into_any_element()),
-            Some(Err(e)) => Some(empty(IconName::TriangleAlert, "读取失败").desc(e.clone()).danger().into_any_element()),
+            Some(Err(e)) => {
+                let retry = button("dbm-retry", IconName::RefreshCw, "重试").on_click(cx.listener(|this, _, _, cx| {
+                    // 当前页重读:旧结果(错误)留着,读回来再替换
+                    this.dock.dbm.stale = true;
+                    this.dock.dbm.retry_at = None;
+                    cx.notify();
+                }));
+                Some(empty(IconName::TriangleAlert, "读取失败").desc(e.clone()).danger().action(retry).into_any_element())
+            }
             Some(Ok(_)) => None,
         }
     }
 
     fn dbm_db_table(&self, kind: DbKind, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(x) = Self::dbm_state(&self.dock.dbm.dbs) {
+        if let Some(x) = Self::dbm_state(&self.dock.dbm.dbs, cx) {
             return x;
         }
         let Some(Ok(rows)) = &self.dock.dbm.dbs else { return div().into_any_element() };
@@ -1604,7 +1675,7 @@ impl Home {
     }
 
     fn dbm_user_table(&self, kind: DbKind, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(x) = Self::dbm_state(&self.dock.dbm.users) {
+        if let Some(x) = Self::dbm_state(&self.dock.dbm.users, cx) {
             return x;
         }
         let Some(Ok(rows)) = &self.dock.dbm.users else { return div().into_any_element() };
@@ -1648,8 +1719,8 @@ impl Home {
         table_flow(header, body).into_any_element()
     }
 
-    fn dbm_redis(&self) -> AnyElement {
-        if let Some(x) = Self::dbm_state(&self.dock.dbm.redis) {
+    fn dbm_redis(&self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(x) = Self::dbm_state(&self.dock.dbm.redis, cx) {
             return x;
         }
         let Some(Ok(r)) = &self.dock.dbm.redis else { return div().into_any_element() };
