@@ -1,6 +1,6 @@
 # Otter
 
-[中文](README.md) · English
+[中文](README.md) · English · [Website](https://chenbstack.github.io/otter/?lang=en)
 
 A native SSH client: terminal, files (SFTP) and server management (Docker, databases, websites, app store) in one window, with nothing installed on the server. Built in Rust on [GPUI](https://www.gpui.rs) and [russh](https://github.com/Eugeny/russh).
 

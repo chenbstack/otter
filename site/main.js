@@ -6,7 +6,7 @@ let lang=q||localStorage.lang||(navigator.language.startsWith('zh')?'zh':'en');
 const els=$$('[data-en]');els.forEach(e=>e._zh=e.innerHTML);
 const T={zh:'一个 SSH 连接,管好所有服务器 — Otter',en:'Otter — One SSH, every server under control'};
 function setLang(l){lang=l;localStorage.lang=l;document.documentElement.lang=l;document.title=T[l];
-  els.forEach(e=>e.innerHTML=l==='en'?e.dataset.en:e._zh);$('#lang').textContent=l==='en'?'中文':'EN';hint();ver();term()}
+  els.forEach(e=>e.innerHTML=l==='en'?e.dataset.en:e._zh);$('#lang').textContent=l==='en'?'中文':'EN';hint();term()}
 $('#lang').onclick=()=>setLang(lang==='zh'?'en':'zh');
 /* 滚动淡入 + 数字 */
 const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);
@@ -49,7 +49,7 @@ function tl(){const h=innerHeight,sy=scrollY,tops=stSecs.map(s=>s.offsetTop),n=s
   setScene(cl(idx-1,0,scs.length-1));
   const want=rest&&idx>=1&&idx<=n;
   if(want){if(!settled&&!st)st=setTimeout(()=>{settled=true;st=0;tl()},900)}else{settled=false;clearTimeout(st);st=0}
-  gs.classList.toggle('sink',want);gs.classList.toggle('fl',settled&&want);flats.forEach((fl,k)=>fl.classList.toggle('on',k===cl(idx-1,0,scs.length-1)))}
+  gs.classList.toggle('sink',want);gs.classList.toggle('fl',settled&&want);flats.forEach((fl,k)=>{const o=k===cl(idx-1,0,scs.length-1);fl.classList.toggle('on',o);if(fl.tagName==='VIDEO'){if(o&&fl.paused)fl.play().catch(()=>{});else if(!o&&!fl.paused)fl.pause()}})}
 addEventListener('pointermove',e=>{mx=e.clientX/innerWidth-.5;my=e.clientY/innerHeight-.5;tl()});
 addEventListener('scroll',tl,{passive:true});addEventListener('resize',tl);
 tl();
@@ -70,11 +70,6 @@ function fill(a){const h=a.concat(a).map(n=>`<span>${n}</span>`).join('');$('#mq
 /* 系统识别 + 下载 */
 const win=/Win/i.test(navigator.platform+navigator.userAgent),mac=/Mac/i.test(navigator.platform);
 function hint(){const o=win?'Windows':mac?'macOS':null;$('#hint').textContent=o?(lang==='en'?`Detected ${o}`:`已识别你的系统:${o}`):'macOS · Windows'}
-let rel=null;function ver(){if(rel)$('#ver').textContent=(lang==='en'?'Latest ':'最新版本 ')+rel.tag_name+' · '+rel.published_at.slice(0,10)}
-fetch('https://api.github.com/repos/chenbstack/otter/releases/latest').then(r=>r.json()).then(r=>{if(!r.assets)return;rel=r;
-  const f=re=>(r.assets.find(a=>re.test(a.name))||{}).browser_download_url;
-  const m=f(/\.dmg$/),w=f(/setup\.exe$/);if(m)$('#dlMac').href=m;if(w)$('#dlWin').href=w;
-  $('#heroDl').href=(win?w:m)||'#download';ver()}).catch(()=>{});
 setLang(lang);
 $$('.hs').forEach(h=>{const t=h.querySelector('.hs-track');const step=()=>t.querySelector('figure').offsetWidth+28;
 h.querySelector('.hs-p').onclick=()=>t.scrollBy({left:-step(),behavior:'smooth'});h.querySelector('.hs-n').onclick=()=>t.scrollBy({left:step(),behavior:'smooth'});
@@ -120,3 +115,13 @@ const hc=$('#hc'),lc=$('#lc'),lt=$('#lcpu');const hx=hc.getContext('2d'),lx=lc.g
 function draw(x,cv,d,col,fill){const w=cv.width,h=cv.height;x.clearRect(0,0,w,h);x.beginPath();d.forEach((v,i)=>{const X=i/(d.length-1)*w,Y=h-2-v*(h-4);i?x.lineTo(X,Y):x.moveTo(X,Y)});x.strokeStyle=col;x.lineWidth=2;x.stroke();if(fill){x.lineTo(w,h);x.lineTo(0,h);x.closePath();x.fillStyle=fill;x.fill()}}
 let cpu=.32;setInterval(()=>{A.push(Math.min(.95,Math.max(.1,A[A.length-1]+(Math.random()-.5)*.3)));A.shift();draw(hx,hc,A,'#a78bfa');
 cpu=Math.min(.9,Math.max(.12,cpu+(Math.random()-.5)*.14));B.push(cpu);B.shift();draw(lx,lc,B,'#4ade80','rgba(74,222,128,.15)');lt.textContent=Math.round(cpu*100)+'%'},400)})();
+
+/* 概览平面图:CPU 曲线区域盖一层实时跳动的柱状图 */
+(()=>{if(RM||1)return;const gs=$('#gs'),fl=$$('.flatimg');const cv=document.createElement('canvas');cv.width=1420;cv.height=194;
+cv.style.cssText='position:absolute;left:16.8%;top:40.2%;width:50.7%;height:11%;display:none;pointer-events:none;z-index:2;border-radius:4px';gs.append(cv);const x=cv.getContext('2d');
+const N=118,D=Array.from({length:N},(_,i)=>.35+.25*Math.sin(i/9));let ph=0;
+const sync=()=>{const i=fl.findIndex(f=>f.classList.contains('on'));cv.style.display=(i===5&&gs.classList.contains('fl'))?'block':'none'};
+new MutationObserver(sync).observe(gs,{attributes:true,subtree:true,attributeFilter:['class']});sync();
+setInterval(()=>{if(cv.style.display==='none')return;ph+=.5;D.push(Math.min(.95,Math.max(.12,.4+.22*Math.sin(ph/4)+(Math.random()-.5)*.14)));D.shift();
+x.clearRect(0,0,1420,194);x.fillStyle='#0b0914';x.fillRect(0,0,1420,194);const bw=1420/N;
+D.forEach((v,i)=>{const h=v*186,g=x.createLinearGradient(0,194-h,0,194);g.addColorStop(0,v>.55?'#fb923c':'#d9f99d');g.addColorStop(1,'#4ade80');x.fillStyle=g;x.fillRect(i*bw+1,194-h,bw-3,h)})},140)})();

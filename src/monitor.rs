@@ -447,7 +447,10 @@ pub fn fmt_uptime(s: f64) -> String {
 
 /// `--demo` 用的假数据:带起伏的历史曲线
 pub fn demo_snapshot() -> MonSnapshot {
-    let wave = |base: f32, amp: f32, phase: f32| -> Vec<f32> { (0..HISTORY).map(|i| (base + amp * ((i as f32 * 0.21 + phase).sin() * 0.6 + (i as f32 * 0.07 + phase).cos() * 0.4)).max(0.0)).collect() };
+    // 调试:OTTER_PHASE=<0..30> 让曲线滚动一圈(首尾衔接),数字取曲线最新点,用于录官网动画
+    let anim: Option<f32> = std::env::var("OTTER_PHASE").ok().and_then(|v| v.parse::<f32>().ok()).map(|k| k * std::f32::consts::TAU / 30.0);
+    let ph0 = anim.unwrap_or(0.0);
+    let wave = |base: f32, amp: f32, phase: f32| -> Vec<f32> { (0..HISTORY).map(|i| (base + amp * ((i as f32 * 0.21 + phase + ph0).sin() * 0.6 + (i as f32 * 0.07 + phase + ph0).cos() * 0.4)).max(0.0)).collect() };
     let cpu_h = wave(38.0, 22.0, 0.0);
     let mem_h = wave(62.0, 4.0, 1.0);
     let now = Metrics {
@@ -483,8 +486,34 @@ pub fn demo_snapshot() -> MonSnapshot {
     };
     let (total, cache) = (now.mem_total as f32, now.mem_cache as f32);
     let mem_s = mem_h.iter().map(|p| { let used = total * p / 100.0; [used, cache, (total - used - cache).max(0.0)] }).collect();
-    let cores_h = now.cores.iter().enumerate().map(|(i, last)| { let mut v = wave(*last, 18.0, i as f32 * 0.9); *v.last_mut().unwrap() = *last; v.iter().map(|x| x.clamp(0.0, 100.0)).collect() }).collect();
-    MonSnapshot { now, cpu_h, mem_h, cores_h, mem_s, rx_h: wave(1_000_000.0, 700_000.0, 2.0), tx_h: wave(200_000.0, 150_000.0, 3.0), rd_h: wave(2_000_000.0, 1_800_000.0, 4.0), wr_h: wave(700_000.0, 600_000.0, 5.0) }
+    let cores_h: Vec<Vec<f32>> = now.cores.iter().enumerate().map(|(i, last)| { let mut v = wave(*last, 18.0, i as f32 * 0.9); if anim.is_none() { *v.last_mut().unwrap() = *last; } v.iter().map(|x| x.clamp(0.0, 100.0)).collect() }).collect();
+    let (rx_h, tx_h, rd_h, wr_h) = (wave(1_000_000.0, 700_000.0, 2.0), wave(200_000.0, 150_000.0, 3.0), wave(2_000_000.0, 1_800_000.0, 4.0), wave(700_000.0, 600_000.0, 5.0));
+    let mut now = now;
+    if anim.is_some() {
+        let cpu = now.cpu;
+        now.cpu_user = cpu * 0.63;
+        now.cpu_sys = cpu * 0.24;
+        now.cpu_wait = cpu * 0.08;
+        now.cores = cores_h.iter().map(|v| *v.last().unwrap()).collect();
+        now.mem_used = (total * mem_h.last().unwrap() / 100.0) as u64;
+        now.mem_free = (total - now.mem_used as f32 - cache).max(0.0) as u64;
+        now.net_rx = *rx_h.last().unwrap();
+        now.net_tx = *tx_h.last().unwrap();
+        now.disk_r = *rd_h.last().unwrap();
+        now.disk_w = *wr_h.last().unwrap();
+        now.disk_riops = now.disk_r / 7500.0;
+        now.disk_wiops = now.disk_w / 9000.0;
+        now.disk_util = cpu * 0.9;
+        now.load = [1.0 + cpu / 90.0, 0.9 + cpu / 120.0, 0.8 + cpu / 160.0];
+        now.temp_c = Some(40.0 + cpu * 0.3);
+        for (i, pr) in now.procs.iter_mut().enumerate() {
+            let base = 42.0 / (i as f32 + 1.0);
+            pr.cpu = base * (0.55 + 0.9 * cpu / 60.0) * (1.0 + 0.1 * (ph0 * 1.0 + i as f32).sin());
+            pr.mem = (pr.mem as f32 * (1.0 + 0.03 * (ph0 + i as f32 * 1.3).sin())) as u64;
+            pr.hist = (0..12).map(|k| (pr.cpu * (0.6 + 0.4 * (((k as f32) * 0.9 + i as f32 + ph0).sin() * 0.5 + 0.5))).max(0.0)).collect();
+        }
+    }
+    MonSnapshot { now, cpu_h, mem_h, cores_h, mem_s, rx_h, tx_h, rd_h, wr_h }
 }
 
 #[cfg(test)]

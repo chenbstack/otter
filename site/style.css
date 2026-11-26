@@ -144,10 +144,10 @@ section.seg>.shot{max-height:64vh;object-fit:contain;width:100%}
 section{z-index:2}
 @media(prefers-reduced-motion:reduce){.l3{transition:none}}
 
-.flatimg{position:absolute;inset:0;width:100%;height:100%;opacity:0;transition:opacity .25s;border-radius:14px;box-shadow:0 60px 140px rgba(124,58,237,.5),0 0 0 1px rgba(255,255,255,.1)}
+.flatimg{object-fit:cover;position:absolute;inset:0;width:100%;height:100%;opacity:0;transition:opacity .25s;border-radius:14px;box-shadow:0 60px 140px rgba(124,58,237,.5),0 0 0 1px rgba(255,255,255,.1)}
 .gs.fl .flatimg.on{opacity:1}
 .tilt{transition:opacity .25s}
-.gs.fl .tilt{opacity:0}
+.gs.fl .tilt,.gs.fl>.sc3{opacity:0}
 
 @media(min-width:861px) and (min-height:640px){html{scroll-snap-type:y mandatory}section,footer{scroll-snap-align:start}}
 .feat{display:grid;grid-template-columns:1fr 1.55fr;gap:48px;align-items:center;max-width:1280px}

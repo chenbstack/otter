@@ -649,6 +649,24 @@ fn main() {
                     for st in h.node_mut().stacks.iter_mut().take(expand) {
                         st.expanded = true;
                     }
+                    // 调试:OTTER_PHASE 让曲线整体滚动,用于录官网动画
+                    if let Some(ph) = std::env::var("OTTER_PHASE").ok().and_then(|v| v.parse::<usize>().ok()) {
+                        for st in h.node_mut().stacks.iter_mut() {
+                            for svc in st.services.iter_mut() {
+                                svc.cpu_s.rotate_left(ph % 24);
+                                svc.mem_s.rotate_left(ph % 24);
+                                svc.net_s.rotate_left(ph % 24);
+                                svc.disk_s.rotate_left(ph % 24);
+                                // 数字取曲线最新一点,和图表同步变化
+                                svc.cpu_v = svc.cpu_s[23] * 4.0;
+                                svc.cpu = format!("{:.1}%", svc.cpu_v);
+                                svc.mem_mb = 20.0 + svc.mem_s[23] * 900.0;
+                                svc.mem = mock::fmt_mem(svc.mem_mb);
+                                svc.net = format!("{:.1} MB/s", svc.net_s[23] * 30.0);
+                                svc.disk = format!("{:.1} GB/s", svc.disk_s[23] * 5.0);
+                            }
+                        }
+                    }
                 }
                 h.hide_charts = plain;
                 if let Some(p) = page {

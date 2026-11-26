@@ -1,6 +1,6 @@
 # Otter
 
-中文 · [English](README.en.md)
+中文 · [English](README.en.md) · [官网](https://chenbstack.github.io/otter/)
 
 原生 SSH 客户端:终端、文件(SFTP)和服务器管理(Docker、数据库、网站、应用商店)放在一个窗口里,服务器上不用装任何东西。基于 [GPUI](https://www.gpui.rs) 和 [russh](https://github.com/Eugeny/russh),Rust 编写。
 
