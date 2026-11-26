@@ -6,17 +6,35 @@ A native SSH client: terminal, files (SFTP) and server management (Docker, datab
 
 ## Screenshots
 
-![Nodes](assets/screenshots/nodes.png)
-
-![Stacks](assets/screenshots/stacks.png)
-
-![App store](assets/screenshots/store.png)
-
-![Storage space lens](assets/screenshots/storage.png)
-
-![Files](assets/screenshots/files.png)
-
-![Agent takeover approval](assets/screenshots/takeover.png)
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/screenshots/stacks.png" alt="Stacks"><br>
+      <b>Stacks</b><br>Live CPU, memory, network and disk for Compose stacks and containers; start, stop, restart, delete, and edit and deploy compose files.
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/screenshots/store.png" alt="App store"><br>
+      <b>App store</b><br>One-click install of PostgreSQL, MySQL, Redis, OpenResty and more; installed apps are checked for upgrades silently.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/screenshots/storage.png" alt="Storage & space lens"><br>
+      <b>Storage & space lens</b><br>Disk and mount usage; a treemap shows which directories take the space. Click to expand, double-click to zoom.
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/screenshots/files.png" alt="Files (SFTP)"><br>
+      <b>Files (SFTP)</b><br>Browse, preview and drag-and-drop upload; optional dual panes for local vs. server, and files inside containers.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/screenshots/takeover.png" alt="Agent takeover approval"><br>
+      <b>Agent takeover approval</b><br>An AI agent must ask before taking over a terminal: allow once, for 24 hours or always, and stop it any time.
+    </td>
+    <td width="50%"></td>
+  </tr>
+</table>
 
 ## Highlights
 

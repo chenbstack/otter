@@ -6,17 +6,35 @@
 
 ## 截图
 
-![节点页](assets/screenshots/nodes.png)
-
-![堆栈](assets/screenshots/stacks.png)
-
-![应用商店](assets/screenshots/store.png)
-
-![存储空间透镜](assets/screenshots/storage.png)
-
-![文件管理](assets/screenshots/files.png)
-
-![Agent 接管确认](assets/screenshots/takeover.png)
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/screenshots/stacks.png" alt="堆栈"><br>
+      <b>堆栈</b><br>Compose 堆栈和容器的实时 CPU、内存、网络、磁盘;启动、停止、重启、删除,编辑 compose 文件并部署。
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/screenshots/store.png" alt="应用商店"><br>
+      <b>应用商店</b><br>一键安装 PostgreSQL、MySQL、Redis、OpenResty 等;已装应用静默检查可升级版本。
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/screenshots/storage.png" alt="存储与空间透镜"><br>
+      <b>存储与空间透镜</b><br>磁盘和挂载点用量;色块图直观看出哪个目录占空间,点击展开、双击放大。
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/screenshots/files.png" alt="文件(SFTP)"><br>
+      <b>文件(SFTP)</b><br>浏览、预览、拖入上传;可开双栏对照本地和服务器,容器内的文件也能看。
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/screenshots/takeover.png" alt="Agent 接管确认"><br>
+      <b>Agent 接管确认</b><br>AI agent 接管终端前必须先问你,可只允许一次、24 小时或总是允许,随时一键停止。
+    </td>
+    <td width="50%"></td>
+  </tr>
+</table>
 
 ## 特点
 
