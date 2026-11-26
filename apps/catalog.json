@@ -231,7 +231,7 @@
           "default": "/var/lib/mysql"
         }
       ],
-      "compose": "services:\n  db:\n    image: mysql:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:3306\"\n    volumes:\n      - ./data:${data_dir}\n    environment:\n      MYSQL_ROOT_PASSWORD: ${env.password}\n    labels:\n      otter.managed: db\n      otter.app: mysql\n",
+      "compose": "services:\n  db:\n    image: mysql:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:3306\"\n    volumes:\n      - ./data:${data_dir}\n      - ./conf:/etc/mysql/conf.d\n    environment:\n      MYSQL_ROOT_PASSWORD: ${env.password}\n    labels:\n      otter.managed: db\n      otter.app: mysql\n",
       "post": {
         "notes": "管理员密码只显示这一次,Otter 不保存",
         "show": [
@@ -340,7 +340,7 @@
           "default": "/var/lib/mysql"
         }
       ],
-      "compose": "services:\n  db:\n    image: mariadb:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:3306\"\n    volumes:\n      - ./data:${data_dir}\n    environment:\n      MARIADB_ROOT_PASSWORD: ${env.password}\n    labels:\n      otter.managed: db\n      otter.app: mariadb\n",
+      "compose": "services:\n  db:\n    image: mariadb:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:3306\"\n    volumes:\n      - ./data:${data_dir}\n      - ./conf:/etc/mysql/conf.d\n    environment:\n      MARIADB_ROOT_PASSWORD: ${env.password}\n    labels:\n      otter.managed: db\n      otter.app: mariadb\n",
       "post": {
         "notes": "管理员密码只显示这一次,Otter 不保存",
         "show": [

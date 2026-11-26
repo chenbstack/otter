@@ -2,7 +2,7 @@
 //! 提交后在抽屉里显示安装进度(服务器上的后台任务,关掉 Otter 也不会中断),装完展示一次性信息(密码等)。
 
 use gpui_kit::component::Sizable as _;
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Editor, EditorState, Input, InputState};
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
@@ -62,6 +62,9 @@ pub(crate) struct AppUi {
     auto_container: String,
     last_project: String,
     show_compose: bool,
+    /// compose 预览的编辑器;`compose_seed` 是上次按表单渲染出的文本,编辑器内容和它不同就是用户手动改过
+    compose_ed: Option<Entity<EditorState>>,
+    compose_seed: String,
     error: Option<String>,
     /// 各应用的版本列表(应用 id → (版本, 来源))
     tags: HashMap<String, (Vec<String>, &'static str)>,
@@ -166,6 +169,8 @@ impl Home {
         u.app = app.id.clone();
         (u.inputs, u.flags, u.picks) = (inputs, flags, picks);
         u.show_compose = false;
+        u.compose_ed = None;
+        u.compose_seed.clear();
         u.show_pwd = false;
         u.error = None;
         u.ver_open = false;
@@ -354,7 +359,7 @@ impl Home {
             return;
         }
         let v = self.api_form(&app, cx);
-        let plan = match appstore::render(&app, &v) {
+        let mut plan = match appstore::render(&app, &v) {
             Ok(p) => p,
             Err(e) => {
                 self.dock.api.error = Some(e);
@@ -362,6 +367,18 @@ impl Home {
                 return;
             }
         };
+        // 用户在预览里手动改过 compose,就按改后的装
+        if let Some(ed) = self.dock.api.compose_ed.as_ref() {
+            let text = ed.read(cx).value().to_string();
+            if text != self.dock.api.compose_seed {
+                if !text.contains("services:") {
+                    self.dock.api.error = Some("compose 文件里要有 services:".into());
+                    cx.notify();
+                    return;
+                }
+                plan.compose = if text.ends_with('\n') { text } else { text + "\n" };
+            }
+        }
         let taken = self.taken_names();
         if taken.contains(&v.project) {
             self.dock.api.error = Some("已经有同名的堆栈".into());
@@ -525,6 +542,33 @@ impl Home {
     }
 
     // ---------------------------------------------------------------- 界面
+
+    /// 渲染前准备 compose 编辑器(需要窗口):展开时建好,表单变了且用户没改过就跟着重新渲染
+    pub(crate) fn api_prepare(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.dock.api.open || !self.dock.api.show_compose {
+            return;
+        }
+        let Some(app) = self.api_app() else { return };
+        let Ok(plan) = appstore::render(&app, &self.api_form(&app, cx)) else { return };
+        let text = plan.compose;
+        match self.dock.api.compose_ed.clone() {
+            None => {
+                let ed = cx.new(|cx| EditorState::new(window, cx).language("yaml").line_number(true));
+                ed.update(cx, |s, cx| s.set_value(text.as_str(), window, cx));
+                cx.observe(&ed, |_, _, cx| cx.notify()).detach();
+                self.dock.api.compose_ed = Some(ed);
+                self.dock.api.compose_seed = text;
+                cx.notify();
+            }
+            Some(ed) => {
+                if ed.read(cx).value() == self.dock.api.compose_seed.as_str() && text != self.dock.api.compose_seed {
+                    ed.update(cx, |s, cx| s.set_value(text.as_str(), window, cx));
+                    self.dock.api.compose_seed = text;
+                    cx.notify();
+                }
+            }
+        }
+    }
 
     fn api_drawer(&self, window: &Window, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let u = &self.dock.api;
@@ -770,7 +814,7 @@ impl Home {
                         .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child("密码只在这里显示这一次,Otter 不会保存。请现在复制;之后可以在服务器上该堆栈目录的 .env 里找到。")),
                 );
             }
-            if !j.notes.is_empty() {
+            if !j.notes.is_empty() && !(!j.secrets.is_empty() && j.notes.contains("只显示这一次")) {
                 col = col.child(div().flex_shrink_0().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(SharedString::from(j.notes.clone())));
             }
             // 下一步
@@ -1040,34 +1084,26 @@ impl Home {
                 this.dock.api.show_compose = !this.dock.api.show_compose;
                 cx.notify();
             }));
+        let rendered = if shown { appstore::render(app, &self.api_form(app, cx)).map_err(|e| e) } else { Err(String::new()) };
         let preview = div().flex_shrink_0().flex().flex_col().gap(px(8.0)).child(toggle).when(shown, |d| {
-            let v = self.api_form(app, cx);
-            let text = match appstore::render(app, &v) {
-                Ok(p) => {
-                    let mut s = format!("# {}/{}\n{}", p.dir, appstore::COMPOSE_FILE, p.compose);
-                    if !p.env_masked.is_empty() {
-                        s += &format!("# {}/.env\n{}", p.dir, p.env_masked);
-                    }
-                    s
-                }
-                Err(e) => format!("# {e}"),
+            let (path, env) = match &rendered {
+                Ok(p) => (format!("{}/{}", p.dir, appstore::COMPOSE_FILE), (!p.env_masked.is_empty()).then(|| format!("密码保存在 {}/.env,不在这里显示", p.dir))),
+                Err(e) => (e.clone(), None),
             };
-            d.child(
-                div()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .rounded(px(t::RADIUS_MD))
-                    .border_1()
-                    .border_color(c::field_border())
-                    .bg(c::field())
-                    .font_family(MONO)
-                    .text_size(px(t::TYPE_CAPTION))
-                    .text_color(c::secondary())
-                    .children(text.lines().map(|l| div().min_h(px(16.0)).whitespace_nowrap().child(if l.is_empty() { " ".to_string() } else { l.to_string() }))),
-            )
+            let edited = self.dock.api.compose_ed.as_ref().is_some_and(|e| e.read(cx).value() != self.dock.api.compose_seed.as_str());
+            let mut cap = div().flex().flex_row().items_center().gap(px(8.0)).child(div().flex_1().min_w_0().truncate().font_family(MONO).text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(SharedString::from(path)));
+            if edited {
+                cap = cap.child(div().text_size(px(t::TYPE_MICRO)).text_color(c::warn()).child("已手动编辑,上面表单的改动不再同步"));
+                cap = cap.child(div().id("api-compose-reset").cursor_pointer().text_size(px(t::TYPE_MICRO)).text_color(c::muted()).hover(|s| s.text_color(c::text())).child("重置").on_click(cx.listener(|this, _, _, cx| {
+                    this.dock.api.compose_ed = None;
+                    cx.notify();
+                })));
+            }
+            d.child(cap)
+                .children(self.dock.api.compose_ed.clone().map(|e| {
+                    div().h(px(300.0)).flex_shrink_0().overflow_hidden().rounded(px(t::RADIUS_MD)).border_1().border_color(c::field_border()).bg(c::field()).child(Editor::new(&e).appearance(false).h_full())
+                }))
+                .children(env.map(|t| div().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(t)))
         });
         body.child(preview)
     }

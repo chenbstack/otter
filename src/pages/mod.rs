@@ -6,6 +6,7 @@ pub mod dbbackup;
 pub mod installui;
 pub mod storepage;
 pub mod dbmanage;
+pub mod dbsettings;
 pub mod stacks;
 pub mod monitorpage;
 pub mod daemonpage;

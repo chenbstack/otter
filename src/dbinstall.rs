@@ -175,6 +175,10 @@ impl Spec<'_> {
         }
         s += &format!("    ports:\n      - \"{bind}{}:{}\"\n", self.port, k.port());
         s += &format!("    volumes:\n      - ./data:{}\n", data_dir(k, self.version));
+        // MySQL/MariaDB 的配置目录也挂到主机(./conf),在设置页改配置、重建容器都不丢
+        if matches!(k, DbKind::Mysql | DbKind::Mariadb) {
+            s += "      - ./conf:/etc/mysql/conf.d\n";
+        }
         s += &format!("    environment:\n      {}: ${{DB_PASSWORD}}\n", password_env(k));
         if k == DbKind::Redis {
             s += "    command: [\"sh\", \"-c\", \"exec redis-server --appendonly yes --requirepass \\\"$$REDIS_PASSWORD\\\"\"]\n";
@@ -289,7 +293,8 @@ mod tests {
     #[test]
     fn compose_per_kind() {
         let m = spec(DbKind::Mysql, false).compose();
-        assert!(m.contains("image: mysql:17") && m.contains("MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}") && m.contains("./data:/var/lib/mysql"));
+        assert!(m.contains("image: mysql:17") && m.contains("MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}") && m.contains("./data:/var/lib/mysql\n      - ./conf:/etc/mysql/conf.d\n"));
+        assert!(spec(DbKind::Mariadb, false).compose().contains("./conf:/etc/mysql/conf.d") && !spec(DbKind::Postgres, false).compose().contains("conf.d"));
         let r = spec(DbKind::Redis, false).compose();
         assert!(r.contains("REDIS_PASSWORD: ${DB_PASSWORD}") && r.contains("$$REDIS_PASSWORD") && r.contains(":6379\""));
         let p = spec(DbKind::Postgres, false).compose();

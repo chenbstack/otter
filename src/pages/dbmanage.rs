@@ -14,11 +14,19 @@ type Loaded<T> = Option<Result<T, String>>;
 pub(crate) struct DbMgr {
     /// 当前选中的容器名
     cur: String,
-    /// 0 = 数据库,1 = 用户
-    sub: usize,
+    /// 0 = 数据库,1 = 用户,2 = 设置(Redis:0 = 概览,2 = 设置)
+    pub(super) sub: usize,
     dbs: Loaded<Vec<DbRow>>,
     users: Loaded<Vec<UserRow>>,
     redis: Loaded<RedisInfo>,
+    /// 设置页:常用参数当前值(与 `dbparams::params` 对齐)、各参数的输入框、输入框要按读回的值重填
+    pub(super) params: Loaded<Vec<Option<crate::dbparams::Cur>>>,
+    pub(super) pins: Vec<Entity<InputState>>,
+    pub(super) pfill: bool,
+    pub(super) pbusy: bool,
+    pub(super) pmsg: Option<Result<String, String>>,
+    /// 配置修改抽屉
+    pub(super) conf: Option<super::dbsettings::ConfDlg>,
     /// 管理员账号名(取自容器环境变量;不读密码)
     cred: Option<String>,
     /// 新建数据库抽屉
@@ -163,7 +171,8 @@ fn keep_old<T>(slot: &mut Loaded<T>, new: Result<T, String>) {
 }
 
 
-const SUBS: [&str; 2] = ["数据库", "用户"];
+const SUBS: [&str; 3] = ["数据库", "用户", "设置"];
+const SUBS_REDIS: [&str; 2] = ["概览", "设置"];
 
 impl DbMgr {
     fn reset(&mut self, cur: &str) {
@@ -179,7 +188,10 @@ impl Home {
     /// 要读的东西(tag, SQL/命令);已经有结果或在路上的不再发
     fn dbm_request(&mut self, inst: &DbInstance) {
         let m = &self.dock.dbm;
+        let params_sql = crate::dbparams::read_sql(inst.kind);
         let (what, have, sql) = match (inst.kind, m.sub) {
+            (k, 2) if !crate::dbparams::supported(k) => return,
+            (_, 2) => ("params", m.params.is_some(), params_sql.as_str()),
             (DbKind::Redis, _) => ("redis", m.redis.is_some(), "INFO\n"),
             (k, 0) => ("dbs", m.dbs.is_some(), k.list_dbs_sql()),
             (k, _) => ("users", m.users.is_some(), k.list_users_sql()),
@@ -203,7 +215,7 @@ impl Home {
         }
         let m = &self.dock.dbm;
         let tag = format!("dbm:{what}:{}", m.cur);
-        let have = have && !m.stale;
+        let have = have && (!m.stale || what == "params");
         if have || m.inflight.contains(&tag) || !inst.container.running() || m.retry_at.is_some_and(|t| std::time::Instant::now() < t) {
             return;
         }
@@ -300,7 +312,7 @@ impl Home {
                 m.cred = r.ok().map(|o| o.trim().to_string()).filter(|u| !u.is_empty());
                 continue;
             }
-            if matches!(tag.split(':').nth(1), Some("dbs" | "users" | "redis")) {
+            if matches!(tag.split(':').nth(1), Some("dbs" | "users" | "redis" | "params")) {
                 match &r {
                     Err(e) if dbinst::is_starting(e) && m.tries < 40 => {
                         m.tries += 1;
@@ -315,6 +327,60 @@ impl Home {
                 }
             }
             let r = r.map_err(|e| dbinst::friendly_error(kind, &e));
+            if tag.starts_with("dbm:cread:") {
+                if let Some(d) = m.conf.as_mut() {
+                    d.loading = false;
+                    match r.and_then(|o| crate::dbconf::parse_read(&o)) {
+                        Ok((mounted, text)) => {
+                            d.mounted = mounted;
+                            d.fill = Some(text);
+                        }
+                        Err(e) => d.err = Some(e),
+                    }
+                }
+                continue;
+            }
+            if tag.starts_with("dbm:cmount:") {
+                if let Some(d) = m.conf.as_mut() {
+                    d.mounting = false;
+                    match r {
+                        Ok(o) => match o.trim().strip_prefix("ERR:") {
+                            Some(e) => d.err = Some(e.trim().to_string()),
+                            None => d.reopen = true,
+                        },
+                        Err(e) => d.err = Some(e),
+                    }
+                }
+                continue;
+            }
+            if tag.starts_with("dbm:cwrite:") {
+                if let Some(d) = m.conf.as_mut() {
+                    d.busy = false;
+                    match r {
+                        Ok(o) => match o.trim().strip_prefix("ERR:") {
+                            Some(e) => d.err = Some(e.trim().to_string()),
+                            None => {
+                                d.err = None;
+                                d.saved = Some(match kind {
+                                    DbKind::Postgres => "已保存并重载;标有「需重启」的参数要重启容器后生效",
+                                    _ => "已保存;重启容器后生效",
+                                });
+                            }
+                        },
+                        Err(e) => d.err = Some(e),
+                    }
+                }
+                continue;
+            }
+            if tag.starts_with("dbm:papply:") {
+                m.pbusy = false;
+                let r = r.and_then(|o| if kind == DbKind::Redis { crate::dbparams::redis_outcome(&o) } else { Ok(None) });
+                m.pmsg = Some(r.map(|w| w.unwrap_or_else(|| "已保存".to_string())));
+                if m.pmsg.as_ref().is_some_and(|x| x.is_ok()) {
+                    m.params = None;
+                }
+                continue;
+            }
             if tag.starts_with("dbm:drop:") {
                 m.busy = false;
                 match r {
@@ -418,6 +484,11 @@ impl Home {
             match tag.split(':').nth(1) {
                 Some("dbs") => keep_old(&mut m.dbs, r.map(|o| dbinst::parse_dbs(kind, &o))),
                 Some("users") => keep_old(&mut m.users, r.map(|o| dbinst::parse_users(kind, &o))),
+                Some("params") => {
+                    let first = !matches!(m.params, Some(Ok(_)));
+                    keep_old(&mut m.params, r.map(|o| crate::dbparams::parse_current(kind, &o)));
+                    m.pfill |= first;
+                }
                 _ => keep_old(&mut m.redis, r.and_then(|o| dbinst::redis_check(&o).map(|_| dbinst::parse_redis(&o)))),
             }
         }
@@ -487,7 +558,9 @@ impl Home {
             return page.child(empty(IconName::Database, "容器没有运行").desc("先在「容器」页启动它,才能读取里面的数据").warn()).into_any_element();
         }
 
-        if self.dock.dbm.starting && (if inst.kind == DbKind::Redis { self.dock.dbm.redis.is_none() } else if self.dock.dbm.sub == 0 { self.dock.dbm.dbs.is_none() } else { self.dock.dbm.users.is_none() }) {
+        let m = &self.dock.dbm;
+        let waiting = if m.sub == 2 { crate::dbparams::supported(inst.kind) && m.params.is_none() } else if inst.kind == DbKind::Redis { m.redis.is_none() } else if m.sub == 0 { m.dbs.is_none() } else { m.users.is_none() };
+        if m.starting && waiting {
             return page.child(loading("数据库正在启动,稍后自动重试…")).into_any_element();
         }
         // 文本按钮:没有底色和图标,悬停才出底色(和页头的「卸载」同一样式,颜色用次要文字色)
@@ -504,13 +577,10 @@ impl Home {
             .hover(|s| s.bg(c::field_hover()).text_color(c::text()))
             .child("连接信息")
             .on_click(cx.listener(|this, _, _, cx| this.dbm_conn_open(cx)));
-        if inst.kind == DbKind::Redis {
-            return page.child(div().flex().flex_row().justify_end().child(conn_btn)).child(self.dbm_redis(cx)).into_any_element();
-        }
-
-        // 数据库 / 用户
+        // 页签:SQL 库是 数据库/用户/设置,Redis 是 概览/设置(设置的序号固定为 2)
+        let names: Vec<(usize, &'static str)> = if inst.kind == DbKind::Redis { vec![(0, SUBS_REDIS[0]), (2, SUBS_REDIS[1])] } else { SUBS.iter().copied().enumerate().collect() };
         let mut tabs = div().flex().flex_row().items_center().gap(px(4.0));
-        for (i, name) in SUBS.iter().enumerate() {
+        for (i, name) in names {
             let on = self.dock.dbm.sub == i;
             tabs = tabs.child(
                 div()
@@ -524,20 +594,28 @@ impl Home {
                     .text_size(px(t::TYPE_CONTROL))
                     .when(on, |d| d.bg(c::field()).text_color(c::text()))
                     .when(!on, |d| d.text_color(c::muted()).hover(|s| s.bg(c::field_hover())))
-                    .child(*name)
+                    .child(name)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.dock.dbm.sub = i;
+                        this.dock.dbm.pmsg = None;
                         cx.notify();
                     })),
             );
         }
-        let tabs = tabs.child(div().flex_1()).child(div().flex().flex_row().items_center().gap(px(8.0)).child(conn_btn).child(if self.dock.dbm.sub == 0 {
-            button("dbm-new-db", IconName::Plus, "新建数据库").on_click(cx.listener(|this, _, window, cx| this.dbm_open_form(window, cx)))
-        } else {
-            button("dbm-new-user", IconName::Plus, "新建用户").on_click(cx.listener(|this, _, window, cx| this.dbm_open_uform(window, cx)))
-        }));
-        page = page.child(tabs);
-        page.child(if self.dock.dbm.sub == 0 { self.dbm_db_table(inst.kind, cx) } else { self.dbm_user_table(inst.kind, cx) }).into_any_element()
+        let sub = self.dock.dbm.sub;
+        let right = div().flex().flex_row().items_center().gap(px(8.0)).child(conn_btn);
+        let right = match (inst.kind, sub) {
+            (DbKind::Redis, _) | (_, 2) => right,
+            (_, 0) => right.child(button("dbm-new-db", IconName::Plus, "新建数据库").on_click(cx.listener(|this, _, window, cx| this.dbm_open_form(window, cx)))),
+            _ => right.child(button("dbm-new-user", IconName::Plus, "新建用户").on_click(cx.listener(|this, _, window, cx| this.dbm_open_uform(window, cx)))),
+        };
+        page = page.child(tabs.child(div().flex_1()).child(right));
+        match (inst.kind, sub) {
+            (_, 2) => page.child(self.dbm_settings(&inst, cx)).into_any_element(),
+            (DbKind::Redis, _) => page.child(self.dbm_redis(cx)).into_any_element(),
+            (_, 0) => page.child(self.dbm_db_table(inst.kind, cx)).into_any_element(),
+            _ => page.child(self.dbm_user_table(inst.kind, cx)).into_any_element(),
+        }
     }
 
     /// 清掉已读的库/用户/信息,下次渲染重新读(顶部「刷新」调用)
@@ -562,6 +640,7 @@ impl Home {
             && m.drop_ask.is_none()
             && m.udrop_ask.is_none()
             && !m.busy
+            && m.sub != 2
             && m.loaded_at.is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(crate::prefs::page_secs()))
     }
 
@@ -584,6 +663,11 @@ impl Home {
         if (back || refocus) && m.loaded_at.is_some() {
             m.stale = true;
         }
+    }
+
+    /// 当前在「设置」页签(页头的「卸载」只在这里显示)
+    pub(crate) fn dbm_in_settings(&self) -> bool {
+        self.dock.dbm.sub == 2
     }
 
     pub(crate) fn dbm_invalidate(&mut self) {
@@ -1625,6 +1709,7 @@ impl Home {
     pub(crate) fn dbm_overlays(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut v = Vec::new();
         v.extend(self.dbm_drawer(window, cx));
+        v.extend(self.dbm_conf_drawer(cx));
         v.extend(self.dbm_done_dialog(cx));
         v.extend(self.dbm_reset_dialog(cx));
         v.extend(self.dbm_drop_dialog(cx));
@@ -1866,6 +1951,9 @@ impl Home {
                     // 当前页重读:旧结果(错误)留着,读回来再替换
                     this.dock.dbm.stale = true;
                     this.dock.dbm.retry_at = None;
+                    if this.dock.dbm.sub == 2 {
+                        this.dock.dbm.params = None;
+                    }
                     cx.notify();
                 }));
                 Some(empty(IconName::TriangleAlert, "读取失败").desc(e.clone()).danger().action(retry).into_any_element())

@@ -652,7 +652,7 @@ impl Home {
             match self.dbm_current() {
                 // 已经装过:换成卸载(面板管理的只读,不给卸载)
                 Some(inst) => {
-                    if inst.container.panel.is_none() {
+                    if inst.container.panel.is_none() && self.dbm_in_settings() {
                         let name = inst.container.name.clone();
                         v.push(
                             div()
@@ -804,6 +804,8 @@ impl Home {
         if let Some(m) = self.create_drawer(window, cx) {
             v.push(m.into_any_element());
         }
+        self.dbm_prepare(window, cx);
+        self.api_prepare(window, cx);
         v.extend(self.api_overlays(window, cx));
         if let Some(m) = self.comp_dialog(window, cx) {
             v.push(m.into_any_element());

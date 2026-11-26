@@ -23,6 +23,8 @@ mod web;
 mod dbinst;
 mod dbsecret;
 mod dbinstall;
+mod dbparams;
+mod dbconf;
 #[allow(dead_code)]
 mod appstore;
 mod json_hl;

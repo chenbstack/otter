@@ -193,7 +193,7 @@ fn my_str(s: &str) -> String {
 
 impl DbKind {
     /// 容器里读 stdin 并执行的客户端脚本;输出无表头、制表符分隔
-    fn client_script(self) -> &'static str {
+    pub fn client_script(self) -> &'static str {
         match self {
             DbKind::Postgres => {
                 concat!(pg_pw_script!(), r#"[ -n "$p" ] && export PGPASSWORD="$p"; exec psql -X -q -A -t -F "$(printf '\t')" -v ON_ERROR_STOP=1 -U "$u" -d postgres"#)
