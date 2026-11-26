@@ -10,6 +10,7 @@ use crate::sysops::quote;
 pub const CONTAINER: &str = "otter-openresty";
 pub const ACME_IMAGE: &str = "neilpang/acme.sh";
 pub mod conf;
+pub mod patch;
 
 /// 证书目录在容器里的挂载点
 pub const CERT_MOUNT: &str = "/etc/otter/certs";
@@ -2221,6 +2222,11 @@ fn htpasswd_actions(spec: &SiteSpec) -> String {
 
 /// 保存站点(新建或覆盖):写配置文件,静态站点顺手建目录和占位首页
 pub fn site_save_script(spec: &SiteSpec, enabled: bool, t: &Target) -> Result<String, String> {
+    site_save_script_from(spec, enabled, t, None)
+}
+
+/// 同 `site_save_script`;`old` 是站点现有的、被手工改过的正文:就地修改它(保留 Otter 不管理的内容),而不是整体重新生成
+pub fn site_save_script_from(spec: &SiteSpec, enabled: bool, t: &Target, old: Option<&str>) -> Result<String, String> {
     spec.check()?;
     if matches!(spec.kind, SiteKind::Static { .. }) && t.sites.is_none() {
         return Err("这个 OpenResty 没有挂载静态站点目录,建不了静态站点".into());
@@ -2231,11 +2237,15 @@ pub fn site_save_script(spec: &SiteSpec, enabled: bool, t: &Target) -> Result<St
     if spec.adv.auth.is_some() && t.adopted {
         return Err("接管的 nginx 暂不支持基本认证(密码文件要放在 Otter 装的 OpenResty 的配置目录里)".into());
     }
+    let text = match old {
+        Some(o) => patch::patch_text(o, spec, t).map_err(|e| format!("{e}。可以在「配置原文」里直接改,或把手工改动去掉后再用表单保存"))?,
+        None => render_site(spec, t),
+    };
     let file = site_file(&spec.name, enabled);
     let other = site_file(&spec.name, !enabled);
     let mut a = String::new();
     a += &htpasswd_actions(spec);
-    a += &format!("bk {f}; bk {o}; rm -f \"$C/{o}\"; {w}\n", f = quote(&file), o = quote(&other), w = write_file_cmd(&format!("$C/{file}"), &render_site(spec, t), "644").replace(&format!("'$C/{file}'"), &format!("\"$C/{file}\"")));
+    a += &format!("bk {f}; bk {o}; rm -f \"$C/{o}\"; {w}\n", f = quote(&file), o = quote(&other), w = write_file_cmd(&format!("$C/{file}"), &text, "644").replace(&format!("'$C/{file}'"), &format!("\"$C/{file}\"")));
     if matches!(spec.kind, SiteKind::Static { .. }) {
         let d = format!("$SITES/{}", spec.name);
         a += &format!("mkdir -p \"{d}\"; [ -e \"{d}/index.html\" ] || printf '<!doctype html><meta charset=utf-8><title>{n}</title><h1>{n}</h1>' > \"{d}/index.html\"\n", n = spec.name);
@@ -3348,6 +3358,13 @@ mod tests {
         assert!(e.modified && e.from_conf);
         assert_eq!(e.spec.as_ref().unwrap().adv.read_timeout, Some(90));
         assert!(e.lost.iter().any(|l| l.contains("proxy_buffering off")), "{:?}", e.lost);
+        // 保存:就地修改,手加的指令留在脚本写出的正文里
+        let mut spec = e.spec.clone().unwrap();
+        spec.adv.gzip = Some(true);
+        let sc = site_save_script_from(&spec, true, &Target::own(), Some(&e.text)).unwrap();
+        let b = srvdata::b64(patch::patch_text(&e.text, &spec, &Target::own()).unwrap().as_bytes());
+        assert!(sc.contains(&b));
+        assert!(patch::patch_text(&e.text, &spec, &Target::own()).unwrap().contains("proxy_buffering off;"));
         let ext = st.sites.iter().find(|s| s.spec.is_none()).unwrap();
         assert_eq!(ext.title(), "legacy");
         assert_eq!(st.certs.len(), 2);

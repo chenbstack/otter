@@ -29,6 +29,8 @@ pub(super) struct SiteDrawer {
     /// 表单读自手改过的正文;`lost` 是保存后会丢失的内容(Otter 不管理的指令、注释)
     from_conf: bool,
     lost: Vec<String>,
+    /// 手改过且读得懂的正文:保存时就地修改它
+    old_text: Option<String>,
     /// 外部配置的原文编辑框(有值时抽屉只有「配置原文」一个菜单)
     raw: Option<Entity<TextareaState>>,
     menu: Menu,
@@ -268,6 +270,7 @@ impl SiteDrawer {
             modified: false,
             from_conf: false,
             lost: Vec::new(),
+            old_text: None,
             raw: None,
             menu: Menu::Domains,
             ed: None,
@@ -486,6 +489,7 @@ impl Home {
         sd.modified = e.modified;
         sd.from_conf = e.from_conf;
         sd.lost = e.lost.clone();
+        sd.old_text = (e.modified && e.from_conf).then(|| e.text.clone());
         if e.spec.is_none() {
             let text = e.text.clone();
             let area = cx.new(|cx| TextareaState::new(window, cx).rows(24));
@@ -520,7 +524,7 @@ impl Home {
             cx.notify();
             return;
         }
-        match sd.to_spec(cx).and_then(|s| web::site_save_script(&s, enabled, &tg)) {
+        match sd.to_spec(cx).and_then(|s| web::site_save_script_from(&s, enabled, &tg, sd.old_text.as_deref())) {
             Ok(script) => {
                 self.web_mut().err = None;
                 self.web_run("保存站点", script, OpTag::Save, cx);
@@ -605,7 +609,7 @@ impl Home {
                 (true, true) if sd.lost.is_empty() => sd.warn.clone(),
                 (true, true) => {
                     let shown: Vec<String> = sd.lost.iter().take(3).cloned().collect();
-                    Some(format!("配置里有 {} 项 Otter 不管理的内容,保存后会移除:{}{}", sd.lost.len(), shown.join(";"), if sd.lost.len() > 3 { " …" } else { "" }))
+                    Some(format!("配置里有 {} 项 Otter 不管理的内容,保存时会原样保留:{}{}", sd.lost.len(), shown.join(";"), if sd.lost.len() > 3 { " …" } else { "" }))
                 }
                 (true, false) => Some("配置被手工改过,且有 Otter 读不懂的结构:保存会按表单重新生成,手工改动会被覆盖".to_string()),
                 _ => sd.warn.clone(),
