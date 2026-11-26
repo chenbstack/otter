@@ -2,11 +2,15 @@
 
 中文 · [English](README.en.md)
 
-原生 SSH 客户端:终端和文件(SFTP)放在一个窗口里。基于 [GPUI](https://www.gpui.rs) 和 [russh](https://github.com/Eugeny/russh),Rust 编写。
+原生 SSH 客户端:终端、文件(SFTP)和服务器管理(Docker、数据库、网站、应用商店)放在一个窗口里,服务器上不用装任何东西。基于 [GPUI](https://www.gpui.rs) 和 [russh](https://github.com/Eugeny/russh),Rust 编写。
 
 ## 截图
 
 ![节点页](assets/screenshots/nodes.png)
+
+![堆栈](assets/screenshots/stacks.png)
+
+![应用商店](assets/screenshots/store.png)
 
 ![文件管理](assets/screenshots/files.png)
 
@@ -16,6 +20,7 @@
 
 - **原生、体积小**:Rust 编写,直接用 GPU 渲染,没有打包 Electron 或浏览器内核。macOS 安装包约 16 MB。
 - **启动快**:启动约 0.25 秒(MacBook Pro,Apple M5 Pro),长列表滚动也流畅。
+- **服务器零安装**:所有操作走 SSH,服务器上不装 agent、守护进程和 Web 面板,也不对外开管理端口。
 - **默认安全**:密码和私钥口令加密存储,主密钥放在系统钥匙串;agent 没有你的同意绝不能接管终端。
 
 ## 功能
@@ -23,7 +28,11 @@
 - **节点与分组**:服务器分组、搜索,支持从 CSV 或 `~/.ssh/config` 导入。
 - **SSH 终端**:密码、私钥、SSH Agent 认证。
 - **文件(SFTP)**:浏览、预览、拖入上传、新建文件夹、删除;容器内的文件也能看。
-- **Docker**(开发中):堆栈、容器、镜像、存储卷;启动、停止、重启、删除。
+- **Docker**:堆栈、容器、镜像、存储卷、镜像仓库;启动、停止、重启、删除,编辑 compose 文件并部署,删除堆栈。
+- **应用商店**:一键安装 PostgreSQL、MySQL、MariaDB、Redis、OpenResty 等,统一的安装、升级、卸载流程;商店列表每天从仓库更新,已装应用静默检查可升级版本。
+- **数据库**:管理数据库和用户,查看和修改常用参数、配置文件,连接信息一键复制。
+- **网站**:基于 OpenResty 管理站点(反向代理、静态站、跳转)、HTTPS 证书(签发与续期)、性能和安全设置。
+- **服务器运维**:进程、服务、计划任务、存储(空间透镜)。
 - **自动更新**:通过 GitHub Release 检查新版本,在标题栏一键更新。
 - **Agent 接口**:让 AI agent 读取节点信息,并在你同意后接管终端会话。
 
@@ -37,7 +46,7 @@
 
 ## 使用
 
-打开 Otter,添加节点(或导入),点节点卡片即可打开它的终端、文件和 Docker 标签。
+打开 Otter,添加节点(或导入),点节点卡片即可打开它的终端、文件(SFTP)和服务器管理(容器、数据库、网站、应用商店等)。
 
 ### Agent
 
