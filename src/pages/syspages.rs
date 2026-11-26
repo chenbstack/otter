@@ -55,7 +55,9 @@ pub(crate) struct SysUi {
     /// 透镜扫描的编号,每次扫描加一
     pub(super) lens_seq: u64,
     pub(super) asked: HashMap<Kind, Instant>,
-    inflight: HashSet<Kind>,
+    pub(super) inflight: HashSet<Kind>,
+    /// 网站页的状态和表单
+    pub(super) web: super::websites::WebUi,
     sort: ProcSort,
     filter: SvcFilter,
     /// 计划任务的新增/编辑表单:None 是没打开,Some(None) 是新增,Some(Some(行号)) 是编辑 crontab 里的那一行
@@ -91,6 +93,8 @@ fn spec(p: Page) -> Option<(Kind, &'static str)> {
         Page::Services => Some((Kind::Services, sysops::SERVICES_SCRIPT)),
         Page::Storage => Some((Kind::Storage, sysops::STORAGE_SCRIPT)),
         Page::Cron => Some((Kind::Cron, sysops::CRON_SCRIPT)),
+        // 网站页的脚本是动态生成的(见 `sys_sync`)
+        Page::Websites => Some((Kind::Web, "")),
         _ => None,
     }
 }
@@ -164,6 +168,11 @@ impl Home {
     }
 
     /// 刷新按钮:当前页的数据重新读
+    /// 换了标签/节点:整个运维页状态回到初始(数据和表单都是上一台服务器的)
+    pub(crate) fn sys_clear(&mut self) {
+        self.dock.sys = SysUi::default();
+    }
+
     pub(crate) fn sys_reset(&mut self) {
         self.dock.sys.asked.clear();
         self.dock.sys.inflight.clear();
@@ -178,7 +187,7 @@ impl Home {
     pub(crate) fn sys_due(&self) -> bool {
         // 刚过了 1 秒的「结束」:重绘一次,把按钮换成强制结束
         let force_now = self.page == Page::Processes && self.dock.sys.killed.values().any(|t| t.elapsed() >= FORCE_AFTER && t.elapsed() < FORCE_AFTER + Duration::from_millis(900));
-        force_now || (self.page == Page::Processes && !self.demo && !self.dock.sys.inflight.contains(&Kind::Procs) && self.dock.sys.asked.get(&Kind::Procs).is_some_and(|t| t.elapsed() >= proc_every()))
+        force_now || self.web_due() || (self.page == Page::Processes && !self.demo && !self.dock.sys.inflight.contains(&Kind::Procs) && self.dock.sys.asked.get(&Kind::Procs).is_some_and(|t| t.elapsed() >= proc_every()))
     }
 
     /// 记下刚发出的结束操作(`dock_act` 调用)
@@ -216,6 +225,9 @@ impl Home {
             Kind::Services => s.services = Some(res.and_then(|t| sysops::parse_services(&t))),
             Kind::Storage => s.storage = Some(res.and_then(|t| sysops::parse_storage(&t))),
             Kind::Cron => s.cron = Some(res.map(|t| sysops::parse_cron(&t))),
+            Kind::Web => self.web_loaded(res, cx),
+            Kind::WebOp => self.web_op_done(res, cx),
+            Kind::WebPoll => self.web_polled(res, cx),
             Kind::ComposeFile | Kind::ComposeEnv => {}
             Kind::Probe => self.lens_probed(res, cx),
             Kind::Remove => self.lens_removed(res, cx),
@@ -243,6 +255,9 @@ impl Home {
         }
         if self.demo {
             self.sys_demo();
+            if page == Page::Websites {
+                self.web_demo();
+            }
             // 调试:截图时直接打开编辑表单
             if page == Page::Cron && self.dock.sys.cron_form.is_none() && self.dock.sys.cron_inputs.is_none() && std::env::var_os("OTTER_CRON_FORM").is_some() {
                 self.cron_open(Some(1), "0 3 * * *", "/usr/local/bin/backup.sh --full", window, cx);
@@ -250,10 +265,11 @@ impl Home {
             return;
         }
         let got: Vec<(Kind, Result<String, String>)> = match self.sys_docker() {
-            Some(d) => [kind, Kind::Probe, Kind::Remove].into_iter().filter_map(|k| d.sys_take(k).map(|r| (k, r))).collect(),
+            Some(d) => [kind, Kind::Probe, Kind::Remove, Kind::WebOp, Kind::WebPoll].into_iter().filter_map(|k| d.sys_take(k).map(|r| (k, r))).collect(),
             None => return,
         };
         self.lens_pump();
+        self.web_pump();
         for (k, r) in got {
             self.sys_store(k, r, window, cx);
         }
@@ -263,7 +279,11 @@ impl Home {
             Some(t) => kind == Kind::Procs && t.elapsed() >= proc_every(),
         };
         if idle && due {
-            self.sys_ask(kind, script, false);
+            if kind == Kind::Web {
+                self.sys_ask(kind, &crate::web::state_script(), true);
+            } else {
+                self.sys_ask(kind, script, false);
+            }
         }
     }
 
@@ -334,6 +354,7 @@ impl Home {
                 v.push(row.into_any_element());
                 v.extend(self.dock.sys.search.clone().map(search));
             }
+            Page::Websites => v.extend(self.web_header_actions(cx)),
             Page::Cron => {
                 if matches!(self.dock.sys.cron, Some(Ok(_))) {
                     v.push(button("cron-add", IconName::Plus, "新增任务").on_click(cx.listener(|this, _, window, cx| this.cron_open(None, "", "", window, cx))).into_any_element());
@@ -350,6 +371,7 @@ impl Home {
             Page::Processes => Some(format!("{n} 上正在运行的进程,每 {} 秒刷新", crate::prefs::proc_secs())),
             Page::Services => Some(format!("{n} 上的 systemd 服务")),
             Page::Storage => Some(format!("{n} 的磁盘和挂载点,点一行看里面最大的目录")),
+            Page::Websites => Some(self.web_subtitle()),
             Page::Cron => Some(format!("{n} 上的 crontab 和 systemd 定时器;只能改自己的 crontab")),
             _ => None,
         }
@@ -360,6 +382,7 @@ impl Home {
             Page::Processes => self.procs_page(cx),
             Page::Services => self.services_page(cx),
             Page::Storage => self.storage_page(cx),
+            Page::Websites => self.web_page(cx),
             _ => self.cron_page(cx),
         }
     }

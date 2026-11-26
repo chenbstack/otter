@@ -281,6 +281,7 @@ impl Home {
     pub(crate) fn comp_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.create_sync(window, cx);
         self.dbi_sync(window, cx);
+        self.wbi_sync(window, cx);
         let Some(stack) = self.dock.comp.open.clone() else { return };
         self.env_sync(window, cx);
         if self.demo || !matches!(self.dock.comp.phase, Phase::Loading) {

@@ -1,5 +1,5 @@
 //! 数据库备份与恢复弹窗(数据库页里某个库的「备份」按钮)。
-//! 备份文件在服务器 `~/otter-backups/<容器名>/`,脚本构造和解析见 `dbinst`;长任务在服务器上脱离运行,这里只轮询列表。
+//! 备份文件在服务器 `/opt/otter/databases/backups/<容器名>/`,脚本构造和解析见 `dbinst`;长任务在服务器上脱离运行,这里只轮询列表。
 
 use super::super::*;
 use super::dockerpages::{icon_btn_c, loading};
@@ -75,7 +75,7 @@ impl Home {
         let mut d = BackupDlg::new(db);
         if self.demo {
             d.data = Some(Ok(Backups {
-                home: "/home/demo".into(),
+                dir: "/opt/otter/databases/backups/demo-db".into(),
                 files: vec![
                     dbinst::BackupFile { name: "app_20261125-101500.dump".into(), db: "app".into(), size: 48_300_000, mtime: 1_795_600_000, pre: false },
                     dbinst::BackupFile { name: "app_20261124-030000-pre.dump".into(), db: "app".into(), size: 47_100_000, mtime: 1_795_500_000, pre: true },
@@ -176,6 +176,13 @@ impl Home {
                     }
                 }
             }
+            Some("bkmv") => match r {
+                Ok(o) => {
+                    self.dock.notice = Some((format!("已迁移备份:{}", o.trim().trim_start_matches("migrated").trim()).into(), Instant::now()));
+                    refresh = true;
+                }
+                Err(e) => b.err = Some(e),
+            },
             Some("bkdel") => {
                 b.deleting = None;
                 match r {
@@ -283,6 +290,34 @@ impl Home {
         cx.notify();
     }
 
+    /// 把旧位置的备份迁到 /opt/otter/databases/backups/(用户点了才做)
+    fn dbm_bk_migrate(&mut self, cx: &mut Context<Self>) {
+        let Some(inst) = self.dbm_inst() else { return };
+        if self.demo {
+            self.dock.notice = Some(("演示数据,不会真的迁移".into(), Instant::now()));
+            cx.notify();
+            return;
+        }
+        let tag = format!("dbm:bkmv:{}", inst.container.name);
+        if self.dock.dbm.inflight.contains(&tag) {
+            return;
+        }
+        match dbinst::backup_migrate_script(&inst.container.name) {
+            Ok(s) => {
+                if let Some(d) = self.dbm_docker() {
+                    d.host_run(&tag, s, 1800);
+                    self.dock.dbm.inflight.push(tag);
+                }
+            }
+            Err(e) => {
+                if let Some(b) = self.dock.dbm.bk.as_mut() {
+                    b.err = Some(e);
+                }
+            }
+        }
+        cx.notify();
+    }
+
     fn dbm_bk_delete(&mut self, file: String, cx: &mut Context<Self>) {
         let Some(inst) = self.dbm_inst() else { return };
         let Some(b) = self.dock.dbm.bk.as_mut() else { return };
@@ -320,10 +355,10 @@ impl Home {
             return;
         }
         let home = match &b.data {
-            Some(Ok(d)) => d.home.clone(),
+            Some(Ok(d)) => d.dir.clone(),
             _ => return,
         };
-        let Some(remote) = dbinst::backup_remote_path(&home, &inst.container.name, &file) else {
+        let Some(remote) = dbinst::backup_remote_path(&home, &file) else {
             b.err = Some("文件名里有不支持的字符".into());
             cx.notify();
             return;
@@ -360,7 +395,7 @@ impl Home {
         let busy = b.active();
         let backing = (b.starting && !b.restoring) || matches!(&b.data, Some(Ok(d)) if !d.running.is_empty());
         let running = matches!(&b.data, Some(Ok(d)) if d.restore.as_deref() == Some("running"));
-        let dir = format!("服务器 ~/otter-backups/{}/", inst.container.name);
+        let dir = format!("服务器 {}/backups/{}/", crate::srvdata::DB, inst.container.name);
 
         let start = div()
             .id("dbm-bk-start")
@@ -417,6 +452,36 @@ impl Home {
         }
         if let Some(e) = &b.err {
             notes = notes.child(banner(false, e.clone(), c::danger()));
+        }
+        if let Some(Ok(d)) = &b.data {
+            if let Some((n, kb)) = d.legacy {
+                let moving = self.dock.dbm.inflight.iter().any(|t| t.starts_with("dbm:bkmv:"));
+                notes = notes.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CAPTION)).text_color(c::warn()).child(format!("旧位置 ~/otter-backups 里还有 {n} 个备份(共 {}),迁移后才会出现在这个列表里", dbinst::fmt_size(kb * 1024))))
+                        .child(
+                            div()
+                                .id("dbm-bk-migrate")
+                                .h(px(26.0))
+                                .px(px(10.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(t::RADIUS_MD))
+                                .border_1()
+                                .border_color(c::field_border())
+                                .text_size(px(t::TYPE_CAPTION))
+                                .text_color(c::secondary())
+                                .when(moving, |d| d.opacity(0.5))
+                                .when(!moving, |d| d.cursor_pointer().hover(|s| s.bg(c::field_hover())))
+                                .child(if moving { "迁移中…" } else { "迁移到 /opt/otter" })
+                                .on_click(cx.listener(|this, _, _, cx| this.dbm_bk_migrate(cx))),
+                        ),
+                );
+            }
         }
 
         let item = |id: usize, left: AnyElement, ops: Vec<AnyElement>| {

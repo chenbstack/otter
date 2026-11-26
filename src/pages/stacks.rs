@@ -4,7 +4,7 @@ use super::super::*;
 
 pub(crate) fn menu_count(node: &Node, snap: &crate::docker::Snapshot, page: Page) -> Option<usize> {
     match page {
-        Page::Overview | Page::Registry | Page::Config | Page::Processes | Page::Services | Page::Storage | Page::Cron => None,
+        Page::Overview | Page::Registry | Page::Config | Page::Processes | Page::Services | Page::Storage | Page::Cron | Page::Websites => None,
         Page::Containers => Some(snap.containers.len()),
         Page::Database => Some(crate::dbinst::detect(&snap.containers).len()),
         Page::Stacks => Some(node.stacks.len()),
@@ -93,7 +93,7 @@ impl Home {
                     .child("节点详情"),
             );
         // 侧边栏:概览,把容器/堆栈/镜像/存储卷合在一起的「容器」(里面用页签切换),以及服务器的运维页
-        for (i, p) in [Page::Overview, Page::Containers, Page::Database, Page::Processes, Page::Services, Page::Storage, Page::Cron].into_iter().enumerate() {
+        for (i, p) in [Page::Overview, Page::Containers, Page::Database, Page::Processes, Page::Services, Page::Storage, Page::Cron, Page::Websites].into_iter().enumerate() {
             let active = if p == Page::Containers { self.page.is_docker() } else { self.page == p };
             let count = menu_count(node, &self.dock.snap, p);
             col = col.child(
@@ -191,7 +191,7 @@ impl Home {
         let head_in_list = self.page == Page::Stacks && !gated && !self.node().stacks.is_empty();
         let scroll_header = !gated && (self.page == Page::Overview || self.page.scrolls_whole() || self.conf_scrolls_whole());
 
-        let tabs = ((self.page.is_docker() || self.page == Page::Database) && !gated).then(|| self.docker_tabs_slot(cx).into_any_element());
+        let tabs = (self.has_page_tabs() && !gated).then(|| self.docker_tabs_slot(cx).into_any_element());
         let sticky = (!gated && self.dock_stuck()).then(|| self.dock_sticky_bar(window, cx));
         let inner: Vec<AnyElement> = if head_in_list {
             vec![body]
@@ -311,7 +311,7 @@ impl Home {
                     .gap(px(8.0))
                     .px(px(CONTENT_PAD))
                     .pt(px(10.0))
-                    .child(if self.page.is_docker() || self.page == Page::Database {
+                    .child(if self.has_page_tabs() {
                         self.docker_tabs(cx)
                     } else {
                         // 没有页签的页面(进程、服务等):吸顶条左边放页面图标和名字
@@ -323,9 +323,17 @@ impl Home {
     }
 
     /// 容器相关四个页面的页签:容器 / 堆栈 / 镜像 / 存储卷
+    /// 页头下面有页签的页面:容器相关页、数据库页、装好了的网站页
+    fn has_page_tabs(&self) -> bool {
+        self.page.is_docker() || self.page == Page::Database || (self.page == Page::Websites && self.web_installed())
+    }
+
     fn docker_tabs(&self, cx: &mut Context<Self>) -> Div {
         if self.page == Page::Database {
             return self.db_tabs(cx);
+        }
+        if self.page == Page::Websites {
+            return self.web_tabs(cx);
         }
         let node = self.node();
         let mut row = div().flex().flex_row().items_center().gap(px(4.0)).pb(px(10.0)).flex_shrink_0();

@@ -195,12 +195,12 @@ impl Home {
         cx.notify();
     }
 
-    fn taken_names(&self) -> Vec<String> {
+    pub(super) fn taken_names(&self) -> Vec<String> {
         let snap = &self.dock.snap;
         snap.containers.iter().map(|c| c.name.clone()).chain(self.node().stacks.iter().map(|s| s.name.clone())).chain(snap.containers.iter().filter_map(|c| c.project.clone())).collect()
     }
 
-    fn used_ports(&self) -> Vec<u16> {
+    pub(super) fn used_ports(&self) -> Vec<u16> {
         self.dock.snap.containers.iter().flat_map(|c| dbinstall::host_ports(&c.ports)).collect()
     }
 

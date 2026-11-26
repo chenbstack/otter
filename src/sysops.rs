@@ -13,6 +13,12 @@ pub enum Kind {
     Probe,
     /// 空间透镜里删除一个文件/目录
     Remove,
+    /// 网站页:读取全部状态(root)
+    Web,
+    /// 网站页:一次操作的结果(站点/证书/账号/容器控制)
+    WebOp,
+    /// 网站页:后台长任务(安装、申请证书)的进度轮询
+    WebPoll,
     /// 堆栈的 compose 文件内容
     ComposeFile,
     /// 堆栈的 env 文件内容

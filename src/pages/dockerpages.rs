@@ -63,6 +63,7 @@ pub(crate) struct DockUi {
     confirm: Option<DockAsk>,
     pub(super) comp: super::composeedit::CompUi,
     pub(super) dbi: super::dbinstallui::DbInstallUi,
+    pub(super) wbi: super::webinstallui::WebInstallUi,
     pub(super) dbm: super::dbmanage::DbMgr,
     pub(super) notice: Option<(SharedString, Instant)>,
     /// 刚点下的容器操作(容器名 → 动词, 点击时刻):后台标记「进行中」前先让按钮转起来
@@ -85,7 +86,7 @@ const PENDING_MAX_SECS: u64 = 60;
 
 impl DockUi {
     pub fn new() -> Self {
-        Self { snap: Arc::new(Snapshot::default()), dbm_dbg: None, search: None, pull: None, pull_open: false, pull_reg: None, pull_reg_open: false, inst_src: None, inst_src_open: false, inst_accel: false, inst_log_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), comp: Default::default(), dbi: Default::default(), dbm: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, pending: Vec::new(), polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
+        Self { snap: Arc::new(Snapshot::default()), dbm_dbg: None, search: None, pull: None, pull_open: false, pull_reg: None, pull_reg_open: false, inst_src: None, inst_src_open: false, inst_accel: false, inst_log_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), comp: Default::default(), dbi: Default::default(), wbi: Default::default(), dbm: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, pending: Vec::new(), polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
     }
 }
 
@@ -197,6 +198,8 @@ impl Home {
             self.dock.mon = None;
             self.dock.mon_err = None;
             self.dock.seen = 0;
+            // 运维页(进程、服务、存储、计划任务、网站)的数据属于某一台服务器,换标签要清掉,否则会显示上一台的
+            self.sys_clear();
         }
         if self.demo {
             self.dock.snap = Arc::new(docker::demo_snapshot(&self.node().stacks));
@@ -727,7 +730,7 @@ impl Home {
             Page::Volumes => format!("{n} 上的存储卷"),
             Page::Registry => format!("{n} 上登录的镜像仓库"),
             Page::Config => format!("{n} 上的 Docker 守护进程配置"),
-            Page::Processes | Page::Services | Page::Storage | Page::Cron => self.sys_subtitle().unwrap_or_default(),
+            Page::Processes | Page::Services | Page::Storage | Page::Cron | Page::Websites => self.sys_subtitle().unwrap_or_default(),
         }
     }
 
@@ -741,7 +744,7 @@ impl Home {
             Page::Registry => self.registry_page(cx),
             Page::Config => self.config_page(cx),
             Page::Stacks => div().into_any_element(),
-            Page::Processes | Page::Services | Page::Storage | Page::Cron => self.sys_page(cx),
+            Page::Processes | Page::Services | Page::Storage | Page::Cron | Page::Websites => self.sys_page(cx),
         }
     }
 
@@ -759,10 +762,12 @@ impl Home {
             v.push(m.into_any_element());
         }
         v.extend(self.lens_menu_view(cx));
+        v.extend(self.web_overlays(window, cx));
         if let Some(m) = self.create_drawer(window, cx) {
             v.push(m.into_any_element());
         }
         v.extend(self.dbi_overlays(window, cx));
+        v.extend(self.wbi_overlays(window, cx));
         if let Some(m) = self.comp_dialog(window, cx) {
             v.push(m.into_any_element());
         }

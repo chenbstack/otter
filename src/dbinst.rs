@@ -822,7 +822,7 @@ pub fn fmt_size(b: u64) -> String {
 
 // ---- 备份与恢复 -----------------------------------------------------------------
 //
-// 备份文件放服务器 `~/otter-backups/<容器名>/`,文件名 `<库名>_<YYYYmmdd-HHMMSS>[-pre].(dump|sql.gz)`。
+// 备份文件放服务器 `/opt/otter/databases/backups/<容器名>/`(见 srvdata;登录用户没权限建这个目录时退回 `~/otter-backups/<容器名>/`),文件名 `<库名>_<YYYYmmdd-HHMMSS>[-pre].(dump|sql.gz)`。
 // 脚本在服务器上跑:`docker exec` 容器里的 pg_dump / mysqldump,账号密码在容器里读容器自己的环境变量(沿用 `client_script`),
 // 不经过 Otter。长任务脚本自己脱离运行(忽略 HUP),先写 `.part`,成功才改名;失败留 `.fail`(里面是原因)。
 
@@ -856,8 +856,10 @@ pub struct BackupFile {
 /// 备份列表脚本的解析结果(已按库过滤)
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Backups {
-    /// 服务器上登录用户的主目录(下载要用绝对路径)
-    pub home: String,
+    /// 备份所在目录的绝对路径(下载要用)
+    pub dir: String,
+    /// 旧位置 `~/otter-backups/<容器>/` 里还有备份:(个数, 占用 KiB),等用户确认迁移
+    pub legacy: Option<(usize, u64)>,
     pub files: Vec<BackupFile>,
     /// 正在写的 `.part`:(文件名, 已写大小)
     pub running: Vec<(String, u64)>,
@@ -906,7 +908,8 @@ impl DbKind {
     /// 脚本开头:算出备份目录 `$D`(登录用户主目录下),必要时建好,磁盘够用
     fn backup_prelude(ctr: &str) -> String {
         format!(
-            r#"command -v docker >/dev/null 2>&1 || {{ echo "找不到 docker" >&2; exit 1; }}; U="${{SUDO_USER:-$(id -un)}}"; H=$(getent passwd "$U" | cut -d: -f6); [ -n "$H" ] || H="$HOME"; D="$H/otter-backups/{ctr}"; umask 077; mkdir -p "$D" || exit 1; chown "$U" "$H/otter-backups" "$D" 2>/dev/null; "#
+            r#"command -v docker >/dev/null 2>&1 || {{ echo "找不到 docker" >&2; exit 1; }}; U="${{SUDO_USER:-$(id -un)}}"; H=$(getent passwd "$U" | cut -d: -f6); [ -n "$H" ] || H="$HOME"; LG="$H/otter-backups/{ctr}"; D="{bk}/{ctr}"; mkdir -p "$D" 2>/dev/null && [ -w "$D" ] || D="$LG"; mkdir -p "$D" || exit 1; chmod 700 "$D"; chown "$U" "$D" 2>/dev/null; [ "$D" = "$LG" ] && chown "$U" "$H/otter-backups" 2>/dev/null; umask 077; "#,
+            bk = format!("{}/backups", crate::srvdata::DB)
         )
     }
 
@@ -974,8 +977,21 @@ pub fn backup_list_script(ctr: &str) -> Result<String, String> {
         return Err("容器名里有不支持的字符".into());
     }
     Ok(format!(
-        r#"printf 'H\t%s\n' "$HOME"; D="$HOME/otter-backups/{ctr}"; cd "$D" 2>/dev/null || exit 0; for f in *; do [ -f "$f" ] || continue; case "$f" in *.part) printf 'P\t%s\t%s\n' "$f" "$(stat -c %s "$f")";; *.fail) printf 'E\t%s\t%s\n' "$f" "$(tail -n1 "$f" | tr '\t' ' ')";; *.err|*.rc) ;; *) printf 'F\t%s\t%s\t%s\n' "$f" "$(stat -c %s "$f")" "$(stat -c %Y "$f")";; esac; done; for f in .restore-*; do [ -f "$f" ] && printf 'R\t%s\t%s\n' "${{f#.restore-}}" "$(head -n1 "$f" | tr '\t' ' ')"; done; true
-"#
+        r#"LG="$HOME/otter-backups/{ctr}"; D="{bk}/{ctr}"; [ -d "$D" ] || D="$LG"; printf 'H\t%s\n' "$D"; if [ "$D" != "$LG" ] && [ -d "$LG" ]; then n=$(ls -1p "$LG" 2>/dev/null | grep -v '/$' | grep -vE '\.(part|err|rc|fail)$' | wc -l); [ "$n" -gt 0 ] && printf 'L\t%s\t%s\n' "$n" "$(du -sk "$LG" | cut -f1)"; fi; cd "$D" 2>/dev/null || exit 0; for f in *; do [ -f "$f" ] || continue; case "$f" in *.part) printf 'P\t%s\t%s\n' "$f" "$(stat -c %s "$f")";; *.fail) printf 'E\t%s\t%s\n' "$f" "$(tail -n1 "$f" | tr '\t' ' ')";; *.err|*.rc) ;; *) printf 'F\t%s\t%s\t%s\n' "$f" "$(stat -c %s "$f")" "$(stat -c %Y "$f")";; esac; done; for f in .restore-*; do [ -f "$f" ] && printf 'R\t%s\t%s\n' "${{f#.restore-}}" "$(head -n1 "$f" | tr '\t' ' ')"; done; true
+"#,
+        bk = format!("{}/backups", crate::srvdata::DB)
+    ))
+}
+
+/// 把旧位置 `~/otter-backups/<容器名>/` 的备份迁到 `/opt/otter/databases/backups/<容器名>/`(同盘瞬间完成,跨盘 mv 会复制再删);已存在同名文件的跳过。输出 `migrated <个数>`
+pub fn backup_migrate_script(ctr: &str) -> Result<String, String> {
+    if !valid_container(ctr) {
+        return Err("容器名里有不支持的字符".into());
+    }
+    Ok(format!(
+        r#"U="${{SUDO_USER:-$(id -un)}}"; H=$(getent passwd "$U" | cut -d: -f6); [ -n "$H" ] || H="$HOME"; LG="$H/otter-backups/{ctr}"; D="{bk}/{ctr}"; mkdir -p "$D" 2>/dev/null && [ -w "$D" ] || {{ echo "当前账号不能写 {bk},请用有 root 权限的账号迁移" >&2; exit 1; }}; chmod 700 "$D"; chown "$U" "$D" 2>/dev/null; n=0; for f in "$LG"/*; do [ -f "$f" ] || continue; b=$(basename "$f"); [ -e "$D/$b" ] && continue; mv "$f" "$D/$b" || {{ echo "移动 $b 失败" >&2; exit 1; }}; chown "$U" "$D/$b" 2>/dev/null; n=$((n+1)); done; rmdir "$LG" 2>/dev/null; echo "migrated $n"
+"#,
+        bk = format!("{}/backups", crate::srvdata::DB)
     ))
 }
 
@@ -989,8 +1005,9 @@ pub fn backup_cancel_script(ctr: &str, part: &str) -> Result<String, String> {
     // 容器里的导出进程是 `docker exec -e OTG_DB=<库>` 起的,靠环境变量认出来一并结束(只杀导出程序)
     let inner = sq(&format!(r#"for d in /proc/[0-9]*; do tr '\0' '\n' <"$d/environ" 2>/dev/null | grep -qx 'OTG_DB={db}' || continue; case "$(cat "$d/comm" 2>/dev/null)" in pg_dump|mysqldump|mariadb-dump) kill "${{d#/proc/}}";; esac; done"#));
     Ok(format!(
-        r#"U="${{SUDO_USER:-$(id -un)}}"; H=$(getent passwd "$U" | cut -d: -f6); [ -n "$H" ] || H="$HOME"; D="$H/otter-backups/{ctr}"; B='{base}'; P="$D/.pid-$B"; kids() {{ ps -eo pid=,ppid= | awk -v p="$1" '$2==p{{print $1}}'; }}; kt() {{ for c in $(kids "$1"); do kt "$c"; done; kill "$1" 2>/dev/null; }}; if [ -f "$P" ]; then pid=$(cat "$P"); case "$pid" in ''|*[!0-9]*) ;; *) n=$(ps -o comm= -p "$pid" 2>/dev/null); case "$n" in sh|dash|bash|ash) ks=$(kids "$pid"); kill "$pid" 2>/dev/null; for k in $ks; do kt "$k"; done;; esac;; esac; fi; docker exec {ctr} sh -c {inner} >/dev/null 2>&1; sleep 1; rm -f "$D/$B.part" "$D/$B.err" "$D/$B.rc" "$P"; echo cancelled
-"#
+        r#"U="${{SUDO_USER:-$(id -un)}}"; H=$(getent passwd "$U" | cut -d: -f6); [ -n "$H" ] || H="$HOME"; D="{bk}/{ctr}"; [ -d "$D" ] || D="$H/otter-backups/{ctr}"; B='{base}'; P="$D/.pid-$B"; kids() {{ ps -eo pid=,ppid= | awk -v p="$1" '$2==p{{print $1}}'; }}; kt() {{ for c in $(kids "$1"); do kt "$c"; done; kill "$1" 2>/dev/null; }}; if [ -f "$P" ]; then pid=$(cat "$P"); case "$pid" in ''|*[!0-9]*) ;; *) n=$(ps -o comm= -p "$pid" 2>/dev/null); case "$n" in sh|dash|bash|ash) ks=$(kids "$pid"); kill "$pid" 2>/dev/null; for k in $ks; do kt "$k"; done;; esac;; esac; fi; docker exec {ctr} sh -c {inner} >/dev/null 2>&1; sleep 1; rm -f "$D/$B.part" "$D/$B.err" "$D/$B.rc" "$P"; echo cancelled
+"#,
+        bk = format!("{}/backups", crate::srvdata::DB)
     ))
 }
 
@@ -999,12 +1016,12 @@ pub fn backup_delete_script(ctr: &str, file: &str) -> Result<String, String> {
     if !valid_container(ctr) || !valid_backup_file(file) || file.ends_with(".part") {
         return Err("文件名里有不支持的字符".into());
     }
-    Ok(format!("rm -f \"$HOME/otter-backups/{ctr}/\"{}\n", sq(file)))
+    Ok(format!("D=\"{bk}/{ctr}\"; [ -d \"$D\" ] || D=\"$HOME/otter-backups/{ctr}\"; rm -f \"$D/\"{}\n", sq(file), bk = format!("{}/backups", crate::srvdata::DB)))
 }
 
 /// 服务器上的备份文件绝对路径
-pub fn backup_remote_path(home: &str, ctr: &str, file: &str) -> Option<String> {
-    (valid_container(ctr) && valid_backup_file(file) && home.starts_with('/') && !home.contains(['\'', '\n'])).then(|| format!("{}/otter-backups/{ctr}/{file}", home.trim_end_matches('/')))
+pub fn backup_remote_path(dir: &str, file: &str) -> Option<String> {
+    (valid_backup_file(file) && dir.starts_with('/') && !dir.contains(['\'', '\n'])).then(|| format!("{}/{file}", dir.trim_end_matches('/')))
 }
 
 /// 解析 `backup_list_script` 的输出,只留属于 `db` 的
@@ -1020,7 +1037,8 @@ pub fn parse_backups(out: &str, db: &str) -> Backups {
     for l in out.lines() {
         let f: Vec<&str> = l.trim_end_matches('\r').split('\t').collect();
         match f.as_slice() {
-            ["H", h] => b.home = h.to_string(),
+            ["H", h] => b.dir = h.to_string(),
+            ["L", n, kb] => b.legacy = Some((n.parse().unwrap_or(0), kb.parse().unwrap_or(0))),
             ["F", name, size, mtime] if mine(name) => {
                 if let Some((d, pre)) = owner(name).filter(|(d, _)| d == db) {
                     b.files.push(BackupFile { name: name.to_string(), db: d, size: size.parse().unwrap_or(0), mtime: mtime.parse().unwrap_or(0), pre });
@@ -1318,7 +1336,7 @@ mod tests {
                 // 密码不会出现在脚本里,只在容器里读环境变量
                 assert!(!s.contains("PASSWORD=") || s.contains("\"$p\""));
             }
-            assert!(b.contains("otter-backups/my-db.1") && b.contains(&format!("shop_$(date +%Y%m%d-%H%M%S).{ext}")));
+            assert!(b.contains("databases/backups/my-db.1") && b.contains(&format!("shop_$(date +%Y%m%d-%H%M%S).{ext}")));
             assert!(r.contains("-pre.") && r.contains(".restore-shop"));
             if let Ok(dir) = std::env::var("OTTER_DUMP_SCRIPTS") {
                 let n = if k == DbKind::Postgres { "pg" } else if k == DbKind::Mysql { "my" } else { "maria" };
@@ -1348,15 +1366,18 @@ mod tests {
         assert!(backup_cancel_script("c", "shop_1.dump.part").is_ok() && backup_cancel_script("c", "shop_1.dump").is_err() && backup_cancel_script("c", "../x.part").is_err());
         assert!(std::process::Command::new("sh").arg("-n").arg("-c").arg(backup_cancel_script("c", "shop_1.dump.part").unwrap()).status().unwrap().success());
         assert!(backup_delete_script("c", "x.part").is_err() && backup_delete_script("c", "x/y").is_err());
-        assert_eq!(backup_remote_path("/home/u", "c", "shop_1.dump").as_deref(), Some("/home/u/otter-backups/c/shop_1.dump"));
-        assert!(backup_remote_path("rel", "c", "shop_1.dump").is_none());
+        assert_eq!(backup_remote_path("/opt/otter/databases/backups/c", "shop_1.dump").as_deref(), Some("/opt/otter/databases/backups/c/shop_1.dump"));
+        assert!(backup_remote_path("rel", "shop_1.dump").is_none());
+        assert!(backup_migrate_script("c").is_ok() && backup_migrate_script("a b").is_err());
+        assert!(std::process::Command::new("sh").arg("-n").arg("-c").arg(backup_migrate_script("c").unwrap()).status().unwrap().success());
     }
 
     #[test]
     fn parses_backup_list() {
-        let out = "H\t/home/u\nF\tshop_20260101-101010.dump\t2048\t1000\nF\tshop_20260102-101010-pre.dump\t4096\t2000\nF\tshop_old_20260101-101010.dump\t1\t1\nF\tother_20260101-101010.dump\t1\t1\nP\tshop_20260103-101010.dump.part\t99\nE\tshop_20260104-101010.dump.fail\tpg_dump: error\nR\tshop\trunning\nR\tother\tok\n";
+        let out = "H\t/home/u\nL\t3\t2048\nF\tshop_20260101-101010.dump\t2048\t1000\nF\tshop_20260102-101010-pre.dump\t4096\t2000\nF\tshop_old_20260101-101010.dump\t1\t1\nF\tother_20260101-101010.dump\t1\t1\nP\tshop_20260103-101010.dump.part\t99\nE\tshop_20260104-101010.dump.fail\tpg_dump: error\nR\tshop\trunning\nR\tother\tok\n";
         let b = parse_backups(out, "shop");
-        assert_eq!(b.home, "/home/u");
+        assert_eq!(b.dir, "/home/u");
+        assert_eq!(b.legacy, Some((3, 2048)));
         assert_eq!(b.files.iter().map(|f| (f.name.as_str(), f.pre)).collect::<Vec<_>>(), [("shop_20260102-101010-pre.dump", true), ("shop_20260101-101010.dump", false)]);
         assert_eq!(b.running, [("shop_20260103-101010.dump.part".to_string(), 99)]);
         assert_eq!(b.failed.len(), 1);

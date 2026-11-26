@@ -451,7 +451,7 @@ pub(super) fn field(label: &'static str, hint: &'static str, input: &Entity<Inpu
 }
 
 /// 开关:开着是主色,滑块靠右
-fn switch(id: &'static str, on: bool) -> Stateful<Div> {
+pub(super) fn switch(id: &'static str, on: bool) -> Stateful<Div> {
     div()
         .id(id)
         .w(px(36.0))
