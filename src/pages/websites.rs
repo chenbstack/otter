@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 
+mod sitedrawer;
+
 use super::daemonpage::{field, labeled, switch};
 use super::super::*;
 use super::dockerpages::{head, icon_btn, row, small, table_flow};
@@ -20,7 +22,6 @@ const DLG_W_DNS: f32 = 540.0;
 const DLG_W_SITE: f32 = 560.0;
 const DLG_W_SITE_FORM: f32 = 540.0;
 const DLG_W_ISSUE: f32 = 580.0;
-const DLG_W_RAW: f32 = 720.0;
 const DLG_W_LOG: f32 = 760.0;
 const LOG_H: f32 = 360.0;
 const COL_SITE_DOMAIN: f32 = 250.0;
@@ -41,13 +42,13 @@ const JOB_LINES: usize = 12;
 pub(crate) enum Dlg {
     /// 新建(None)或编辑(Some(配置文件名))站点
     Site(Option<String>),
-    /// 直接编辑配置原文
-    Raw(String),
     CertUpload,
     Issue,
     Dns,
     Acme,
     Logs,
+    /// 站点管理抽屉(编辑已有站点),状态在 `WebUi.sd`
+    Drawer,
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -123,6 +124,8 @@ pub(crate) struct WebUi {
     dlg: Option<Dlg>,
     ins: Vec<Entity<InputState>>,
     area: Vec<Entity<TextareaState>>,
+    /// 站点管理抽屉的表单
+    sd: Option<Box<sitedrawer::SiteDrawer>>,
     // 站点表单
     s_kind: u8,
     s_ws: bool,
@@ -214,6 +217,34 @@ fn card(title: &'static str, sub: impl Into<SharedString>, right: Option<AnyElem
                 .children(right),
         )
         .child(body)
+}
+
+/// 站点表里「目标」列:一个 location 显示后端地址,多个显示「首个后端 等 N 条路径」
+fn proxy_summary(ls: &[web::Location]) -> String {
+    let show = |l: &web::Location| match &l.backend {
+        web::Backend::Url(u) => u.clone(),
+        web::Backend::Group { name, .. } => format!("后端组 {name}"),
+    };
+    match ls {
+        [] => String::new(),
+        [one] => show(one),
+        [first, rest @ ..] => format!("{} 等 {} 条路径", show(first), rest.len() + 1),
+    }
+}
+
+/// 演示站点:三条路径 + 一个后端组
+fn demo_proxy_kind() -> SiteKind {
+    let mut api = web::Location::new("/api/", web::Backend::Group { https: false, name: "api".into() });
+    api.strip = true;
+    api.timeout = Some(60);
+    let ups = vec![web::Upstream {
+        name: "api".into(),
+        policy: web::Policy::LeastConn,
+        servers: vec![web::UServer { addr: "10.0.0.11:8080".into(), weight: 3, backup: false }, web::UServer { addr: "10.0.0.12:8080".into(), weight: 1, backup: false }, web::UServer { addr: "10.0.0.13:8080".into(), weight: 1, backup: true }],
+        max_fails: Some(3),
+        fail_timeout: Some(20),
+    }];
+    SiteKind::Proxy { locations: vec![web::Location::new("/", web::Backend::Url("http://127.0.0.1:3000".into())), api, web::Location::new("/ws", web::Backend::Url("http://127.0.0.1:3001".into()))], upstreams: ups }
 }
 
 fn area_field(label: &'static str, hint: &'static str, e: Option<&Entity<TextareaState>>, h: f32) -> Div {
@@ -521,9 +552,13 @@ impl Home {
                 self.web_mut().s_hsts = s.hsts;
                 let w = self.web_mut();
                 let target = match &s.kind {
-                    SiteKind::Proxy { target, ws, host } => {
-                        (w.s_kind, w.s_ws, w.s_host) = (0, *ws, *host);
-                        target.clone()
+                    SiteKind::Proxy { locations, .. } => {
+                        let l = locations.first();
+                        (w.s_kind, w.s_ws, w.s_host) = (0, l.is_none_or(|l| l.ws), l.is_none_or(|l| l.host));
+                        match l.map(|l| &l.backend) {
+                            Some(web::Backend::Url(u)) => u.clone(),
+                            _ => String::new(),
+                        }
                     }
                     SiteKind::Static { spa, index } => {
                         (w.s_kind, w.s_spa, w.s_index) = (1, *spa, *index);
@@ -542,7 +577,7 @@ impl Home {
                 self.web_set(2, s.adv.max_body.as_deref().unwrap_or(""), window, cx);
                 self.web_set(3, &s.adv.read_timeout.map(|t| t.to_string()).unwrap_or_default(), window, cx);
                 // 有改过的高级项就默认展开
-                let non_default = s.ipv6 || s.hsts || s.adv != web::Advanced::default() || matches!(s.kind, SiteKind::Proxy { ws: false, .. });
+                let non_default = s.ipv6 || s.hsts || s.adv != web::Advanced::default();
                 self.web_mut().s_adv = non_default;
                 for l in &s.listeners {
                     forms.push(self.web_new_listener(&l.domains.join(" "), l.port, l.ssl(), l.cert.clone(), l.force_https, window, cx));
@@ -554,17 +589,6 @@ impl Home {
         }
         self.web_mut().s_ls = forms;
         self.web_mut().dlg = Some(Dlg::Site(edit.map(|e| e.file)));
-        cx.notify();
-    }
-
-    fn web_open_raw(&mut self, e: &SiteEntry, window: &mut Window, cx: &mut Context<Self>) {
-        self.web_inputs(&[], &[], window, cx);
-        self.web_areas(&[(18, "")], window, cx);
-        if let Some(a) = self.web_ui().area.first().cloned() {
-            let text = e.text.clone();
-            a.update(cx, |s, cx| s.set_value(text.as_str(), window, cx));
-        }
-        self.web_mut().dlg = Some(Dlg::Raw(e.file.clone()));
         cx.notify();
     }
 
@@ -701,7 +725,7 @@ impl Home {
         let addr = self.web_val(1, cx);
         let target = if addr.contains("://") { addr } else { format!("{}://{addr}", if w.s_scheme == 1 { "https" } else { "http" }) };
         let kind = match w.s_kind {
-            0 => SiteKind::Proxy { target, ws: w.s_ws, host: w.s_host },
+            0 => SiteKind::proxy(&target, w.s_ws, w.s_host),
             1 => SiteKind::Static { spa: w.s_spa, index: w.s_index },
             _ => SiteKind::Redirect { to: target, code: w.s_code },
         };
@@ -724,11 +748,8 @@ impl Home {
         let Some(dlg) = self.web_ui().dlg.clone() else { return };
         let tg = self.web_target();
         let res: Result<(&'static str, String), String> = match &dlg {
+            Dlg::Drawer => return self.web_sd_save(cx),
             Dlg::Site(_) => self.web_site_spec(cx).and_then(|(s, en)| web::site_save_script(&s, en, &tg).map(|sc| ("保存站点", sc))),
-            Dlg::Raw(file) => {
-                let text = self.web_area_val(0, cx);
-                web::site_raw_script(file, &text).map(|s| ("保存配置", s))
-            }
             Dlg::CertUpload => {
                 let (n, cert, key) = (self.web_val(0, cx), self.web_area_val(0, cx), self.web_area_val(1, cx));
                 web::cert_upload_script(&n, &cert, &key, false).map(|s| ("上传证书", s))
@@ -883,7 +904,7 @@ impl Home {
         w.job_checked = true;
         let ds = |v: &[&str]| v.iter().map(|d| d.to_string()).collect::<Vec<String>>();
         let ls = |d: &[&str], port: u16, cert: Option<&str>, force: bool| web::Listener { domains: ds(d), port, cert: cert.map(str::to_string), force_https: force };
-        let proxy = SiteSpec { name: "app.example.com".into(), kind: SiteKind::Proxy { target: "http://127.0.0.1:3000".into(), ws: true, host: true }, listeners: vec![ls(&["app.example.com"], 80, None, true), ls(&["app.example.com"], 443, Some("app.example.com"), false), ls(&["app.example.com"], 8443, Some("app.example.com"), false)], ipv6: true, hsts: true, adv: Default::default() };
+        let proxy = SiteSpec { name: "app.example.com".into(), kind: demo_proxy_kind(), listeners: vec![ls(&["app.example.com"], 80, None, true), ls(&["app.example.com"], 443, Some("app.example.com"), false), ls(&["app.example.com"], 8443, Some("app.example.com"), false)], ipv6: true, hsts: true, adv: Default::default() };
         let blog = SiteSpec { name: "blog".into(), kind: SiteKind::Static { spa: false, index: false }, listeners: vec![ls(&["blog.example.com", "www.example.com"], 80, None, true), ls(&["blog.example.com", "www.example.com"], 443, Some("example.com"), false)], ipv6: false, hsts: false, adv: Default::default() };
         let old = SiteSpec { name: "old".into(), kind: SiteKind::Redirect { to: "https://app.example.com".into(), code: 301 }, listeners: vec![ls(&["old.example.com"], 80, None, false)], ipv6: false, hsts: false, adv: Default::default() };
         let t = now_secs();
@@ -930,6 +951,22 @@ impl Home {
             "siteadv" if self.web_ui().dlg.is_none() => {
                 self.web_open_site(None, window, cx);
                 self.web_mut().s_adv = true;
+            }
+            m if m.starts_with("drawer") && self.web_ui().dlg.is_none() => {
+                let entry = self.web_state().and_then(|st| st.sites.iter().find(|e| e.spec.is_some()).cloned());
+                if let Some(e) = entry {
+                    self.web_open_drawer(&e, window, cx);
+                    let menu = match m.strip_prefix("drawer:").unwrap_or("") {
+                        "proxy" => Some(sitedrawer::Menu::Proxy),
+                        "balance" => Some(sitedrawer::Menu::Balance),
+                        "https" => Some(sitedrawer::Menu::Https),
+                        "adv" => Some(sitedrawer::Menu::Advanced),
+                        _ => None,
+                    };
+                    if let (Some(menu), Some(sd)) = (menu, self.web_mut().sd.as_deref_mut()) {
+                        sd.set_menu(menu);
+                    }
+                }
             }
             "install" => {
                 if !self.dock.api.is_open() {
@@ -1280,7 +1317,7 @@ impl Home {
         for (i, s) in st.sites.iter().enumerate() {
             let (kind_text, target) = match &s.spec {
                 Some(sp) => match &sp.kind {
-                    SiteKind::Proxy { target, .. } => (sp.kind.label().to_string(), target.clone()),
+                    SiteKind::Proxy { locations, .. } => (sp.kind.label().to_string(), proxy_summary(locations)),
                     SiteKind::Static { .. } => (sp.kind.label().to_string(), format!("/opt/otter/websites/sites/{}", sp.name)),
                     SiteKind::Redirect { to, code } => (format!("{}({code})", sp.kind.label()), to.clone()),
                 },
@@ -1327,7 +1364,8 @@ impl Home {
                 v.dedup();
                 v.iter().map(u16::to_string).collect::<Vec<_>>().join(" · ")
             });
-            let mut act = div().w(px(COL_SITE_ACT)).flex_shrink_0().flex().flex_row().justify_end().gap(px(2.0));
+            // 操作按钮区的点击不要冒泡到整行(整行点击 = 打开抽屉)
+            let mut act = div().id(("ws-act", i)).w(px(COL_SITE_ACT)).flex_shrink_0().flex().flex_row().justify_end().gap(px(2.0)).on_click(|_, _, cx| cx.stop_propagation());
             let file = s.file.clone();
             let enabled = s.enabled;
             act = act.child(tip(icon_btn(("ws-pw", i), IconName::Power, if enabled { c::online() } else { c::ghost() }), if enabled { "停用" } else { "启用" }).on_click(cx.listener(move |this, _, _, cx| {
@@ -1336,9 +1374,9 @@ impl Home {
                 }
             })));
             let entry = s.clone();
-            let editable = s.spec.is_some() && !s.modified;
-            act = act.child(tip(icon_btn(("ws-ed", i), if editable { IconName::Pencil } else { IconName::FileText }, c::secondary()), if editable { "编辑" } else { "编辑配置原文" }).on_click(cx.listener(move |this, _, window, cx| {
-                if editable { this.web_open_site(Some(entry.clone()), window, cx) } else { this.web_open_raw(&entry, window, cx) }
+            let entry_row = s.clone();
+            act = act.child(tip(icon_btn(("ws-ed", i), IconName::Pencil, c::secondary()), "编辑").on_click(cx.listener(move |this, _, window, cx| {
+                this.web_open_drawer(&entry, window, cx)
             })));
             if let Some(sp) = &s.spec {
                 let name = sp.name.clone();
@@ -1360,6 +1398,8 @@ impl Home {
                 );
             })));
             let mut r = row(("ws-row", i))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| this.web_open_drawer(&entry_row, window, cx)))
                 .child(
                     div()
                         .w(px(COL_SITE_DOMAIN))
@@ -1742,7 +1782,7 @@ impl Home {
                     this.web_close(cx);
                     cx.stop_propagation();
                 }
-                "enter" if !e.keystroke.modifiers.shift && !matches!(this.web_ui().dlg, Some(Dlg::Raw(_)) | Some(Dlg::CertUpload) | Some(Dlg::Logs)) => {
+                "enter" if !e.keystroke.modifiers.shift && !matches!(this.web_ui().dlg, Some(Dlg::CertUpload) | Some(Dlg::Logs)) => {
                     this.web_submit(cx);
                     cx.stop_propagation();
                 }
@@ -1761,10 +1801,12 @@ impl Home {
         if self.demo {
             self.web_demo_dialog(window, cx);
         }
-        if let Some(d) = self.web_ui().dlg.clone() {
+        if matches!(self.web_ui().dlg, Some(Dlg::Drawer)) {
+            v.extend(self.web_sd_overlay(cx));
+        } else if let Some(d) = self.web_ui().dlg.clone() {
             let m = match d {
+                Dlg::Drawer => unreachable!(),
                 Dlg::Site(edit) => self.web_dlg_site(edit.is_some(), cx),
-                Dlg::Raw(file) => self.web_dlg_raw(&file, cx),
                 Dlg::CertUpload => self.web_dlg_upload(cx),
                 Dlg::Issue => self.web_dlg_issue(cx),
                 Dlg::Dns => self.web_dlg_dns(cx),
@@ -2140,15 +2182,6 @@ impl Home {
             }),
             [body.into_any_element()],
         )
-    }
-
-    fn web_dlg_raw(&self, file: &str, cx: &mut Context<Self>) -> Stateful<Div> {
-        let w = self.web_ui();
-        let body = self.web_body().child(area_field("配置原文", "保存前会用 nginx -t 检查,不通过自动还原;Otter 不再管理手工改过的站点结构", w.area.first(), 340.0));
-        let err = w.err.clone().map(|e| (e, c::danger()));
-        let foot = self.web_footer(err, "保存", true, cx);
-        let sub = if file.ends_with(".off") { "已停用的站点配置" } else { "站点配置文件" };
-        self.web_modal("web-dlg-raw", DLG_W_RAW, [self.web_title("编辑配置原文", sub).into_any_element(), body.into_any_element(), foot.into_any_element()], cx)
     }
 
     fn web_dlg_upload(&self, cx: &mut Context<Self>) -> Stateful<Div> {

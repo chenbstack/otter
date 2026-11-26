@@ -155,12 +155,121 @@ pub fn split_domains(s: &str) -> Vec<String> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SiteKind {
-    Proxy { target: String, ws: bool, host: bool },
+    /// 反向代理:多个 location(路径 → 后端),后端可以是一组负载均衡的 upstream
+    Proxy { locations: Vec<Location>, upstreams: Vec<Upstream> },
     Static { spa: bool, index: bool },
     Redirect { to: String, code: u16 },
 }
 
+/// location 的后端:一个地址,或本站点的一个后端组(upstream)
+#[derive(Clone, Debug, PartialEq)]
+pub enum Backend {
+    Url(String),
+    /// `https`:转发到组里的成员时用 https;`name`:后端组名
+    Group { https: bool, name: String },
+}
+
+/// 反向代理的一个 location
+#[derive(Clone, Debug, PartialEq)]
+pub struct Location {
+    /// 以 `/` 开头;`exact` 为 true 时精确匹配(`location = /path`),否则前缀匹配
+    pub path: String,
+    pub exact: bool,
+    pub backend: Backend,
+    pub ws: bool,
+    /// 透传原始 Host
+    pub host: bool,
+    /// 读取超时(秒);None 用站点的高级设置(默认 300)
+    pub timeout: Option<u32>,
+    /// 去掉路径前缀再转发(`/api/x` → 后端的 `/x`);只对前缀匹配且路径不是 `/` 时有意义
+    pub strip: bool,
+}
+
+impl Location {
+    pub fn new(path: &str, backend: Backend) -> Location {
+        Location { path: path.into(), exact: false, backend, ws: true, host: true, timeout: None, strip: false }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum Policy {
+    #[default]
+    RoundRobin,
+    LeastConn,
+    IpHash,
+}
+
+impl Policy {
+    pub fn key(self) -> &'static str {
+        match self {
+            Policy::RoundRobin => "rr",
+            Policy::LeastConn => "lc",
+            Policy::IpHash => "ip",
+        }
+    }
+    pub fn from_key(k: &str) -> Policy {
+        match k {
+            "lc" => Policy::LeastConn,
+            "ip" => Policy::IpHash,
+            _ => Policy::RoundRobin,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Policy::RoundRobin => "轮询",
+            Policy::LeastConn => "最少连接",
+            Policy::IpHash => "IP 哈希",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UServer {
+    /// `host:port`
+    pub addr: String,
+    /// 1–100
+    pub weight: u32,
+    pub backup: bool,
+}
+
+/// 后端组(nginx `upstream`),只在本站点内使用;写进配置时名字带站点前缀
+#[derive(Clone, Debug, PartialEq)]
+pub struct Upstream {
+    pub name: String,
+    pub policy: Policy,
+    pub servers: Vec<UServer>,
+    /// 被动健康检查:`fail_timeout` 秒内失败 `max_fails` 次就暂时摘掉成员;None 用 nginx 默认
+    pub max_fails: Option<u32>,
+    pub fail_timeout: Option<u32>,
+}
+
+/// 后端组名:小写字母、数字、短横线、下划线
+pub fn valid_group(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 32 && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// location 路径:`/` 开头,只含字母数字和 `/._~-`
+pub fn valid_loc_path(p: &str) -> bool {
+    p.starts_with('/') && p.len() <= 200 && !p.contains("//") && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '~' | '-'))
+}
+
+/// 后端组成员 `host:port`(域名、IPv4 或 `[IPv6]`)
+pub fn valid_server_addr(a: &str) -> bool {
+    let Some((h, port)) = a.rsplit_once(':') else { return false };
+    let host_ok = if h.starts_with('[') && h.ends_with(']') {
+        h.len() > 2 && h[1..h.len() - 1].chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+    } else {
+        !h.is_empty() && h.len() <= 253 && h.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    };
+    host_ok && port.parse::<u16>().is_ok_and(|p| p > 0)
+}
+
 impl SiteKind {
+    /// 单个后端的代理(新建站点的简单弹窗用):一个 `/` location
+    pub fn proxy(target: &str, ws: bool, host: bool) -> SiteKind {
+        SiteKind::Proxy { locations: vec![Location { ws, host, ..Location::new("/", Backend::Url(target.into())) }], upstreams: Vec::new() }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             SiteKind::Proxy { .. } => "反向代理",
@@ -283,11 +392,66 @@ impl SiteSpec {
             return Err("读取超时要在 1–86400 秒之间".into());
         }
         match &self.kind {
-            SiteKind::Proxy { target, .. } if !valid_url(target) => Err("后端地址要以 http:// 或 https:// 开头,不能有空格和特殊符号".into()),
+            SiteKind::Proxy { locations, upstreams } => check_proxy(locations, upstreams),
             SiteKind::Redirect { to, code } if !valid_url(to) || !matches!(code, 301 | 302 | 307 | 308) => Err("跳转地址要以 http:// 或 https:// 开头".into()),
             _ => Ok(()),
         }
     }
+}
+
+fn check_proxy(locations: &[Location], upstreams: &[Upstream]) -> Result<(), String> {
+    if locations.is_empty() {
+        return Err("反向代理至少要有一个 location".into());
+    }
+    let mut seen: Vec<(&str, bool)> = Vec::new();
+    for l in locations {
+        if !valid_loc_path(&l.path) {
+            return Err(format!("location 路径不合法:{}(以 / 开头,只能含字母、数字和 / . _ ~ -)", l.path));
+        }
+        if seen.contains(&(l.path.as_str(), l.exact)) {
+            return Err(format!("location {} 重复了", l.path));
+        }
+        seen.push((&l.path, l.exact));
+        if l.timeout.is_some_and(|t| t == 0 || t > 86400) {
+            return Err(format!("{} 的读取超时要在 1–86400 秒之间", l.path));
+        }
+        if l.strip && (l.exact || l.path == "/") {
+            return Err(format!("{}:「去掉前缀」只对前缀匹配且不是 / 的路径有意义", l.path));
+        }
+        match &l.backend {
+            Backend::Url(u) if !valid_url(u) => return Err(format!("{} 的后端地址要以 http:// 或 https:// 开头,不能有空格和特殊符号", l.path)),
+            Backend::Group { name, .. } if !upstreams.iter().any(|u| &u.name == name) => return Err(format!("{} 用了不存在的后端组 {name}", l.path)),
+            _ => {}
+        }
+    }
+    let mut names: Vec<&str> = Vec::new();
+    for u in upstreams {
+        if !valid_group(&u.name) {
+            return Err(format!("后端组名不合法:{}(小写字母、数字、- _)", u.name));
+        }
+        if names.contains(&u.name.as_str()) {
+            return Err(format!("后端组 {} 重复了", u.name));
+        }
+        names.push(&u.name);
+        if u.servers.is_empty() {
+            return Err(format!("后端组 {} 至少要有一个成员", u.name));
+        }
+        if u.servers.iter().all(|s| s.backup) {
+            return Err(format!("后端组 {} 不能全是备用成员", u.name));
+        }
+        for sv in &u.servers {
+            if !valid_server_addr(&sv.addr) {
+                return Err(format!("后端组 {} 的成员地址不合法:{}(写成 主机:端口)", u.name, sv.addr));
+            }
+            if !(1..=100).contains(&sv.weight) {
+                return Err(format!("后端组 {} 的权重要在 1–100 之间", u.name));
+            }
+        }
+        if u.max_fails.is_some_and(|v| v > 1000) || u.fail_timeout.is_some_and(|v| v == 0 || v > 86400) {
+            return Err(format!("后端组 {} 的失败次数/摘除时间不合法", u.name));
+        }
+    }
+    Ok(())
 }
 
 fn fnv(s: &str) -> String {
@@ -307,11 +471,81 @@ fn unesc(v: &str) -> String {
     v.replace("%09", "\t").replace("%0D", "\r").replace("%0A", "\n").replace("%20", " ").replace("%25", "%")
 }
 
+/// 字段内容转义:分隔符 `|` `;` `,` `~` 和 `%`
+fn fesc(v: &str) -> String {
+    v.replace('%', "%25").replace('|', "%7C").replace(';', "%3B").replace(',', "%2C").replace('~', "%7E")
+}
+
+fn funesc(v: &str) -> String {
+    v.replace("%7E", "~").replace("%2C", ",").replace("%3B", ";").replace("%7C", "|").replace("%25", "%")
+}
+
+fn encode_locs(ls: &[Location]) -> String {
+    let b = |v: bool| if v { "1" } else { "0" };
+    ls.iter()
+        .map(|l| {
+            let be = match &l.backend {
+                Backend::Url(u) => format!("u~{}", fesc(u)),
+                Backend::Group { https, name } => format!("g~{}~{}", if *https { "https" } else { "http" }, fesc(name)),
+            };
+            format!("{}|{}|{}|{}|{}|{}|{}", fesc(&l.path), b(l.exact), be, b(l.ws), b(l.host), l.timeout.map(|t| t.to_string()).unwrap_or_default(), b(l.strip))
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn decode_locs(v: &str) -> Vec<Location> {
+    v.split(';')
+        .filter(|x| !x.is_empty())
+        .filter_map(|x| {
+            let f: Vec<&str> = x.split('|').collect();
+            let [path, exact, be, ws, host, timeout, strip] = f[..] else { return None };
+            let parts: Vec<&str> = be.split('~').collect();
+            let backend = match parts[..] {
+                ["u", u] => Backend::Url(funesc(u)),
+                ["g", scheme, name] => Backend::Group { https: scheme == "https", name: funesc(name) },
+                _ => return None,
+            };
+            Some(Location { path: funesc(path), exact: exact == "1", backend, ws: ws == "1", host: host == "1", timeout: timeout.parse().ok(), strip: strip == "1" })
+        })
+        .collect()
+}
+
+fn encode_ups(us: &[Upstream]) -> String {
+    us.iter()
+        .map(|u| {
+            let svs: Vec<String> = u.servers.iter().map(|s| format!("{}~{}~{}", fesc(&s.addr), s.weight, if s.backup { "1" } else { "0" })).collect();
+            format!("{}|{}|{}|{}|{}", fesc(&u.name), u.policy.key(), u.max_fails.map(|v| v.to_string()).unwrap_or_default(), u.fail_timeout.map(|v| v.to_string()).unwrap_or_default(), svs.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn decode_ups(v: &str) -> Vec<Upstream> {
+    v.split(';')
+        .filter(|x| !x.is_empty())
+        .filter_map(|x| {
+            let f: Vec<&str> = x.split('|').collect();
+            let [name, policy, mf, ft, svs] = f[..] else { return None };
+            let servers = svs
+                .split(',')
+                .filter(|x| !x.is_empty())
+                .filter_map(|x| {
+                    let p: Vec<&str> = x.split('~').collect();
+                    let [addr, w, bk] = p[..] else { return None };
+                    Some(UServer { addr: funesc(addr), weight: w.parse().ok()?, backup: bk == "1" })
+                })
+                .collect();
+            Some(Upstream { name: funesc(name), policy: Policy::from_key(policy), servers, max_fails: mf.parse().ok(), fail_timeout: ft.parse().ok() })
+        })
+        .collect()
+}
+
 fn header_line(s: &SiteSpec) -> String {
     let b = |v: bool| if v { "1" } else { "0" };
-    let mut h = format!("# otter:site v2 name={}", esc(&s.name));
+    let mut h = format!("# otter:site v3 name={}", esc(&s.name));
     match &s.kind {
-        SiteKind::Proxy { target, ws, host } => h += &format!(" type=proxy target={} ws={} host={}", esc(target), b(*ws), b(*host)),
+        SiteKind::Proxy { locations, upstreams } => h += &format!(" type=proxy locs={} ups={}", esc(&encode_locs(locations)), esc(&encode_ups(upstreams))),
         SiteKind::Static { spa, index } => h += &format!(" type=static spa={} index={}", b(*spa), b(*index)),
         SiteKind::Redirect { to, code } => h += &format!(" type=redirect to={} code={code}", esc(to)),
     }
@@ -334,24 +568,68 @@ fn acme_loc(t: &Target) -> String {
     }
 }
 
+/// 后端组在配置里的名字:带站点名前缀,避免不同站点的组重名
+fn upstream_name(site: &str, group: &str) -> String {
+    format!("{site}_{group}")
+}
+
+fn proxy_location(s: &SiteSpec, l: &Location, tg: &Target) -> String {
+    let (target, https) = match &l.backend {
+        Backend::Url(u) => (u.clone(), u.starts_with("https://")),
+        Backend::Group { https, name } => (format!("{}://{}", if *https { "https" } else { "http" }, upstream_name(&s.name, name)), *https),
+    };
+    // 去掉前缀:proxy_pass 带 URI(`/`),nginx 会把匹配到的前缀换成它
+    let pass = if l.strip { format!("{}/", target.trim_end_matches('/')) } else { target };
+    let mut t = format!("    location {}{} {{\n", if l.exact { "= " } else { "" }, l.path);
+    t += &format!("        proxy_pass {pass};\n        proxy_http_version 1.1;\n");
+    t += &format!("        proxy_set_header Host {};\n", if l.host { "$host" } else { "$proxy_host" });
+    t += "        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n";
+    if l.ws {
+        // 自己装的 nginx.conf 里有 map $connection_upgrade;接管的不一定有,直接写死
+        t += &format!("        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection {};\n", if tg.adopted { "\"upgrade\"" } else { "$connection_upgrade" });
+    }
+    if https {
+        t += "        proxy_ssl_server_name on;\n";
+    }
+    t += &format!("        proxy_read_timeout {}s;\n    }}\n", l.timeout.or(s.adv.read_timeout).unwrap_or(300));
+    t
+}
+
+fn upstream_blocks(s: &SiteSpec) -> String {
+    let SiteKind::Proxy { upstreams, locations } = &s.kind else { return String::new() };
+    let mut out = String::new();
+    for u in upstreams.iter().filter(|u| locations.iter().any(|l| matches!(&l.backend, Backend::Group { name, .. } if name == &u.name))) {
+        out += &format!("upstream {} {{\n", upstream_name(&s.name, &u.name));
+        match u.policy {
+            Policy::RoundRobin => {}
+            Policy::LeastConn => out += "    least_conn;\n",
+            Policy::IpHash => out += "    ip_hash;\n",
+        }
+        for sv in &u.servers {
+            let mut line = format!("    server {}", sv.addr);
+            if sv.weight != 1 {
+                line += &format!(" weight={}", sv.weight);
+            }
+            if let Some(m) = u.max_fails {
+                line += &format!(" max_fails={m}");
+            }
+            if let Some(f) = u.fail_timeout {
+                line += &format!(" fail_timeout={f}s");
+            }
+            if sv.backup {
+                line += " backup";
+            }
+            out += &line;
+            out += ";\n";
+        }
+        out += "}\n\n";
+    }
+    out
+}
+
 fn locations(s: &SiteSpec, t: &Target) -> String {
     match &s.kind {
-        SiteKind::Proxy { target, ws, host } => {
-            let tg = t;
-            let mut t = String::from("    location / {\n");
-            t += &format!("        proxy_pass {target};\n        proxy_http_version 1.1;\n");
-            t += &format!("        proxy_set_header Host {};\n", if *host { "$host" } else { "$proxy_host" });
-            t += "        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n";
-            if *ws {
-                // 自己装的 nginx.conf 里有 map $connection_upgrade;接管的不一定有,直接写死
-                t += &format!("        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection {};\n", if tg.adopted { "\"upgrade\"" } else { "$connection_upgrade" });
-            }
-            if target.starts_with("https://") {
-                t += "        proxy_ssl_server_name on;\n";
-            }
-            t += &format!("        proxy_read_timeout {}s;\n    }}\n", s.adv.read_timeout.unwrap_or(300));
-            t
-        }
+        SiteKind::Proxy { locations, .. } => locations.iter().map(|l| proxy_location(s, l, t)).collect::<String>(),
         SiteKind::Static { spa, index } => {
             let fallback = if *spa { "/index.html" } else { "=404" };
             format!("    root {}/{};\n    index index.html index.htm;\n    location / {{\n        try_files $uri $uri/ {fallback};\n{}    }}\n", t.sites_mount(), s.name, if *index { "        autoindex on;\n" } else { "" })
@@ -399,7 +677,7 @@ fn body(s: &SiteSpec, tg: &Target) -> String {
         t += "}\n";
         out.push(t);
     }
-    out.join("\n")
+    upstream_blocks(s) + &out.join("\n")
 }
 
 /// 生成站点配置文件全文
@@ -417,7 +695,7 @@ pub fn parse_site(text: &str) -> Option<(SiteSpec, bool)> {
     let mut v2 = false;
     for l in lines.by_ref() {
         consumed += l.len() + 1;
-        if let Some(h) = l.strip_prefix("# otter:site v1 ").or_else(|| l.strip_prefix("# otter:site v2 ").inspect(|_| v2 = true)) {
+        if let Some(h) = l.strip_prefix("# otter:site v1 ").or_else(|| l.strip_prefix("# otter:site v2 ").or_else(|| l.strip_prefix("# otter:site v3 ")).inspect(|_| v2 = true)) {
             head = Some(h.to_string());
         } else if let Some(h) = l.strip_prefix("# otter:hash ") {
             hash = Some(h.trim().to_string());
@@ -429,7 +707,8 @@ pub fn parse_site(text: &str) -> Option<(SiteSpec, bool)> {
     let g = |k: &str| kv.get(k).cloned().unwrap_or_default();
     let flag = |k: &str| kv.get(k).is_some_and(|v| v == "1");
     let kind = match g("type").as_str() {
-        "proxy" => SiteKind::Proxy { target: g("target"), ws: flag("ws"), host: flag("host") },
+        "proxy" if kv.contains_key("locs") => SiteKind::Proxy { locations: decode_locs(&g("locs")), upstreams: decode_ups(&g("ups")) },
+        "proxy" => SiteKind::Proxy { locations: vec![Location { ws: flag("ws"), host: flag("host"), ..Location::new("/", Backend::Url(g("target"))) }], upstreams: Vec::new() },
         "static" => SiteKind::Static { spa: flag("spa"), index: flag("index") },
         "redirect" => SiteKind::Redirect { to: g("to"), code: g("code").parse().unwrap_or(301) },
         _ => return None,
@@ -1981,7 +2260,79 @@ mod tests {
 
     fn proxy(name: &str) -> SiteSpec {
         let d = vec!["a.example.com".to_string(), "www.a.example.com".to_string()];
-        SiteSpec { name: name.into(), kind: SiteKind::Proxy { target: "http://127.0.0.1:8080".into(), ws: true, host: true }, listeners: vec![ls(&d, 80, None, true), ls(&d, 443, Some("a.example.com"), false)], ipv6: false, hsts: true, adv: Advanced::default() }
+        SiteSpec { name: name.into(), kind: SiteKind::proxy("http://127.0.0.1:8080", true, true), listeners: vec![ls(&d, 80, None, true), ls(&d, 443, Some("a.example.com"), false)], ipv6: false, hsts: true, adv: Advanced::default() }
+    }
+
+    fn multi_loc_spec() -> SiteSpec {
+        let d = vec!["a.example.com".to_string()];
+        let mut api = Location::new("/api/", Backend::Group { https: false, name: "api".into() });
+        api.strip = true;
+        api.timeout = Some(60);
+        let mut ws = Location::new("/ws", Backend::Url("https://10.0.0.5:9000".into()));
+        ws.exact = true;
+        let ups = vec![Upstream { name: "api".into(), policy: Policy::LeastConn, servers: vec![UServer { addr: "10.0.0.1:8080".into(), weight: 3, backup: false }, UServer { addr: "10.0.0.2:8080".into(), weight: 1, backup: true }], max_fails: Some(3), fail_timeout: Some(20) }];
+        SiteSpec { name: "multi-loc".into(), kind: SiteKind::Proxy { locations: vec![Location::new("/", Backend::Url("http://127.0.0.1:3000".into())), api, ws], upstreams: ups }, listeners: vec![ls(&d, 80, None, false)], ipv6: false, hsts: false, adv: Advanced::default() }
+    }
+
+    #[test]
+    fn multi_location_and_upstream_render() {
+        let spec = multi_loc_spec();
+        spec.check().unwrap();
+        let text = render_site(&spec, &Target::own());
+        if let Ok(p) = std::env::var("OTTER_DUMP_SITE") {
+            std::fs::write(p, &text).unwrap();
+        }
+        assert!(text.contains("upstream multi-loc_api {\n    least_conn;\n    server 10.0.0.1:8080 weight=3 max_fails=3 fail_timeout=20s;\n    server 10.0.0.2:8080 max_fails=3 fail_timeout=20s backup;\n}"));
+        assert!(text.contains("location / {\n        proxy_pass http://127.0.0.1:3000;"));
+        assert!(text.contains("location /api/ {\n        proxy_pass http://multi-loc_api/;"));
+        assert!(text.contains("proxy_read_timeout 60s;"));
+        assert!(text.contains("location = /ws {\n        proxy_pass https://10.0.0.5:9000;"));
+        assert!(text.contains("proxy_ssl_server_name on;"));
+        // 往返
+        let (back, modified) = parse_site(&text).unwrap();
+        assert!(!modified);
+        assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn unused_upstream_not_rendered_and_checks() {
+        let mut spec = multi_loc_spec();
+        if let SiteKind::Proxy { locations, upstreams } = &mut spec.kind {
+            locations.remove(1);
+            assert!(!render_site(&spec_with(locations.clone(), upstreams.clone()), &Target::own()).contains("upstream "));
+        }
+        let bad = |f: &dyn Fn(&mut Vec<Location>, &mut Vec<Upstream>)| {
+            let mut s = multi_loc_spec();
+            if let SiteKind::Proxy { locations, upstreams } = &mut s.kind {
+                f(locations, upstreams);
+            }
+            s.check().unwrap_err()
+        };
+        assert!(bad(&|l, _| l.push(Location::new("/api/", Backend::Url("http://x.y".into())))).contains("重复"));
+        assert!(bad(&|l, _| l[0].path = "api".into()).contains("路径"));
+        assert!(bad(&|l, _| l[0].path = "/a b".into()).contains("路径"));
+        assert!(bad(&|l, _| l[0].strip = true).contains("去掉前缀"));
+        assert!(bad(&|l, _| l[1].backend = Backend::Group { https: false, name: "nope".into() }).contains("不存在"));
+        assert!(bad(&|_, u| u[0].servers.clear()).contains("至少"));
+        assert!(bad(&|_, u| u[0].servers[0].addr = "x;y:80".into()).contains("成员地址"));
+        assert!(bad(&|_, u| u[0].servers[0].weight = 0).contains("权重"));
+        assert!(bad(&|l, u| {
+            u[0].name = "A b".into();
+            l[1].backend = Backend::Group { https: false, name: "A b".into() };
+        })
+        .contains("组名"));
+        assert!(bad(&|l, _| l.clear()).contains("至少"));
+    }
+
+    fn spec_with(locations: Vec<Location>, upstreams: Vec<Upstream>) -> SiteSpec {
+        SiteSpec { kind: SiteKind::Proxy { locations, upstreams }, ..multi_loc_spec() }
+    }
+
+    #[test]
+    fn v2_header_still_reads_as_single_location() {
+        let v2 = "# managed by otter (layout 1)\n# otter:site v2 name=a type=proxy target=http://127.0.0.1:8080 ws=0 host=1 ipv6=0 hsts=0 ls=a.com@80@-@0\n# otter:hash 0\nserver {}\n";
+        let (s, _) = parse_site(v2).unwrap();
+        assert_eq!(s.kind, SiteKind::proxy("http://127.0.0.1:8080", false, true));
     }
 
     fn ls(d: &[String], port: u16, cert: Option<&str>, force: bool) -> Listener {
@@ -2035,7 +2386,7 @@ mod tests {
         let b = vec!["b.com".to_string(), "www.b.com".to_string()];
         let spec = SiteSpec {
             name: "multi".into(),
-            kind: SiteKind::Proxy { target: "https://127.0.0.1:9000".into(), ws: false, host: true },
+            kind: SiteKind::proxy("https://127.0.0.1:9000", false, true),
             listeners: vec![ls(&a, 80, None, true), ls(&a, 443, Some("a.com"), false), ls(&b, 8080, None, false), ls(&b, 8443, Some("b.com"), false)],
             ipv6: true,
             hsts: true,
@@ -2063,7 +2414,7 @@ mod tests {
         let Ok(path) = std::env::var("OTTER_DUMP_SITE") else { return };
         let a = vec!["a.com".to_string()];
         let b = vec!["b.com".to_string(), "www.b.com".to_string()];
-        let spec = SiteSpec { name: "multi".into(), kind: SiteKind::Proxy { target: "https://127.0.0.1:9000".into(), ws: true, host: true }, listeners: vec![ls(&a, 80, None, true), ls(&a, 443, Some("a.com"), false), ls(&b, 8080, None, false), ls(&b, 8443, Some("b.com"), false)], ipv6: true, hsts: true, adv: Advanced::default() };
+        let spec = SiteSpec { name: "multi".into(), kind: SiteKind::proxy("https://127.0.0.1:9000", true, true), listeners: vec![ls(&a, 80, None, true), ls(&a, 443, Some("a.com"), false), ls(&b, 8080, None, false), ls(&b, 8443, Some("b.com"), false)], ipv6: true, hsts: true, adv: Advanced::default() };
         std::fs::write(path, render_site(&spec, &Target::own())).unwrap();
     }
 
@@ -2125,7 +2476,7 @@ mod tests {
         assert!(!valid_url("ftp://x") && !valid_url("http://x;y") && !valid_url("http://x y") && !valid_url("http://x/$a") && !valid_url("http://x/\"") && !valid_url("http://x}"));
         assert_eq!(split_domains("A.com, b.com\nA.com  c.org"), vec!["a.com", "b.com", "c.org"]);
         let mut bad = proxy("n");
-        bad.kind = SiteKind::Proxy { target: "http://x;evil".into(), ws: false, host: true };
+        bad.kind = SiteKind::proxy("http://x;evil", false, true);
         assert!(bad.check().is_err());
         bad.name = "../x".into();
         assert!(bad.check().is_err());
@@ -2507,7 +2858,7 @@ mod tests {
         let w = |n: &str, s: String| std::fs::write(format!("{d}/{n}.sh"), s).unwrap();
         let t = Target { container: "fp-fake".into(), bin: "nginx".into(), conf: "/opt/fake/conf.d".into(), certs: Some(("/opt/fake/certs".into(), "/etc/openresty/certs".into())), acme: Some(("/opt/fake/acme".into(), "/var/www/acme".into())), sites: Some(("/opt/fake/www".into(), "/var/www/sites".into())), adopted: true, ports: (80, 443) };
         w("a1-adopt", adopt_script(&t).unwrap());
-        let proxy = simple("a.test".into(), "a.test", SiteKind::Proxy { target: "http://127.0.0.1:9".into(), ws: true, host: true }, None);
+        let proxy = simple("a.test".into(), "a.test", SiteKind::proxy("http://127.0.0.1:9", true, true), None);
         w("a2-site", site_save_script(&proxy, true, &t).unwrap());
         w("a3-static", site_save_script(&simple("s.test".into(), "s.test", SiteKind::Static { spa: false, index: true }, None), true, &t).unwrap());
         w("a4-bad", site_raw_script("bad.conf", "server { this_is_invalid on; }\n").unwrap());
@@ -2529,7 +2880,7 @@ mod tests {
         let d = std::env::var("OTTER_DUMP").unwrap();
         let w = |n: &str, s: String| std::fs::write(format!("{d}/{n}.sh"), s).unwrap();
         w("01-install", install_job_script(&InstallSpec { project: "gw".into(), container: "web-gw".into(), http: 18080, https: 18443, cpus: "1".into(), memory: "256m".into(), ..Default::default() }));
-        let spec = |name: &str, dom: &str, target: &str| simple(name.into(), dom, SiteKind::Proxy { target: target.into(), ws: true, host: true }, None);
+        let spec = |name: &str, dom: &str, target: &str| simple(name.into(), dom, SiteKind::proxy(target, true, true), None);
         w("02-site-proxy", site_save_script(&spec("a.test", "a.test", "http://127.0.0.1:9"), true, &Target::own()).unwrap());
         w("03-site-static", site_save_script(&simple("s.test".into(), "s.test", SiteKind::Static { spa: false, index: true }, None), true, &Target::own()).unwrap());
         w("04-site-bad", site_raw_script("bad.conf", "server { listen 80; this_is_invalid on; }\n").unwrap());
