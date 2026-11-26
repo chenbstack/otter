@@ -1557,6 +1557,9 @@ impl Home {
                 );
             })));
             let mut r = row(("ws-row", i))
+                .h_auto()
+                .min_h(px(44.0))
+                .py(px(6.0))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| this.web_open_drawer(&entry_row, window, cx)))
                 .child(

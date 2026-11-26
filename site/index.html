@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Otter — 一个 SSH 连接,管好所有服务器</title>
+<meta name="description" content="Otter 是 macOS / Windows 原生客户端,经 SSH 管理多台服务器的终端、文件、Docker、数据库和网站。服务器上不装任何东西。">
+<link rel="icon" href="img/favicon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="bg"><i></i><i></i><i></i></div><div id="spot"></div>
+<div id="world"><div class="gs" id="gs"><img class="flatimg" src="img/stacks.webp" alt=""><img class="flatimg" src="img/store.webp" alt=""><img class="flatimg" src="img/storage.webp" alt=""><img class="flatimg" src="img/files.webp?v=4" alt=""><img class="flatimg" src="img/term.webp" alt=""><img class="flatimg" src="img/ovw.webp" alt=""><img class="flatimg wd" src="img/dbs.webp" alt=""><img class="flatimg wd" src="img/web.webp" alt=""><div class="tilt" id="tilt3">
+<div class="sc3 on"><img class="l3 bs" src="img/stacks-base.webp" alt="" style="--z:0;--d:0ms">
+<img class="l3" src="img/stacks-top.webp" alt="" style="left:0.000%;top:0.000%;width:100.000%;height:5.424%;--z:40;--d:45ms">
+<img class="l3" src="img/stacks-lab.webp" alt="" style="left:1.000%;top:7.006%;width:13.286%;height:2.712%;--z:120;--d:90ms">
+<img class="l3" src="img/stacks-m0.webp" alt="" style="left:0.857%;top:10.734%;width:13.000%;height:3.616%;--z:90;--d:135ms">
+<img class="l3" src="img/stacks-m1.webp" alt="" style="left:0.857%;top:14.689%;width:13.000%;height:4.068%;--z:150;--d:180ms">
+<img class="l3" src="img/stacks-m2.webp" alt="" style="left:0.857%;top:18.870%;width:13.000%;height:4.068%;--z:240;--d:225ms">
+<img class="l3" src="img/stacks-m3.webp" alt="" style="left:0.857%;top:23.051%;width:13.000%;height:4.068%;--z:60;--d:270ms">
+<img class="l3" src="img/stacks-m4.webp" alt="" style="left:0.857%;top:27.232%;width:13.000%;height:4.068%;--z:60;--d:315ms">
+<img class="l3" src="img/stacks-m5.webp" alt="" style="left:0.857%;top:31.412%;width:13.000%;height:4.068%;--z:300;--d:360ms">
+<img class="l3" src="img/stacks-m6.webp" alt="" style="left:0.857%;top:35.593%;width:13.000%;height:4.068%;--z:190;--d:405ms">
+<img class="l3" src="img/stacks-m7.webp" alt="" style="left:0.857%;top:39.774%;width:13.000%;height:4.068%;--z:60;--d:450ms">
+<img class="l3" src="img/stacks-m8.webp" alt="" style="left:0.857%;top:43.955%;width:13.000%;height:4.068%;--z:120;--d:495ms">
+<img class="l3" src="img/stacks-ttl.webp" alt="" style="left:16.143%;top:7.910%;width:17.429%;height:6.102%;--z:190;--d:540ms">
+<img class="l3" src="img/stacks-btn.webp" alt="" style="left:91.714%;top:8.588%;width:7.000%;height:4.068%;--z:60;--d:585ms">
+<img class="l3" src="img/stacks-tab.webp" alt="" style="left:16.286%;top:15.141%;width:38.000%;height:4.294%;--z:190;--d:630ms">
+<img class="l3" src="img/stacks-p0.webp" alt="" style="left:16.286%;top:19.887%;width:82.143%;height:6.328%;--z:90;--d:675ms">
+<img class="l3" src="img/stacks-c0.webp" alt="" style="left:17.286%;top:27.119%;width:26.071%;height:20.791%;--z:60;--d:720ms">
+<img class="l3" src="img/stacks-c1.webp" alt="" style="left:44.286%;top:27.119%;width:26.071%;height:20.791%;--z:60;--d:765ms">
+<img class="l3" src="img/stacks-c2.webp" alt="" style="left:71.286%;top:27.119%;width:26.071%;height:20.791%;--z:150;--d:810ms">
+<img class="l3" src="img/stacks-c3.webp" alt="" style="left:17.286%;top:49.379%;width:27.429%;height:20.904%;--z:150;--d:855ms">
+<img class="l3" src="img/stacks-p1.webp" alt="" style="left:16.286%;top:73.672%;width:82.143%;height:5.424%;--z:60;--d:900ms">
+<img class="l3" src="img/stacks-d0.webp" alt="" style="left:17.286%;top:80.565%;width:26.071%;height:19.435%;--z:90;--d:945ms">
+<img class="l3" src="img/stacks-d1.webp" alt="" style="left:44.286%;top:80.565%;width:26.071%;height:19.435%;--z:60;--d:990ms">
+<img class="l3" src="img/stacks-d2.webp" alt="" style="left:71.286%;top:80.565%;width:26.071%;height:19.435%;--z:190;--d:1035ms">
+</div>
+<div class="sc3"><img class="l3 bs" src="img/store-base.webp" alt="" style="--z:0;--d:0ms">
+<img class="l3" src="img/store-top.webp" alt="" style="left:0.000%;top:0.000%;width:100.000%;height:5.424%;--z:40;--d:45ms">
+<img class="l3" src="img/store-lab.webp" alt="" style="left:1.000%;top:7.006%;width:13.286%;height:2.712%;--z:150;--d:90ms">
+<img class="l3" src="img/store-m0.webp" alt="" style="left:0.857%;top:10.734%;width:13.000%;height:3.616%;--z:60;--d:135ms">
+<img class="l3" src="img/store-m1.webp" alt="" style="left:0.857%;top:14.689%;width:13.000%;height:4.068%;--z:300;--d:180ms">
+<img class="l3" src="img/store-m2.webp" alt="" style="left:0.857%;top:18.870%;width:13.000%;height:4.068%;--z:190;--d:225ms">
+<img class="l3" src="img/store-m3.webp" alt="" style="left:0.857%;top:23.051%;width:13.000%;height:4.068%;--z:60;--d:270ms">
+<img class="l3" src="img/store-m4.webp" alt="" style="left:0.857%;top:27.232%;width:13.000%;height:4.068%;--z:90;--d:315ms">
+<img class="l3" src="img/store-m5.webp" alt="" style="left:0.857%;top:31.412%;width:13.000%;height:4.068%;--z:240;--d:360ms">
+<img class="l3" src="img/store-m6.webp" alt="" style="left:0.857%;top:35.593%;width:13.000%;height:4.068%;--z:240;--d:405ms">
+<img class="l3" src="img/store-m7.webp" alt="" style="left:0.857%;top:39.774%;width:13.000%;height:4.068%;--z:190;--d:450ms">
+<img class="l3" src="img/store-m8.webp" alt="" style="left:0.857%;top:43.955%;width:13.000%;height:4.068%;--z:60;--d:495ms">
+<img class="l3" src="img/store-ttl.webp" alt="" style="left:16.143%;top:7.910%;width:23.857%;height:6.102%;--z:190;--d:540ms">
+<img class="l3" src="img/store-sea.webp" alt="" style="left:16.143%;top:15.367%;width:82.429%;height:4.068%;--z:190;--d:585ms">
+<img class="l3" src="img/store-tab.webp" alt="" style="left:16.143%;top:20.904%;width:21.000%;height:3.729%;--z:150;--d:630ms">
+<img class="l3" src="img/store-a0.webp" alt="" style="left:16.286%;top:26.215%;width:26.714%;height:17.175%;--z:60;--d:675ms">
+<img class="l3" src="img/store-a1.webp" alt="" style="left:44.000%;top:26.215%;width:26.714%;height:17.175%;--z:90;--d:720ms">
+<img class="l3" src="img/store-a2.webp" alt="" style="left:71.714%;top:26.215%;width:26.714%;height:17.175%;--z:60;--d:765ms">
+<img class="l3" src="img/store-a3.webp" alt="" style="left:16.286%;top:44.972%;width:26.714%;height:17.175%;--z:190;--d:810ms">
+<img class="l3" src="img/store-a4.webp" alt="" style="left:44.000%;top:44.972%;width:26.714%;height:17.175%;--z:300;--d:855ms">
+<img class="l3" src="img/store-a5.webp" alt="" style="left:71.714%;top:44.972%;width:26.714%;height:17.175%;--z:90;--d:900ms">
+<img class="l3" src="img/store-a6.webp" alt="" style="left:16.286%;top:63.729%;width:26.714%;height:17.062%;--z:120;--d:945ms">
+<img class="l3" src="img/store-a7.webp" alt="" style="left:44.000%;top:63.729%;width:26.714%;height:17.062%;--z:150;--d:990ms">
+</div>
+<div class="sc3"><img class="l3 bs" src="img/storage-base.webp" alt="" style="--z:0;--d:0ms">
+<img class="l3" src="img/storage-top.webp" alt="" style="left:0.000%;top:0.000%;width:100.000%;height:5.424%;--z:40;--d:45ms">
+<img class="l3" src="img/storage-lab.webp" alt="" style="left:1.000%;top:7.006%;width:13.286%;height:2.712%;--z:90;--d:90ms">
+<img class="l3" src="img/storage-m0.webp" alt="" style="left:0.857%;top:10.734%;width:13.000%;height:3.616%;--z:190;--d:135ms">
+<img class="l3" src="img/storage-m1.webp" alt="" style="left:0.857%;top:14.689%;width:13.000%;height:4.068%;--z:60;--d:180ms">
+<img class="l3" src="img/storage-m2.webp" alt="" style="left:0.857%;top:18.870%;width:13.000%;height:4.068%;--z:190;--d:225ms">
+<img class="l3" src="img/storage-m3.webp" alt="" style="left:0.857%;top:23.051%;width:13.000%;height:4.068%;--z:120;--d:270ms">
+<img class="l3" src="img/storage-m4.webp" alt="" style="left:0.857%;top:27.232%;width:13.000%;height:4.068%;--z:190;--d:315ms">
+<img class="l3" src="img/storage-m5.webp" alt="" style="left:0.857%;top:31.412%;width:13.000%;height:4.068%;--z:300;--d:360ms">
+<img class="l3" src="img/storage-m6.webp" alt="" style="left:0.857%;top:35.593%;width:13.000%;height:4.068%;--z:240;--d:405ms">
+<img class="l3" src="img/storage-m7.webp" alt="" style="left:0.857%;top:39.774%;width:13.000%;height:4.068%;--z:90;--d:450ms">
+<img class="l3" src="img/storage-m8.webp" alt="" style="left:0.857%;top:43.955%;width:13.000%;height:4.068%;--z:60;--d:495ms">
+<img class="l3" src="img/storage-ttl.webp" alt="" style="left:16.143%;top:7.910%;width:24.571%;height:6.102%;--z:190;--d:540ms">
+<img class="l3" src="img/storage-tbl.webp" alt="" style="left:16.286%;top:15.593%;width:82.143%;height:19.209%;--z:190;--d:585ms">
+<img class="l3" src="img/storage-lh.webp" alt="" style="left:16.286%;top:36.610%;width:82.143%;height:4.068%;--z:240;--d:630ms">
+<img class="l3" src="img/storage-t0.webp" alt="" style="left:16.857%;top:41.130%;width:40.000%;height:56.723%;--z:90;--d:675ms">
+<img class="l3" src="img/storage-t1.webp" alt="" style="left:57.143%;top:41.130%;width:25.143%;height:33.220%;--z:120;--d:720ms">
+<img class="l3" src="img/storage-t2.webp" alt="" style="left:57.143%;top:74.802%;width:25.143%;height:23.051%;--z:60;--d:765ms">
+<img class="l3" src="img/storage-t3.webp" alt="" style="left:82.571%;top:41.130%;width:15.714%;height:23.729%;--z:190;--d:810ms">
+<img class="l3" src="img/storage-t4.webp" alt="" style="left:82.571%;top:65.311%;width:7.857%;height:23.503%;--z:240;--d:855ms">
+<img class="l3" src="img/storage-t5.webp" alt="" style="left:90.571%;top:65.311%;width:7.714%;height:23.503%;--z:60;--d:900ms">
+<img class="l3" src="img/storage-t6.webp" alt="" style="left:82.571%;top:89.266%;width:13.143%;height:8.588%;--z:190;--d:945ms">
+</div>
+<div class="sc3"><img class="l3 bs" src="img/files-base.webp?v=4" alt="" style="--z:0;--d:0ms">
+<img class="l3" src="img/files-top.webp?v=4" alt="" style="left:0.000%;top:0.000%;width:100.000%;height:5.424%;--z:40;--d:45ms">
+<img class="l3" src="img/files-hdr.webp?v=4" alt="" style="left:0.000%;top:5.650%;width:100.000%;height:5.650%;--z:60;--d:90ms">
+<img class="l3" src="img/files-ln.webp?v=4" alt="" style="left:0.429%;top:11.977%;width:49.286%;height:4.294%;--z:190;--d:135ms">
+<img class="l3" src="img/files-rn.webp?v=4" alt="" style="left:50.429%;top:11.977%;width:49.286%;height:4.294%;--z:90;--d:180ms">
+<img class="l3" src="img/files-lr.webp?v=4" alt="" style="left:0.429%;top:16.949%;width:49.286%;height:39.548%;--z:150;--d:225ms">
+<img class="l3" src="img/files-rr.webp?v=4" alt="" style="left:50.429%;top:16.949%;width:49.286%;height:39.548%;--z:240;--d:270ms">
+<img class="l3" src="img/files-sb.webp?v=4" alt="" style="left:0.000%;top:96.723%;width:100.000%;height:3.277%;--z:190;--d:315ms">
+</div>
+</div><div class="sc3"><img class="l3 bs" src="img/term-base.webp" alt="" style="--z:0;--d:0ms">
+<img class="l3" src="img/term-top.webp" alt="" style="left:0.000%;top:0.000%;width:100.000%;height:5.424%;--z:40;--d:45ms">
+<img class="l3" src="img/term-b0.webp" alt="" style="left:0.286%;top:6.328%;width:49.714%;height:3.390%;--z:150;--d:90ms">
+<img class="l3" src="img/term-b1.webp" alt="" style="left:0.286%;top:9.944%;width:49.714%;height:12.203%;--z:300;--d:135ms">
+<img class="l3" src="img/term-b2.webp" alt="" style="left:0.286%;top:22.260%;width:49.714%;height:5.085%;--z:190;--d:180ms">
+<img class="l3" src="img/term-b3.webp" alt="" style="left:0.286%;top:27.458%;width:49.714%;height:7.006%;--z:300;--d:225ms">
+<img class="l3" src="img/term-b4.webp" alt="" style="left:0.286%;top:34.576%;width:49.714%;height:6.893%;--z:300;--d:270ms">
+<img class="l3" src="img/term-b5.webp" alt="" style="left:0.286%;top:41.582%;width:49.714%;height:8.701%;--z:150;--d:315ms">
+<img class="l3" src="img/term-b6.webp" alt="" style="left:0.286%;top:50.395%;width:49.714%;height:10.395%;--z:150;--d:360ms">
+<img class="l3" src="img/term-b7.webp" alt="" style="left:0.286%;top:60.904%;width:49.714%;height:5.989%;--z:190;--d:405ms">
+</div>
+<div class="sc3"><img class="l3 bs" src="img/ovw-base.webp" alt="" style="--z:0;--d:0ms">
+<img class="l3" src="img/ovw-top.webp" alt="" style="left:0.000%;top:0.000%;width:100.000%;height:5.424%;--z:40;--d:45ms">
+<img class="l3" src="img/ovw-lab.webp" alt="" style="left:1.000%;top:7.006%;width:13.286%;height:2.712%;--z:300;--d:90ms">
+<img class="l3" src="img/ovw-m0.webp" alt="" style="left:0.857%;top:10.734%;width:13.000%;height:3.616%;--z:190;--d:135ms">
+<img class="l3" src="img/ovw-m1.webp" alt="" style="left:0.857%;top:14.689%;width:13.000%;height:4.068%;--z:90;--d:180ms">
+<img class="l3" src="img/ovw-m2.webp" alt="" style="left:0.857%;top:18.870%;width:13.000%;height:4.068%;--z:90;--d:225ms">
+<img class="l3" src="img/ovw-m3.webp" alt="" style="left:0.857%;top:23.051%;width:13.000%;height:4.068%;--z:300;--d:270ms">
+<img class="l3" src="img/ovw-m4.webp" alt="" style="left:0.857%;top:27.232%;width:13.000%;height:4.068%;--z:190;--d:315ms">
+<img class="l3" src="img/ovw-m5.webp" alt="" style="left:0.857%;top:31.412%;width:13.000%;height:4.068%;--z:150;--d:360ms">
+<img class="l3" src="img/ovw-m6.webp" alt="" style="left:0.857%;top:35.593%;width:13.000%;height:4.068%;--z:240;--d:405ms">
+<img class="l3" src="img/ovw-m7.webp" alt="" style="left:0.857%;top:39.774%;width:13.000%;height:4.068%;--z:190;--d:450ms">
+<img class="l3" src="img/ovw-m8.webp" alt="" style="left:0.857%;top:43.955%;width:13.000%;height:4.068%;--z:300;--d:495ms">
+<img class="l3" src="img/ovw-ttl.webp" alt="" style="left:16.143%;top:7.910%;width:13.857%;height:6.102%;--z:90;--d:540ms">
+<img class="l3" src="img/ovw-bdg.webp" alt="" style="left:16.143%;top:15.367%;width:33.857%;height:2.938%;--z:60;--d:585ms">
+<img class="l3" src="img/ovw-cpu.webp" alt="" style="left:16.143%;top:19.887%;width:82.429%;height:35.480%;--z:150;--d:630ms">
+<img class="l3" src="img/ovw-mem.webp" alt="" style="left:16.143%;top:57.062%;width:25.071%;height:25.763%;--z:120;--d:675ms">
+<img class="l3" src="img/ovw-net.webp" alt="" style="left:16.143%;top:83.277%;width:25.071%;height:14.124%;--z:90;--d:720ms">
+<img class="l3" src="img/ovw-prc.webp" alt="" style="left:41.857%;top:57.062%;width:56.714%;height:40.339%;--z:60;--d:765ms">
+</div>
+<div class="sc3 wide">
+<img class="l3" src="img/dbs-0.webp" alt="" style="left:0.000%;top:14.000%;width:50.000%;height:62.613%;--z:40;--d:0ms;z-index:1">
+<img class="l3" src="img/dbs-1.webp" alt="" style="left:25.000%;top:0.000%;width:50.000%;height:62.613%;--z:40;--d:80ms;z-index:1">
+<img class="l3" src="img/dbs-2.webp" alt="" style="left:50.000%;top:14.000%;width:50.000%;height:62.613%;--z:110;--d:160ms;z-index:2">
+</div>
+<div class="sc3 wide">
+<img class="l3" src="img/web-0.webp" alt="" style="left:0.000%;top:14.000%;width:50.000%;height:62.613%;--z:40;--d:0ms;z-index:1">
+<img class="l3" src="img/web-1.webp" alt="" style="left:25.000%;top:0.000%;width:50.000%;height:62.613%;--z:40;--d:80ms;z-index:1">
+<img class="l3" src="img/web-2.webp" alt="" style="left:50.000%;top:14.000%;width:50.000%;height:62.613%;--z:110;--d:160ms;z-index:2">
+</div>
+</div></div>
+<div id="dots"></div>
+<nav>
+  <a class="logo" href="#top"><img src="img/favicon.png" alt="">Otter</a>
+  <a class="l" href="#features" data-en="Features">功能</a>
+  <a class="l" href="#zero" data-en="Agentless">零安装</a>
+  <a class="l" href="#download" data-en="Download">下载</a>
+  <a class="l" href="#faq">FAQ</a>
+  <a class="l" href="https://github.com/chenbstack/otter" target="_blank">GitHub</a>
+  <button class="lang" id="lang">EN</button>
+  <a class="btn p" href="#download" data-en="Download">下载</a>
+</nav>
+
+<section class="hero" id="top">
+  <img class="ic" src="img/logo.png" alt="Otter">
+  <h1 id="h1" data-en='<span class="w" style="animation-delay:.1s">One SSH,</span> <span class="w g" style="animation-delay:.25s">every server</span><span class="w" style="animation-delay:.4s"> under control</span>'><span class="w" style="animation-delay:.1s">一个 SSH 连接,</span><br><span class="w g" style="animation-delay:.3s">管好所有服务器</span></h1>
+  <p class="sub rv" data-en="A native desktop client. Terminal, files, Docker, databases and websites in one app — and nothing to install on your servers.">原生桌面客户端。终端、文件、Docker、数据库、网站,一个应用全搞定 —— 服务器上不装任何东西。</p>
+  <div class="cta rv">
+    <a class="btn p" id="heroDl" href="#download" data-en="Download for free">免费下载</a>
+    <a class="btn" href="https://github.com/chenbstack/otter" target="_blank">★ GitHub</a>
+  </div>
+  <div class="hint rv" id="hint" data-en="macOS · Windows">macOS · Windows</div>
+  <div class="stage3d" id="st3"></div>
+  <img class="shot mob" src="img/stacks.webp" alt="Otter">
+</section>
+
+
+<section class="feat" id="features">
+  <div class="tx"><small>DOCKER</small><h3 data-en='Every stack, <span class="g">live</span>'>每个堆栈,<span class="g">实时看得见</span></h3><p data-en="CPU, memory and traffic curves for every service. Start, stop, restart, redeploy or delete in one click.">CPU、内存、流量曲线逐个服务展开。启停、重启、重新部署、删除,一键完成。</p><div class="chips"><span data-en="Compose">Compose</span><span data-en="Live logs">实时日志</span><span data-en="One-click shell">一键进终端</span></div></div>
+  <div class="slot"></div>
+  <img class="shot mi" src="img/stacks.webp" alt="" loading="lazy">
+</section>
+<section class="feat r">
+  <div class="tx"><small>应用商店</small><h3 data-en='One-click apps, <span class="g">upgrades with a diff</span>'>一键装应用,<span class="g">升级先看差异</span></h3><p data-en="Install databases, proxies and tools from a built-in catalog. Update checks show a diff before you upgrade, and rollback is one click away.">内置目录一键安装数据库、网关、工具。自动检查更新,升级前先给你看变更对比,随时回滚。</p><div class="chips"><span data-en="Daily catalog">目录每天更新</span><span data-en="Any version">任选版本</span><span data-en="Rollback">随时回滚</span></div></div>
+  <div class="slot"></div>
+  <img class="shot mi" src="img/store.webp" alt="" loading="lazy">
+</section>
+<section class="feat">
+  <div class="tx"><small>存储</small><h3 data-en='Where did the disk go? <span class="g">See at a glance</span>'>磁盘去哪了,<span class="g">一眼看清</span></h3><p data-en="Space Lens maps usage by folder, container and volume, so cleanup is a decision, not a guess.">空间透镜按目录、容器、数据卷展开占用,清理不再靠猜。</p><div class="chips"><span data-en="Space Lens">空间透镜</span><span data-en="Mounts">挂载点</span><span data-en="inode">inode</span></div></div>
+  <div class="slot"></div>
+  <img class="shot mi" src="img/storage.webp" alt="" loading="lazy">
+</section>
+<section class="feat r">
+  <div class="tx"><small>文件</small><h3 data-en='Local to remote, <span class="g">just drag</span>'>本地到远程,<span class="g">拖过去就行</span></h3><p data-en="Dual-pane file manager over SFTP. Drag to transfer, edit in place, with progress and resume.">基于 SFTP 的双栏文件管理,拖拽传输、原地编辑,带进度和续传。</p><div class="chips"><span data-en="Dual pane">双栏</span><span data-en="Drag & drop">拖拽</span><span data-en="Resume">续传</span></div></div>
+  <div class="slot"></div>
+  <img class="shot mi" src="img/files.webp?v=4" alt="" loading="lazy">
+</section>
+<section class="feat">
+  <div class="tx"><small>终端</small><h3 data-en='A native terminal, <span class="g">fast as local</span>'>原生终端,<span class="g">快得像本地</span></h3><p data-en="Multi-tab, GPU-rendered, and wired to your SSH keys and system keychain. Connect and you are in a real shell.">多标签、GPU 渲染,和你的 SSH 密钥、系统钥匙串配合。连上就是一个真正的 shell。</p><div class="chips"><span data-en="Tabs">多标签</span><span data-en="GPU rendered">GPU 渲染</span><span data-en="Keychain">钥匙串</span></div></div>
+  <div class="slot"></div>
+  <img class="shot mi" src="img/term.webp" alt="" loading="lazy">
+</section>
+<section class="feat r">
+  <div class="tx"><small>概览</small><h3 data-en='Server health, <span class="g">on one screen</span>'>服务器状态,<span class="g">一屏看完</span></h3><p data-en="Per-core CPU, memory, disk, network and top processes, live — with no probe installed on the server.">CPU 逐核、内存、磁盘、网络和进程排行实时刷新,不用在服务器上装任何探针。</p><div class="chips"><span data-en="Per-core CPU">逐核 CPU</span><span data-en="Top processes">进程排行</span><span data-en="No probe">零探针</span></div></div>
+  <div class="slot"></div>
+  <img class="shot mi" src="img/ovw.webp" alt="" loading="lazy">
+</section>
+<section class="feat wide">
+  <div class="tx"><small>数据库</small><h3 data-en='MySQL, PostgreSQL, Redis, <span class="g">ready to go</span>'>MySQL、PostgreSQL、Redis,<span class="g">开箱即用</span></h3><p data-en="Browse, create databases and users, change passwords, see connection details in one click. Secrets stay on the server.">浏览、建库、建用户、改密码,一键查看连接信息。密码存在服务器自己的目录里。</p><div class="chips"><span data-en="Databases">数据库列表</span><span data-en="Connection info">连接信息</span><span data-en="New database">新建数据库</span></div></div>
+  <div class="slot"></div>
+  <div class="hs"><div class="hs-track"><figure style="--fx:50%;--fy:50%"><div class="vp"><img src="img/h-d_list.webp?v=2" alt="" loading="lazy" draggable="false"></div><figcaption><b data-en="Databases">数据库列表</b><span data-en="PostgreSQL, MySQL and Redis containers are found automatically — databases, users, sizes and connections at a glance.">PostgreSQL、MySQL、Redis 容器自动识别,库、用户、大小、连接数一目了然。</span></figcaption></figure><figure style="--fx:50%;--fy:58%"><div class="vp"><img src="img/h-d_conn.webp?v=2" alt="" loading="lazy" draggable="false"></div><figcaption><b data-en="Connection info in one click">一键查看连接信息</b><span data-en="Host, port, user and password, one click to copy. Shown only here, never kept after closing.">主机、端口、用户名、密码一键复制;密码只在这里显示,关闭后不保留。</span></figcaption></figure><figure style="--fx:88%;--fy:40%"><div class="vp"><img src="img/h-d_new.webp?v=2" alt="" loading="lazy" draggable="false"></div><figcaption><b data-en="New databases and users">新建数据库和用户</b><span data-en="Name the database and user, auto-generate a password, optionally save it in a directory on the server itself.">填库名、用户名,密码可自动生成,并可选存到服务器自己的目录里。</span></figcaption></figure><figure style="--fx:50%;--fy:50%"><div class="vp"><img src="img/h-d_user.webp?v=2" alt="" loading="lazy" draggable="false"></div><figcaption><b data-en="Users and passwords">用户与密码</b><span data-en="See which databases each user owns and change passwords any time — no more shelling into the container.">查看每个用户拥有的库,随时改密码,不用再登录到容器里敲命令。</span></figcaption></figure></div><div class="hs-nav"><div class="hs-bars"></div><button class="hs-p" aria-label="prev"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button><button class="hs-n" aria-label="next"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg></button></div></div>
+</section>
+<section class="feat wide">
+  <div class="tx"><small>网站</small><h3 data-en='Sites, certificates, reverse proxy, <span class="g">in one place</span>'>站点、证书、反向代理,<span class="g">一处管理</span></h3><p data-en="OpenResty sites with auto-renewed Let's Encrypt certificates. Coexists with 1Panel and BT Panel: sites editable, certificates read-only.">OpenResty 站点和 Let's Encrypt 证书自动续期。和 1Panel、宝塔共存:站点可改,证书只读。</p><div class="chips"><span data-en="Sites">站点</span><span data-en="Certificates">证书</span><span data-en="Settings">设置</span></div></div>
+  <div class="slot"></div>
+  <div class="hs"><div class="hs-track"><figure style="--fx:45%;--fy:50%"><div class="vp"><img src="img/h-w_sites.webp?v=2" alt="" loading="lazy" draggable="false"></div><figcaption><b data-en="Sites and reverse proxy">站点与反向代理</b><span data-en="Static sites, reverse proxies and redirects, with HTTPS status and certificate days left in the list.">静态站、反向代理、跳转,HTTPS 状态和证书剩余天数都在列表里。</span></figcaption></figure><figure style="--fx:40%;--fy:50%"><div class="vp"><img src="img/h-w_certs.webp?v=2" alt="" loading="lazy" draggable="false"></div><figcaption><b data-en="Auto-renewed certificates">证书自动续期</b><span data-en="Let's Encrypt issuance and renewal run by themselves, handled well before expiry.">Let's Encrypt 证书签发、续期全自动,到期前自己处理好。</span></figcaption></figure><figure style="--fx:50%;--fy:40%"><div class="vp"><img src="img/h-w_set.webp?v=2" alt="" loading="lazy" draggable="false"></div><figcaption><b data-en="OpenResty settings">OpenResty 设置</b><span data-en="Data directory, DNS and certificate accounts in one place. Certificates owned by 1Panel/BT stay read-only.">数据目录、DNS 账号、证书账号集中配置,1Panel/宝塔的证书只读不碰。</span></figcaption></figure><figure style="--fx:50%;--fy:50%"><div class="vp"><img src="img/h-w_site.webp?v=2" alt="" loading="lazy" draggable="false"></div><figcaption><b data-en="Site details">站点详情</b><span data-en="Per-site domains, upstreams, certificates and config — changes apply immediately.">逐站点看域名、上游、证书和配置,改完即生效。</span></figcaption></figure></div><div class="hs-nav"><div class="hs-bars"></div><button class="hs-p" aria-label="prev"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button><button class="hs-n" aria-label="next"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg></button></div></div>
+</section>
+<section id="stats">
+  <h2 class="rv" data-en='Everything you do on a server, <span class="g">in one place</span>'>服务器上要做的事,<span class="g">一处搞定</span></h2>
+  <p class="lead rv" data-en="Rust + GPU rendering. Native, fast, and light — no Electron, no web panel.">Rust + GPU 渲染,原生、快、轻 —— 没有 Electron,也没有 Web 面板。</p>
+  <div class="stats rv">
+    <div class="stat"><b data-n="21" data-s=" MB">0</b><span data-en="App size">安装包体积</span></div>
+    <div class="stat"><b data-n="0.25" data-d="2" data-s=" s">0</b><span data-en="Cold start">冷启动</span></div>
+    <div class="stat"><b data-n="0">0</b><span data-en="Bytes installed on servers">服务器上安装的东西</span></div>
+    <div class="stat"><b data-n="1">0</b><span data-en="SSH connection is all you need">条 SSH 连接就够了</span></div>
+  </div>
+</section>
+<section>
+  <h2 class="rv" data-en='And <span class="g">much more</span>'>还有<span class="g">更多</span></h2>
+  <div class="bento">
+    <div class="card w2 rv"><div class="e">⌨️</div><h4 data-en="Terminal">终端</h4><p data-en="Multi-tab, split panes, GPU-rendered, with snippets and session restore.">多标签、分屏、GPU 渲染,支持命令片段与会话恢复。</p></div>
+    <div class="card rv"><div class="e">🗄️</div><h4 data-en="Databases">数据库</h4><p data-en="MySQL, PostgreSQL, Redis — browse, query, back up.">MySQL、PostgreSQL、Redis,浏览、查询、备份。</p></div>
+    <div class="card rv"><div class="e">🌐</div><h4 data-en="Websites">网站</h4><p data-en="Nginx sites, certificates, reverse proxies.">Nginx 站点、证书、反向代理。</p></div>
+    <div class="card rv"><div class="e">📈</div><h4 data-en="Monitoring">监控</h4><p data-en="CPU, memory, disk, network and processes at a glance.">CPU、内存、磁盘、网络与进程一览。</p></div>
+    <div class="card rv"><div class="e">🔐</div><h4 data-en="Keychain secrets">钥匙串保管</h4><p data-en="Passwords and keys live in the system keychain, never in plain files.">密码和密钥存系统钥匙串,不落明文文件。</p></div>
+    <div class="card w2 rv"><div class="e">🛠️</div><h4 data-en="Server operations">服务器运维</h4><p data-en="Services, cron, firewall, users, packages — the daily chores in a GUI.">服务、定时任务、防火墙、用户、软件包,日常运维都有界面。</p></div>
+  </div>
+</section>
+
+<section id="zero">
+  <h2 class="rv" data-en='Nothing to install <span class="g">on your servers</span>'>服务器上<span class="g">什么都不用装</span></h2>
+  <p class="lead rv" data-en="No agent, no daemon, no web panel. Otter speaks plain SSH — periodic jobs stay with cron and systemd on the server itself.">没有 agent、没有守护进程、没有 Web 面板。Otter 只说 SSH;周期任务交给服务器自己的 cron 和 systemd。</p>
+  <div class="term rv"><div class="bar"><i></i><i></i><i></i></div><pre id="term"></pre></div>
+  <div class="marq rv"><div id="mq"></div></div>
+</section>
+
+<section>
+  <h2 class="rv" data-en='Agent-safe <span class="g">by design</span>'>让 AI 接管,<span class="g">但由你把关</span></h2>
+  <p class="lead rv" data-en="When an AI agent operates your server through Otter, every risky command needs your confirmation first.">AI Agent 通过 Otter 操作服务器时,每一条有风险的命令都要先经过你确认。</p>
+  <div class="stage rv" style="margin-top:50px"><img class="shot" src="img/takeover.webp" alt="" loading="lazy" style="max-width:820px;margin:auto"></div>
+</section>
+
+<section id="download">
+  <h2 class="rv" data-en='Get <span class="g">Otter</span>'>下载 <span class="g">Otter</span></h2>
+  <p class="lead rv" id="ver" data-en="Free and open source.">免费、开源。</p>
+  <div class="dl">
+    <div class="card rv"><div class="e">🍎</div><h4>macOS</h4><p data-en="Apple Silicon · .dmg">Apple 芯片 · .dmg</p><a class="btn p" id="dlMac" href="https://github.com/chenbstack/otter/releases/latest" data-en="Download">下载</a></div>
+    <div class="card rv"><div class="e">🪟</div><h4>Windows</h4><p data-en="x86_64 · installer">x86_64 · 安装包</p><a class="btn p" id="dlWin" href="https://github.com/chenbstack/otter/releases/latest" data-en="Download">下载</a></div>
+  </div>
+</section>
+
+<section id="faq">
+  <h2 class="rv">FAQ</h2>
+  <div class="faq">
+    <details class="rv"><summary data-en="Do I need to install anything on my servers?">服务器上需要装东西吗?</summary><p data-en="No. Otter only uses SSH and the tools already on your server.">不需要。Otter 只用 SSH 和服务器上已有的工具。</p></details>
+    <details class="rv"><summary data-en="Is it free?">免费吗?</summary><p data-en="Yes, and the source is on GitHub.">免费,源码在 GitHub 上。</p></details>
+    <details class="rv"><summary data-en="Where are my passwords stored?">密码存在哪?</summary><p data-en="In the system keychain (macOS Keychain), never uploaded anywhere.">存在系统钥匙串,不会上传到任何地方。</p></details>
+    <details class="rv"><summary data-en="Does it work with 1Panel or BT Panel?">能和 1Panel、宝塔共存吗?</summary><p data-en="Yes. Site configs can be edited; certificates and panel data are read-only.">可以。站点配置可以改,证书和面板自身数据只读。</p></details>
+  </div>
+</section>
+
+<footer>
+  <div><a href="https://github.com/chenbstack/otter" target="_blank">GitHub</a><a href="https://github.com/chenbstack/otter/releases" target="_blank">Releases</a><a href="https://github.com/chenbstack/otter/issues" target="_blank">Issues</a></div>
+  <p style="margin-top:14px">© 2026 Otter</p>
+</footer>
+<script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,99 @@
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
+const RM=matchMedia('(prefers-reduced-motion:reduce)').matches;
+/* 语言 */
+const q=new URLSearchParams(location.search).get('lang');
+let lang=q||localStorage.lang||(navigator.language.startsWith('zh')?'zh':'en');
+const els=$$('[data-en]');els.forEach(e=>e._zh=e.innerHTML);
+const T={zh:'一个 SSH 连接,管好所有服务器 — Otter',en:'Otter — One SSH, every server under control'};
+function setLang(l){lang=l;localStorage.lang=l;document.documentElement.lang=l;document.title=T[l];
+  els.forEach(e=>e.innerHTML=l==='en'?e.dataset.en:e._zh);$('#lang').textContent=l==='en'?'中文':'EN';hint();ver();term()}
+$('#lang').onclick=()=>setLang(lang==='zh'?'en':'zh');
+/* 滚动淡入 + 数字 */
+const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);
+  e.target.querySelectorAll('[data-n]').forEach(count)}}),{threshold:.15});
+$$('.rv').forEach(e=>io.observe(e));
+function count(e){const n=+e.dataset.n,d=+e.dataset.d||0,s=e.dataset.s||'';if(RM||!n){e.textContent=n.toFixed(d)+s;return}
+  const t0=performance.now();(function f(t){const p=Math.min(1,(t-t0)/1400),v=n*(1-Math.pow(1-p,3));e.textContent=v.toFixed(d)+s;if(p<1)requestAnimationFrame(f)})(t0)}
+/* 苹果式分屏:按距离视口中心的远近驱动内容缩放/淡入 */
+const secs=$$('section'),dots=$('#dots');
+secs.forEach((s,i)=>{const a=document.createElement('a');a.href='#';a.onclick=e=>{e.preventDefault();s.scrollIntoView({behavior:RM?'auto':'smooth'})};dots.append(a)});
+function panels(){let best=0,bd=9;secs.forEach((s,i)=>{const r=s.getBoundingClientRect(),d=Math.abs((r.top+r.height/2)-innerHeight/2)/innerHeight;
+  const p=Math.max(0,1-Math.max(0,d-.12)*1.8);[...s.children].forEach(c=>c.style.setProperty('--p',p.toFixed(3)));if(d<bd){bd=d;best=i}});
+  [...dots.children].forEach((a,i)=>a.classList.toggle('on',i===best))}
+let settled=false,st=0;const flats=$$('.flatimg'),scs=$$('.sc3');let cur=0;
+addEventListener('scroll',panels,{passive:true});addEventListener('resize',panels);panels();
+/* 光斑 + 卡片高亮 + hero 倾斜 */
+const spot=$('#spot');
+addEventListener('pointermove',e=>{spot.style.transform=`translate(${e.clientX-innerWidth/2}px,${e.clientY-innerHeight*.3}px)`;
+  const c=e.target.closest&&e.target.closest('.card');if(c){const r=c.getBoundingClientRect();c.style.setProperty('--mx',e.clientX-r.left+'px');c.style.setProperty('--my',e.clientY-r.top+'px')}});
+/* 全局舞台:一个固定的 3D 舞台,在各屏的占位之间滑动、翻转,并切换场景 */
+const gs=$('#gs'),tilt3=$('#tilt3');let mx=0,my=0;
+const stSecs=[$('#top'),...$$('.feat')],slots=[$('#st3'),...$$('.feat .slot')];
+const lerp=(a,b,t)=>a+(b-a)*t,ease=t=>t*t*(3-2*t),cl=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
+function snapRect(i){const s=stSecs[i],e=slots[i];return{x:s.offsetLeft+e.offsetLeft,y:e.offsetTop,w:e.offsetWidth,h:e.offsetHeight}}
+function setScene(i){if(i===cur)return;cur=i;scs.forEach((s,k)=>s.classList.toggle('on',k===i))}
+function tl(){const h=innerHeight,sy=scrollY,tops=stSecs.map(s=>s.offsetTop),n=stSecs.length-1;
+  let i=0;for(let k=0;k<=n;k++)if(tops[k]<=sy+2)i=k;
+  const t=i<n?cl((sy-tops[i])/(tops[i+1]-tops[i])):0,e=ease(t),A=snapRect(i),B=snapRect(Math.min(n,i+1));
+  const x=lerp(A.x,B.x,e),y=lerp(A.y,B.y,e),w=lerp(A.w,B.w,e),ht=lerp(A.h,B.h,e);
+  const after=i>=n?sy-tops[n]:0;
+  gs.style.width=w+'px';gs.style.height=ht+'px';gs.style.transform=`translate(${x}px,${y-after}px)`;
+  gs.style.opacity=cl(1-after/(h*.6));
+  const f=i+t,hero=cl(1-f);                                   /* 首屏斜放程度:1=斜放,0=正面 */
+  const swing=Math.sin(Math.PI*t)*(i>=1&&i<n?26:0)*((B.x>A.x)?-1:1);
+  tilt3.style.setProperty('--rx',62*ease(hero)+my*-4+'deg');
+  tilt3.style.setProperty('--ry',swing+mx*6+'deg');
+  tilt3.style.setProperty('--s',lerp(1,.76,ease(hero)));
+  tilt3.style.setProperty('--k',lerp(.32,1,ease(hero)));
+  const idx=Math.round(f),rest=t<.01||t>.99;
+  setScene(cl(idx-1,0,scs.length-1));
+  const want=rest&&idx>=1&&idx<=n;
+  if(want){if(!settled&&!st)st=setTimeout(()=>{settled=true;st=0;tl()},900)}else{settled=false;clearTimeout(st);st=0}
+  gs.classList.toggle('sink',want);gs.classList.toggle('fl',settled&&want);flats.forEach((fl,k)=>fl.classList.toggle('on',k===cl(idx-1,0,scs.length-1)))}
+addEventListener('pointermove',e=>{mx=e.clientX/innerWidth-.5;my=e.clientY/innerHeight-.5;tl()});
+addEventListener('scroll',tl,{passive:true});addEventListener('resize',tl);
+tl();
+/* 首屏元素依次落下 */
+scs[0].classList.remove('on');setTimeout(()=>scs[cur].classList.add('on'),250);
+/* 终端打字 */
+const LINES=[['$ ssh root@prod-1','pr'],['Connected. Nothing installed.','ok'],['$ docker ps --format "{{.Names}}"','pr'],['nginx  postgres  redis  app-api','dm'],['$ du -sh /var/lib/docker','pr'],['38G   /var/lib/docker','dm'],['# Otter shows all of this as a GUI —','dm'],['# with zero bytes added to the server.','ok']];
+let tk=0;
+async function term(){const my=++tk,pre=$('#term');pre.innerHTML='';
+  for(const [t,c] of LINES){const sp=document.createElement('span');sp.className=c;pre.append(sp,'\n');
+    for(const ch of t){if(my!==tk)return;sp.textContent+=ch;if(!RM)await new Promise(r=>setTimeout(r,c==='pr'?38:8))}
+    if(!RM)await new Promise(r=>setTimeout(r,c==='pr'?260:420))}
+  if(my===tk)pre.insertAdjacentHTML('beforeend','<span class="cur"></span>')}
+let started=false;new IntersectionObserver((es,o)=>{if(es[0].isIntersecting&&!started){started=true;term();o.disconnect()}},{threshold:.4}).observe($('#term'));
+/* 跑马灯 */
+fetch('https://raw.githubusercontent.com/chenbstack/otter/main/apps/catalog.json').then(r=>r.json()).then(d=>{const a=(d.apps||d).map(x=>x.name);fill(a)}).catch(()=>fill(['MySQL','PostgreSQL','Redis','MinIO','Nginx','Portainer','Gitea','Vaultwarden']));
+function fill(a){const h=a.concat(a).map(n=>`<span>${n}</span>`).join('');$('#mq').innerHTML=h+h}
+/* 系统识别 + 下载 */
+const win=/Win/i.test(navigator.platform+navigator.userAgent),mac=/Mac/i.test(navigator.platform);
+function hint(){const o=win?'Windows':mac?'macOS':null;$('#hint').textContent=o?(lang==='en'?`Detected ${o}`:`已识别你的系统:${o}`):'macOS · Windows'}
+let rel=null;function ver(){if(rel)$('#ver').textContent=(lang==='en'?'Latest ':'最新版本 ')+rel.tag_name+' · '+rel.published_at.slice(0,10)}
+fetch('https://api.github.com/repos/chenbstack/otter/releases/latest').then(r=>r.json()).then(r=>{if(!r.assets)return;rel=r;
+  const f=re=>(r.assets.find(a=>re.test(a.name))||{}).browser_download_url;
+  const m=f(/\.dmg$/),w=f(/setup\.exe$/);if(m)$('#dlMac').href=m;if(w)$('#dlWin').href=w;
+  $('#heroDl').href=(win?w:m)||'#download';ver()}).catch(()=>{});
+setLang(lang);
+$$('.hs').forEach(h=>{const t=h.querySelector('.hs-track');const step=()=>t.querySelector('figure').offsetWidth+28;
+h.querySelector('.hs-p').onclick=()=>t.scrollBy({left:-step(),behavior:'smooth'});h.querySelector('.hs-n').onclick=()=>t.scrollBy({left:step(),behavior:'smooth'});
+let dn=0,sx=0,sl=0;t.addEventListener('pointerdown',e=>{if(e.pointerType!=='mouse')return;dn=1;sx=e.clientX;sl=t.scrollLeft;t.classList.add('drag')});
+addEventListener('pointermove',e=>{if(dn)t.scrollLeft=sl-(e.clientX-sx)});addEventListener('pointerup',()=>{dn=0;t.classList.remove('drag')})});
+
+$$('.hs').forEach(h=>{const t=h.querySelector('.hs-track'),fs=[...t.querySelectorAll('figure')];
+const upd=()=>{const c=t.scrollLeft+t.clientWidth/2;fs.forEach(f=>{const d=Math.min(1,Math.abs(f.offsetLeft+f.offsetWidth/2-c)/(f.offsetWidth*1.1));f.style.setProperty('--fs',(1-.14*d).toFixed(3));f.style.setProperty('--fo',(1-.55*d).toFixed(3))})};
+t.addEventListener('scroll',upd,{passive:true});upd();
+new IntersectionObserver(([e])=>{if(e.isIntersecting&&!h.classList.contains('in')){h.classList.add('in');setTimeout(()=>h.classList.add('live'),1100)}},{threshold:.3}).observe(h)});
+
+$$('.hs').forEach(h=>{const t=h.querySelector('.hs-track'),fs=[...t.querySelectorAll('figure')],bars=h.querySelector('.hs-bars');
+bars.innerHTML=fs.map(()=>'<i></i>').join('');const bs=[...bars.children];let cur=-1,tm,lock=0,vis=0;
+const go=(i,sc)=>{cur=i;fs.forEach((f,k)=>{f.classList.remove('on');bs[k].classList.remove('on');bs[k].classList.toggle('done',k<i)});void h.offsetWidth;fs[i].classList.add('on');bs[i].classList.add('on');
+if(sc){lock=Date.now()+900;t.scrollTo({left:fs[i].offsetLeft-(t.clientWidth-fs[i].offsetWidth)/2,behavior:'smooth'})}
+clearTimeout(tm);tick(5500)};
+const tick=ms=>{tm=setTimeout(()=>{if(vis&&!h.classList.contains('paused'))go((cur+1)%fs.length,1);else tick(500)},ms)};
+bs.forEach((b,k)=>b.onclick=()=>go(k,1));h.querySelector('.hs-p').onclick=null;h.querySelector('.hs-n').onclick=null;
+h.querySelector('.hs-p').addEventListener('click',()=>go((cur+fs.length-1)%fs.length,1));h.querySelector('.hs-n').addEventListener('click',()=>go((cur+1)%fs.length,1));
+h.addEventListener('pointerenter',()=>h.classList.add('paused'));h.addEventListener('pointerleave',()=>h.classList.remove('paused'));
+t.addEventListener('scroll',()=>{if(Date.now()<lock)return;const c=t.scrollLeft+t.clientWidth/2;let b=0,bd=1e9;fs.forEach((f,k)=>{const d=Math.abs(f.offsetLeft+f.offsetWidth/2-c);if(d<bd){bd=d;b=k}});if(b!==cur)go(b,0)},{passive:true});
+new IntersectionObserver(([e])=>{const was=vis;vis=e.isIntersecting;if(vis&&!was)go(0,1)},{threshold:.5}).observe(h)});

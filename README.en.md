@@ -38,7 +38,7 @@ A native SSH client: terminal, files (SFTP) and server management (Docker, datab
 
 ## Highlights
 
-- **Native and small**: a Rust app drawing straight on the GPU, with no Electron or browser engine bundled. The macOS download is about 16 MB.
+- **Native and small**: a Rust app drawing straight on the GPU, with no Electron or browser engine bundled. The macOS download is about 21 MB.
 - **Fast**: launches in about 0.25 s (MacBook Pro, Apple M5 Pro), and long scrolling lists stay smooth.
 - **Nothing installed on servers**: everything goes over SSH. No agent, daemon or web panel on the server, and no extra management port exposed.
 - **Safe by default**: passwords and key passphrases are encrypted on disk, with the master key in the system keychain. An agent can never take over a terminal without your approval.

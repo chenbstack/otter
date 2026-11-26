@@ -164,7 +164,14 @@ fn big(r: &mut Rng, n: usize) -> Vec<Stack> {
                 .map(|j| {
                     let img = IMAGES[(r.next() % 6) as usize];
                     let up = r.next() % 9 != 0;
-                    svc(r, &format!("app{i:02}-svc{j}"), img, up, &["8080/tcp", "9090/tcp"])
+                    let ports: &[&str] = match img {
+                        "postgres:16" => &["5432/tcp"],
+                        "redis:7" => &["6379/tcp"],
+                        "nginx:1.27" | "traefik:v3" => &["80/tcp", "443/tcp"],
+                        "grafana/grafana:11" => &["3000/tcp"],
+                        _ => &["9000/tcp", "9001/tcp"],
+                    };
+                    svc(r, &format!("app{i:02}-svc{j}"), img, up, ports)
                 })
                 .collect();
             stack(&format!("project-{i:02}"), services)
