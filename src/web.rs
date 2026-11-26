@@ -2668,6 +2668,7 @@ chmod 600 $CERTS/$CN/privkey.pem; chmod 644 $CERTS/$CN/fullchain.pem
 @META@
 @ACCTJSON@
 @RELOAD@
+@CRON@
 echo "==> 证书已签发"
 "#,
     )
@@ -2686,7 +2687,8 @@ echo "==> 证书已签发"
     .replace("@MAIN@", &quote(&r.domains[0]))
     .replace("@META@", &write_file_cmd("$CERTS/$CN/meta.json", &meta, "644").replace("'$CERTS/$CN/meta.json'", "\"$CERTS/$CN/meta.json\""))
     .replace("@ACCTJSON@", &write_file_cmd(&format!("{}/accounts/acme.json", srvdata::WEB), &acct_json, "644"))
-    .replace("@RELOAD@", &reload_cmd());
+    .replace("@RELOAD@", &reload_cmd())
+    .replace("@CRON@", &if r.auto { cron_ensure_cmd(&r.name) } else { String::new() });
     Ok(body)
 }
 
@@ -2831,6 +2833,13 @@ exit 0
     )
     .replace("@SECS@", &(RENEW_DAYS * 86400).to_string())
     .replace("@IMG@", ACME_IMAGE)
+}
+
+/// 申请证书成功后顺手装上续期任务(已经有就不动):分钟数按证书名取个固定值,避免都在同一分钟请求 CA
+fn cron_ensure_cmd(name: &str) -> String {
+    let h: u32 = name.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+    let line = format!("# otter:cert-renew 由 Otter 管理:每天检查证书,不到 {RENEW_DAYS} 天到期的自动续期\n{} {} * * * root {RENEW_SH}\n", h % 60, 2 + (h / 60) % 3);
+    format!("if [ ! -f {CRON_FILE} ]; then\n{}\n{}\nfi", write_file_cmd(RENEW_SH, &renew_sh(), "755"), write_file_cmd(CRON_FILE, &line, "644"))
 }
 
 /// 安装或更新续期脚本和 cron(每天一次;分钟数固定在 `minute`,小时在凌晨)

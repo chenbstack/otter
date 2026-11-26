@@ -821,6 +821,8 @@ pub const TAB_H: f32 = 30.0;
 pub const TITLEBAR_PAD_L: f32 = 84.0;
 /// 节点页卡片:最小宽度(决定列数)、高度、间距
 pub const NODE_CARD_MIN_W: f32 = 232.0;
+/// 网站设置页卡片最小宽度:放得下就并排,放不下换行
+pub const SET_CARD_MIN_W: f32 = 440.0;
 pub const NODE_CARD_H: f32 = 56.0;
 /// 节点页:卡片里的图标块边长、顶部搜索条和主按钮高度
 pub const NODE_ICON: f32 = 32.0;

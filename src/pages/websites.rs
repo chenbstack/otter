@@ -1815,42 +1815,6 @@ impl Home {
             div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(SharedString::from(format!("站点配置目录 {}", st.target.conf))),
         );
 
-        // 自动续期
-        let cron_text = match &st.cron {
-            Some(c) => format!("已开启:cron 计划 {c}(每天一次),不到 {} 天到期的证书自动续期", web::RENEW_DAYS),
-            None => "还没有开启。开启后,服务器自己的 cron 每天检查证书并续期,Otter 不需要开着".to_string(),
-        };
-        let mut rn = div().flex().flex_col().gap(px(10.0)).child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(SharedString::from(cron_text)));
-        let mut rb = div().flex().flex_row().flex_wrap().gap(px(8.0));
-        rb = rb.child(btn("web-cron-on", IconName::CalendarClock, if st.cron.is_some() { "更新续期任务" } else { "开启自动续期" }).on_click(cx.listener(|this, _, _, cx| {
-            // 分钟数按节点名取个固定值,避免所有服务器同一分钟去请求 CA
-            let h: u32 = this.node().name.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
-            this.web_run("开启自动续期", web::cron_script(h % 60, 2 + (h / 60) % 3), OpTag::Plain, cx);
-        })));
-        if st.cron.is_some() {
-            rb = rb.child(btn("web-renew-now", IconName::RefreshCw, "立即检查").on_click(cx.listener(|this, _, _, cx| this.web_run("检查续期", web::renew_now_script(), OpTag::Plain, cx))));
-            rb = rb.child(btn("web-cron-off", IconName::X, "关闭").on_click(cx.listener(|this, _, _, cx| {
-                this.web_ask(
-                    WebConfirm {
-                        title: "关闭自动续期",
-                        name: "证书续期任务".into(),
-                        detail: "/etc/cron.d/otter-websites".into(),
-                        points: vec![(IconName::TriangleAlert, c::warn(), "之后证书到期前不会自动续期,过期后站点会提示不安全".into())],
-                        label: "关闭",
-                        danger: true,
-                        act: Pending::Act(ConfAct::RemoveCron),
-                    },
-                    cx,
-                );
-            })));
-        }
-        rn = rn.child(rb);
-        if !st.renew_log.is_empty() {
-            let log = st.renew_log[st.renew_log.len().saturating_sub(6)..].join("\n");
-            rn = rn.child(div().rounded(px(t::RADIUS_MD)).bg(c::field()).border_1().border_color(c::field_border()).p(px(10.0)).font_family(MONO).text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(SharedString::from(log)));
-        }
-        let renew = card("自动续期", "写在服务器的 /etc/cron.d,不依赖 Otter 常驻", None, rn);
-
         // DNS 账号
         let mut dns = div().flex().flex_col().gap(px(8.0));
         if st.dns.is_empty() {
@@ -1961,7 +1925,17 @@ impl Home {
         };
         let data = card("数据目录", "配置、证书、账号都在这里;整目录可以打包迁到另一台服务器", Some(status), dir);
         let security = self.web_security(st, cx);
-        div().flex().flex_col().gap(px(14.0)).child(engine).children(security).child(renew).child(dns_card).child(acme).child(data).into_any_element()
+        // 并排放得下就并排(卡片最小宽度见 card.set.min-w),放不下自动换行
+        let cell = |d: Div| d.flex_1().min_w(px(crate::ui::SET_CARD_MIN_W));
+        let wrap = || div().flex().flex_row().flex_wrap().gap(px(14.0));
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .child(wrap().child(cell(engine)).child(cell(data)))
+            .children(security)
+            .child(wrap().child(cell(dns_card)).child(cell(acme)))
+            .into_any_element()
     }
 
     // ---------------------------------------------------------------- 弹窗
