@@ -1099,3 +1099,51 @@ pub fn blur_on_click(skip: bool) -> impl IntoElement {
     .absolute()
     .size_0()
 }
+
+/// 代码编辑器(`Editor`)的配色:背景透明(外面的容器负责底色),文字、行号、当前行和语法高亮都取自 `mod c` 色板,
+/// 这样编辑器和界面同一套风格。语法名见 gpui-component 的 `SyntaxColors`
+pub fn editor_highlight_theme() -> Option<std::sync::Arc<gpui_kit::component::highlighter::HighlightTheme>> {
+    let hex = |r: Rgba| format!("#{:02x}{:02x}{:02x}{:02x}", (r.r * 255.0).round() as u8, (r.g * 255.0).round() as u8, (r.b * 255.0).round() as u8, (r.a * 255.0).round() as u8);
+    let s = |col: Rgba| serde_json::json!({ "color": hex(col) });
+    let it = |col: Rgba| serde_json::json!({ "color": hex(col), "font_style": "italic" });
+    let v = serde_json::json!({
+        "name": "otter",
+        "appearance": "dark",
+        "style": {
+            "editor.background": "#00000000",
+            "editor.gutter.background": "#00000000",
+            "editor.foreground": hex(c::text()),
+            "editor.active_line.background": hex(c::field_hover()),
+            "editor.line_number": hex(c::ghost()),
+            "editor.active_line_number": hex(c::muted()),
+            "syntax": {
+                "comment": it(c::ghost()),
+                "comment_doc": it(c::ghost()),
+                "keyword": s(c::accent()),
+                "function": s(c::accent()),
+                "property": s(c::accent()),
+                "attribute": s(c::accent()),
+                "label": s(c::accent()),
+                "string": s(c::online()),
+                "string.escape": s(c::warn()),
+                "string.regex": s(c::warn()),
+                "string.special": s(c::online()),
+                "number": s(c::warn()),
+                "boolean": s(c::warn()),
+                "constant": s(c::warn()),
+                "variable": s(c::secondary()),
+                "variable.special": s(c::secondary()),
+                "type": s(c::warn()),
+                "tag": s(c::accent()),
+                "operator": s(c::muted()),
+                "punctuation": s(c::muted()),
+                "punctuation.bracket": s(c::muted()),
+                "punctuation.delimiter": s(c::muted()),
+                "punctuation.special": s(c::muted()),
+                "preproc": s(c::danger()),
+                "title": s(c::text())
+            }
+        }
+    });
+    serde_json::from_value(v).ok().map(std::sync::Arc::new)
+}

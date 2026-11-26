@@ -508,6 +508,9 @@ fn main() {
     gpui_kit::application().with_assets(assets::AppAssets).run(move |cx| {
         gpui_kit::init(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+        if let Some(ht) = ui::editor_highlight_theme() {
+            gpui_kit::component::Theme::update(cx, |t| t.highlight_theme = ht);
+        }
         // 记住的窗口位置和大小(演示/截图模式不读写本地库,用默认)
         let saved = if demo { None } else { store::Store::open_default().ok().filter(|s| s.get_setting(winstate::KEY_REMEMBER).as_deref() != Some("off")).and_then(|s| s.get_setting(winstate::KEY)) };
         let options = WindowOptions {

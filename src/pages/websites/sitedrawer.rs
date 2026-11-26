@@ -4,6 +4,7 @@
 //! 设计见 `docs/plans/active/2026-11-26-site-drawer.md`。
 
 use super::*;
+use gpui_kit::component::input::{Editor, EditorState};
 
 mod extra;
 
@@ -32,7 +33,9 @@ pub(super) struct SiteDrawer {
     /// 手改过且读得懂的正文:保存时就地修改它
     old_text: Option<String>,
     /// 外部配置的原文编辑框(有值时抽屉只有「配置原文」一个菜单)
-    raw: Option<Entity<TextareaState>>,
+    raw: Option<Entity<EditorState>>,
+    /// Otter 站点的原文编辑框(「配置原文」菜单,和表单并存;保存时只存当前菜单对应的那一边)
+    rawed: Option<Entity<EditorState>>,
     menu: Menu,
     /// 0 反向代理 1 静态 2 跳转
     kind: u8,
@@ -274,6 +277,7 @@ impl SiteDrawer {
             lost: Vec::new(),
             old_text: None,
             raw: None,
+            rawed: None,
             menu: Menu::Domains,
             ed: None,
             kind,
@@ -390,6 +394,9 @@ impl SiteDrawer {
         v.push((Menu::Https, IconName::Lock, "HTTPS"));
         v.push((Menu::Limits, IconName::Gauge, "流量限制"));
         v.push((Menu::Advanced, IconName::SlidersHorizontal, "高级"));
+        if self.rawed.is_some() {
+            v.push((Menu::Raw, IconName::FileText, "配置原文"));
+        }
         v
     }
 }
@@ -496,11 +503,17 @@ impl Home {
         sd.old_text = (e.modified && e.from_conf).then(|| e.text.clone());
         if e.spec.is_none() {
             let text = e.text.clone();
-            let area = cx.new(|cx| TextareaState::new(window, cx).rows(24));
+            let area = cx.new(|cx| EditorState::new(window, cx).language("bash").line_number(true));
             area.update(cx, |s, cx| s.set_value(text.as_str(), window, cx));
             cx.observe(&area, |_, _, cx| cx.notify()).detach();
             sd.raw = Some(area);
             sd.menu = Menu::Raw;
+        } else {
+            let text = e.text.clone();
+            let area = cx.new(|cx| EditorState::new(window, cx).language("bash").line_number(true));
+            area.update(cx, |s, cx| s.set_value(text.as_str(), window, cx));
+            cx.observe(&area, |_, _, cx| cx.notify()).detach();
+            sd.rawed = Some(area);
         }
         let w = self.web_mut();
         w.sd = Some(Box::new(sd));
@@ -516,7 +529,8 @@ impl Home {
         let tg = self.web_target();
         let Some(sd) = self.sd() else { return };
         let enabled = sd.enabled;
-        if let Some(raw) = &sd.raw {
+        let raw_box = sd.raw.as_ref().or(sd.rawed.as_ref().filter(|_| sd.menu == Menu::Raw));
+        if let Some(raw) = raw_box {
             let (file, text) = (sd.file.clone(), raw.read(cx).value().to_string());
             match web::site_raw_script(&file, &text) {
                 Ok(script) => {
@@ -606,7 +620,7 @@ impl Home {
             Menu::Limits => self.sd_limits(cx),
             Menu::Raw => self.sd_raw(cx),
         };
-        let body = div().flex_1().min_h_0().flex().flex_row().child(nav).child(div().id("web-sd-body").flex_1().min_w_0().h_full().overflow_y_scroll().p(px(20.0)).flex().flex_col().gap(px(14.0)).child(content));
+        let body = div().flex_1().min_h_0().flex().flex_row().child(nav).child(div().id("web-sd-body").flex_1().min_w_0().h_full().overflow_y_scroll().p(px(if menu == Menu::Raw { 0.0 } else { 20.0 })).flex().flex_col().gap(px(14.0)).child(content));
         let warn = self
             .sd()
             .and_then(|sd| match (sd.modified, sd.from_conf) {
@@ -1437,13 +1451,8 @@ impl Home {
 
     fn sd_raw(&mut self, _cx: &mut Context<Self>) -> AnyElement {
         let Some(sd) = self.sd() else { return div().into_any_element() };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(14.0))
-            .child(section("配置原文", "这个站点不是 Otter 生成的,只能直接改配置;保存前会用 nginx -t 检查,不通过自动还原"))
-            .child(area_field("配置文件", "", sd.raw.as_ref(), 460.0))
-            .into_any_element()
+        // 编辑器撑满整个内容区:不放标题和内边距(用途在保存时的提示和文档里说明)
+        div().flex_1().min_h_0().bg(c::field()).overflow_hidden().children(sd.raw.as_ref().or(sd.rawed.as_ref()).map(|e| Editor::new(e).appearance(false).h_full())).into_any_element()
     }
 
     // ---------------------------------------------------------------- 高级
