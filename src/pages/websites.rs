@@ -1439,7 +1439,14 @@ impl Home {
             let (kind_text, target) = match &s.spec {
                 Some(sp) => match &sp.kind {
                     SiteKind::Proxy { locations, .. } => (sp.kind.label().to_string(), proxy_summary(locations)),
-                    SiteKind::Static { .. } => (sp.kind.label().to_string(), format!("/opt/otter/websites/sites/{}", sp.name)),
+                    SiteKind::Static { spa, index } => (
+                        match (spa, index) {
+                            (true, _) => format!("{} · SPA", sp.kind.label()),
+                            (false, true) => format!("{} · 目录列表", sp.kind.label()),
+                            _ => sp.kind.label().to_string(),
+                        },
+                        format!("/opt/otter/websites/sites/{}", sp.name),
+                    ),
                     SiteKind::Redirect { to, code } => (format!("{}({code})", sp.kind.label()), to.clone()),
                 },
                 None => ("外部配置".to_string(), s.file.clone()),
@@ -1485,6 +1492,22 @@ impl Home {
                 v.dedup();
                 v.iter().map(u16::to_string).collect::<Vec<_>>().join(" · ")
             });
+            // 状态小标签:默认站点、强制跳 HTTPS、HTTP/3、已限流
+            let mut tags: Vec<&'static str> = Vec::new();
+            if let Some(sp) = &s.spec {
+                if sp.adv.default_server {
+                    tags.push("默认站点");
+                }
+                if sp.listeners.iter().any(|l| l.force_https) {
+                    tags.push("强制 HTTPS");
+                }
+                if sp.adv.http3 {
+                    tags.push("HTTP/3");
+                }
+                if sp.adv.limits.active() {
+                    tags.push("已限流");
+                }
+            }
             // 操作按钮区的点击不要冒泡到整行(整行点击 = 打开抽屉)
             let mut act = div().id(("ws-act", i)).w(px(COL_SITE_ACT)).flex_shrink_0().flex().flex_row().justify_end().gap(px(2.0)).on_click(|_, _, cx| cx.stop_propagation());
             let file = s.file.clone();
@@ -1529,8 +1552,10 @@ impl Home {
                         .flex_col()
                         .child(div().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::MEDIUM).text_color(if enabled { c::text() } else { c::ghost() }).child(SharedString::from(domains)))
                         .when_some(ports, |d, p| d.child(div().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(SharedString::from(format!("端口 {p}")))))
+                        .when(!tags.is_empty(), |d| d.child(div().flex().flex_row().flex_wrap().gap(px(4.0)).mt(px(3.0)).children(tags.iter().map(|t| pill(*t, c::secondary(), c::idle_soft())))))
                         .when(!enabled, |d| d.child(small("已停用", c::warn())))
-                        .when(s.modified, |d| d.child(small("配置被手工改过", c::ghost()))),
+                        .when(s.modified && !s.from_conf, |d| d.child(small("配置被手工改过,Otter 读不懂", c::warn())))
+                        .when(s.modified && s.from_conf && !s.lost.is_empty(), |d| d.child(small(format!("含 {} 项 Otter 不管理的内容", s.lost.len()), c::ghost()))),
                 )
                 .child(div().w(px(COL_SITE_KIND)).flex_shrink_0().flex().flex_col().child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::secondary()).child(SharedString::from(kind_text))).child(div().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(SharedString::from(target))));
             if !narrow {
@@ -1673,6 +1698,10 @@ impl Home {
             );
         }))
             .into_any_element());
+        }
+        // 卸载只在「设置」页签里出现,别的页签不放这么危险的按钮
+        if self.web_ui().tab != 2 {
+            ctl.pop();
         }
         ctl
     }
