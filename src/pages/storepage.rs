@@ -7,6 +7,7 @@ use gpui_kit::component::input::{Input, InputState};
 use super::super::*;
 use super::composeedit::field_col;
 use crate::appstore::{self, App as AppDef, Record};
+use crate::appupdate::{self, Status};
 
 pub(crate) struct Upgrade {
     app: AppDef,
@@ -19,6 +20,20 @@ pub(crate) struct Upgrade {
     ver: Entity<InputState>,
     /// 版本输入框是否已经按版本列表预填过
     filled: bool,
+    /// 「可升级」检查给出的目标版本(预填用)和「同一个 tag 重新拉取」(浮动标签有新镜像)
+    suggest: Option<String>,
+    repull: bool,
+}
+
+/// 一个已装实例的升级检查进度(见 `appupdate`)
+#[derive(Default)]
+pub(crate) struct Upd {
+    status: Option<Status>,
+    asked: bool,
+    fetching: bool,
+    tags: Option<Option<Vec<String>>>,
+    local: Option<String>,
+    hub: Option<Option<std::collections::HashSet<String>>>,
 }
 
 pub(crate) struct Uninstall {
@@ -41,6 +56,11 @@ pub(crate) struct StoreUi {
     seen: Option<std::time::Instant>,
     up: Option<Upgrade>,
     un: Option<Uninstall>,
+    /// 各已装实例(容器名)的升级检查
+    upd: std::collections::HashMap<String, Upd>,
+    checked_at: Option<std::time::Instant>,
+    /// 后台轮询检查结果的任务在跑
+    polling: bool,
     /// 正在看详情的应用 id
     detail: Option<String>,
 }
@@ -65,11 +85,43 @@ impl Home {
                 self.api_demo_job(&m);
             }
         }
-        // 每次进入商店页拉一次在线目录(拉取中不重复拉;失败了下次进入再试)。拉取期间继续显示已有目录
+        // 目录每天从仓库更新一次(启动时和后台定时,见 appstore::start_daily_refresh);进入商店页时只在缓存过期或上次失败时补拉一次。拉取期间继续显示已有目录
         let entered = self.dock.api.st.seen.is_none();
         self.dock.api.st.seen = Some(std::time::Instant::now());
-        if entered && self.dock.api.st.remote != 1 && !self.demo {
+        if entered && self.dock.api.st.remote != 1 && !self.demo && (self.dock.api.st.remote == 3 || appstore::cache_stale()) {
             self.store_refresh(cx);
+        }
+        // 检查结果缓存 10 分钟,过期后进商店页再重新检查(旧结果和缓存的版本列表都丢掉)
+        if entered && self.dock.api.st.checked_at.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(600)) {
+            self.dock.api.st.checked_at = Some(std::time::Instant::now());
+            self.dock.api.st.upd.clear();
+            let ids: Vec<String> = self.dock.snap.containers.iter().filter_map(|c| c.app.clone()).collect();
+            for id in ids {
+                self.dock.api.forget_tags(&id);
+            }
+        }
+        self.store_check_updates(cx);
+        // 检查结果到达时页面不一定会重绘:有没出结果的就每 0.5 秒推进一次,最多 60 秒
+        let pending = self.dock.snap.containers.iter().any(|c| c.app.is_some() && self.dock.api.st.upd.get(&c.name).is_none_or(|u| u.status.is_none()));
+        if pending && !self.dock.api.st.polling && !self.demo {
+            self.dock.api.st.polling = true;
+            cx.spawn(async move |this, cx| {
+                for _ in 0..120 {
+                    cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                    let done = this
+                        .update(cx, |h, cx| {
+                            h.store_check_updates(cx);
+                            cx.notify();
+                            !h.dock.snap.containers.iter().any(|c| c.app.is_some() && h.dock.api.st.upd.get(&c.name).is_none_or(|u| u.status.is_none()))
+                        })
+                        .unwrap_or(true);
+                    if done {
+                        break;
+                    }
+                }
+                let _ = this.update(cx, |h, _| h.dock.api.st.polling = false);
+            })
+            .detach();
         }
         if let Some(u) = self.dock.api.st.up.as_ref().filter(|u| u.rec.is_none() && u.err.is_none()) {
             let r = self.api_docker().and_then(|d| d.db_take(T_REC));
@@ -85,6 +137,12 @@ impl Home {
         // 版本列表到了就预填一个目标版本
         let fill = self.dock.api.st.up.as_ref().filter(|u| !u.filled).and_then(|u| {
             let rec = &u.rec.as_ref()?.0;
+            if u.repull {
+                return Some(rec.version.clone());
+            }
+            if let Some(s) = &u.suggest {
+                return Some(s.clone());
+            }
             let list = self.dock.api.tags_of(&u.app.id)?;
             let cur_major = rec.version.split(['.', '-']).next().unwrap_or("").to_string();
             let pick = if u.app.kind.as_deref() == Some("database") { list.iter().find(|v| v.split(['.', '-']).next() == Some(cur_major.as_str())).cloned() } else { None };
@@ -95,6 +153,104 @@ impl Home {
                 u.filled = true;
                 let e = u.ver.clone();
                 e.update(cx, |s, cx| s.set_value(&v, window, cx));
+            }
+        }
+    }
+
+    /// 逐个已装实例做升级检查:版本列表到了先按 tag 判断,浮动标签再比镜像 digest
+    fn store_check_updates(&mut self, cx: &mut Context<Self>) {
+        if self.demo {
+            return;
+        }
+        let cat = appstore::current();
+        let list: Vec<crate::docker::Container> = self.dock.snap.containers.iter().filter(|c| c.app.is_some()).cloned().collect();
+        for ct in list {
+            let Some(app) = cat.apps.iter().find(|a| Some(&a.id) == ct.app.as_ref()).cloned() else { continue };
+            let tag = ct.image.rsplit_once(':').map(|x| x.1.to_string()).unwrap_or_else(|| "latest".into());
+            let name = ct.name.clone();
+            if self.dock.api.st.upd.get(&name).is_some_and(|u| u.status.is_some()) {
+                continue;
+            }
+            let Some((repo, _, _)) = appstore::hub_pages(&app) else {
+                self.dock.api.st.upd.entry(name).or_default().status = Some(Status::Unknown);
+                continue;
+            };
+            {
+                let u = self.dock.api.st.upd.entry(name.clone()).or_default();
+                if u.tags.is_none() {
+                    match appupdate::line_prefix(&tag) {
+                        None => u.tags = Some(Some(Vec::new())),
+                        Some(prefix) if !u.fetching => {
+                            u.fetching = true;
+                            let n2 = name.clone();
+                            cx.spawn(async move |this, cx| {
+                                let r = cx.background_executor().spawn(async move { appupdate::fetch_line_tags(&repo, &prefix) }).await;
+                                let _ = this.update(cx, |h, cx| {
+                                    if let Some(u) = h.dock.api.st.upd.get_mut(&n2) {
+                                        u.tags = Some(r);
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
+                            continue;
+                        }
+                        Some(_) => continue,
+                    }
+                }
+            }
+            let versions = match self.dock.api.st.upd.get(&name).and_then(|u| u.tags.clone()) {
+                Some(Some(v)) => v,
+                Some(None) => {
+                    self.dock.api.st.upd.entry(name).or_default().status = Some(Status::Unknown);
+                    continue;
+                }
+                None => continue,
+            };
+            let key = format!("stdig-{name}");
+            let u = self.dock.api.st.upd.entry(name.clone()).or_default();
+            if !u.asked {
+                match appupdate::check_tag(&tag, &versions) {
+                    Status::NeedDigest => {
+                        u.asked = true;
+                        let Some((repo, _, _)) = appstore::hub_pages(&app) else {
+                            u.status = Some(Status::Unknown);
+                            continue;
+                        };
+                        if let Some(d) = self.api_docker() {
+                            d.host_run(&key, appupdate::local_digest_script(&ct.image), 30);
+                        }
+                        let (n2, t2) = (name.clone(), tag.clone());
+                        cx.spawn(async move |this, cx| {
+                            let r = cx.background_executor().spawn(async move { appupdate::fetch_hub_digests(&repo, &t2) }).await;
+                            let _ = this.update(cx, |h, cx| {
+                                if let Some(u) = h.dock.api.st.upd.get_mut(&n2) {
+                                    u.hub = Some(r);
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    }
+                    st => {
+                        u.status = Some(st);
+                        u.asked = true;
+                    }
+                }
+                continue;
+            }
+            if u.local.is_none() {
+                if let Some(r) = self.api_docker().and_then(|d| d.db_take(&key)) {
+                    self.dock.api.st.upd.entry(name.clone()).or_default().local = Some(r.unwrap_or_default());
+                }
+            }
+            let u = self.dock.api.st.upd.entry(name).or_default();
+            if let (Some(local), Some(hub)) = (&u.local, &u.hub) {
+                u.status = Some(match hub {
+                    Some(h) => appupdate::check_digest(local, h),
+                    None => Status::Unknown,
+                });
+                cx.notify();
             }
         }
     }
@@ -126,7 +282,13 @@ impl Home {
             d.host_run(T_REC, appstore::read_record_script(&dir), 30);
         }
         self.api_fetch_tags(&app, cx);
-        self.dock.api.st.up = Some(Upgrade { app, container: container.into(), project: project.into(), dir, rec: None, err: None, ver, filled: false });
+        let st = self.dock.api.st.upd.get(container).and_then(|u| u.status.clone());
+        let (suggest, repull) = match st {
+            Some(Status::NewTag(t)) => (Some(t), false),
+            Some(Status::NewImage) => (None, true),
+            _ => (None, false),
+        };
+        self.dock.api.st.up = Some(Upgrade { app, container: container.into(), project: project.into(), dir, rec: None, err: None, ver, filled: false, suggest, repull });
         cx.notify();
     }
 
@@ -145,7 +307,8 @@ impl Home {
         let target = u.ver.read(cx).value().trim().to_string();
         let app = u.app.clone();
         let dir = u.dir.clone();
-        let err = appstore::check_upgrade(&app, &rec.version, &target).err().or_else(|| appstore::render(&app, &rec.values_for(&app, &target)).err());
+        let repull = self.dock.api.st.up.as_ref().is_some_and(|u| u.repull) && target == rec.version;
+        let err = (if repull { Ok(()) } else { appstore::check_upgrade(&app, &rec.version, &target) }).err().or_else(|| appstore::render(&app, &rec.values_for(&app, &target)).err());
         if let Some(e) = err {
             self.dock.api.st.up.as_mut().unwrap().err = Some(e);
             cx.notify();
@@ -188,7 +351,12 @@ impl Home {
         let cat = appstore::current();
         let u = &self.dock.api.st;
         let q = u.q.as_ref().map(|q| q.read(cx).value().trim().to_lowercase()).unwrap_or_default();
+        // 已装实例及其升级状态(「已安装」「可升级」页签用)
+        let installed: Vec<(&AppDef, &crate::docker::Container)> = self.dock.snap.containers.iter().filter(|c| c.app.is_some()).filter_map(|ct| cat.apps.iter().find(|a| Some(&a.id) == ct.app.as_ref()).map(|a| (a, ct))).collect();
+        let upgradable = |ct: &crate::docker::Container| matches!(self.dock.api.st.upd.get(&ct.name).and_then(|u| u.status.as_ref()), Some(Status::NewTag(_) | Status::NewImage));
+        let up_n = installed.iter().filter(|(_, ct)| upgradable(ct)).count();
         let mut chips: Vec<(String, String)> = vec![("".into(), "全部".into())];
+        chips.push(("@installed".into(), if installed.is_empty() { "已安装".into() } else if up_n > 0 { format!("已安装 {} · {up_n} 个可升级", installed.len()) } else { format!("已安装 {}", installed.len()) }));
         chips.extend(cat.categories.iter().map(|c| (c.id.clone(), c.name.clone())));
         let cur = u.cat.min(chips.len() - 1);
         let sel = chips[cur].0.clone();
@@ -204,22 +372,26 @@ impl Home {
             }))
         }));
 
-        // 已安装的实例
-        let mut inst_rows = Vec::new();
-        for ct in self.dock.snap.containers.iter().filter(|c| c.app.is_some()) {
-            let Some(app) = cat.apps.iter().find(|a| Some(&a.id) == ct.app.as_ref()) else { continue };
-            let k = inst_rows.len();
-            inst_rows.push(self.store_instance_row(app, ct, k, cx));
+        // 已安装:实例列表(搜索对容器名、应用名生效),不分类;后台静默检查,有新版本的排在最上面
+        if sel == "@installed" {
+            let mut rows = Vec::new();
+            let mut ordered: Vec<&(&AppDef, &crate::docker::Container)> = installed.iter().collect();
+            ordered.sort_by_key(|(_, ct)| !upgradable(ct));
+            for (app, ct) in ordered {
+                if !q.is_empty() && !format!("{} {} {}", ct.name, app.name, app.id).to_lowercase().contains(&q) {
+                    continue;
+                }
+                let k = rows.len();
+                rows.push(self.store_instance_row(app, ct, k, cx));
+            }
+            let body: AnyElement = if rows.is_empty() {
+                let msg = if installed.is_empty() { "还没有用商店安装的应用" } else { "没有匹配的实例" };
+                div().py(px(40.0)).text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child(msg).into_any_element()
+            } else {
+                div().flex().flex_col().gap(px(10.0)).children(rows).into_any_element()
+            };
+            return div().flex_1().flex().flex_col().gap(px(14.0)).child(row1).child(row2).child(body).into_any_element();
         }
-        let installed = (!inst_rows.is_empty()).then(|| {
-            div()
-                .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .child(div().text_size(px(t::TYPE_CONTROL)).font_weight(FontWeight::SEMIBOLD).child(SharedString::from(format!("已安装 {}", inst_rows.len()))))
-                .child(div().flex().flex_col().rounded(px(t::RADIUS_XL)).border_1().border_color(c::border()).children(inst_rows))
-        });
 
         // 应用卡片:按窗口宽度算列数,每行等分,最后一行用空块补齐
         let cols = (((self.dock.view_w - 56.0) / 300.0).floor() as usize).clamp(1, 4);
@@ -259,29 +431,91 @@ impl Home {
         } else {
             div().flex_shrink_0().flex().flex_col().gap(px(12.0)).children(rows).into_any_element()
         };
-        div().flex_1().flex().flex_col().gap(px(14.0)).child(row1).child(row2).children(installed).child(list).into_any_element()
+        div().flex_1().flex().flex_col().gap(px(14.0)).child(row1).child(row2).child(list).into_any_element()
     }
 
+    /// 已安装列表的一行:图标、应用名+容器名、版本(有更新时 `当前 → 新版本`)、状态、端口、操作
     fn store_instance_row(&self, app: &AppDef, ct: &crate::docker::Container, k: usize, cx: &mut Context<Self>) -> Div {
         let (name, app_id, project) = (ct.name.clone(), app.id.clone(), ct.project.clone().unwrap_or_else(|| ct.name.clone()));
-        let (n2, a2, p2, n3, a3, p3) = (name.clone(), app_id.clone(), project.clone(), project.clone(), app_id.clone(), project.clone());
-        let _ = (&n3, &a3, &p3);
-        let ver = ct.image.rsplit(':').next().unwrap_or("").to_string();
-        let link = |id: &'static str, text: &'static str, color: Rgba| div().id((id, k)).h(px(24.0)).px(px(8.0)).flex().items_center().rounded(px(t::RADIUS_SM)).cursor_pointer().text_size(px(t::TYPE_CAPTION)).text_color(color).hover(|s| s.bg(c::field_hover())).child(text);
+        let (n2, a2, p2) = (name.clone(), app_id.clone(), project.clone());
+        let ver = ct.image.rsplit_once(':').map(|x| x.1.to_string()).unwrap_or_else(|| "latest".into());
+        let status = self.dock.api.st.upd.get(&ct.name).and_then(|u| u.status.clone());
+        let upgradable = matches!(status, Some(Status::NewTag(_) | Status::NewImage));
+        let ic = match app.icon.as_str() {
+            "database" => IconName::Database,
+            "globe" => IconName::Globe,
+            "activity" => IconName::Activity,
+            "hard-drive" => IconName::HardDrive,
+            "notebook-pen" => IconName::NotebookPen,
+            _ => IconName::Package,
+        };
+        let mono = |s: String, color: Rgba| div().truncate().font_family(MONO).text_size(px(t::TYPE_CAPTION)).text_color(color).child(SharedString::from(s));
+        let ver_cell = match &status {
+            Some(Status::NewTag(n)) => div().flex().flex_row().items_center().gap(px(6.0)).child(mono(ver, c::muted())).child(icon(IconName::ArrowRight, 12.0, c::accent())).child(mono(n.clone(), c::accent())),
+            Some(Status::NewImage) => div().flex().flex_row().items_center().gap(px(6.0)).child(mono(ver, c::muted())).child(icon(IconName::ArrowRight, 12.0, c::accent())).child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::accent()).child("新镜像")),
+            _ => div().flex().flex_row().items_center().child(mono(ver, c::muted())),
+        };
+        // 这个实例正在跑升级/卸载任务:对应按钮显示加载动画
+        let job = self.dock.api.job_of(&ct.name);
+        let (up_busy, un_busy) = (job.is_some_and(|t| t.starts_with("升级")), job.is_some_and(|t| t.starts_with("卸载")));
+        let (st_text, st_color) = if ct.running() { ("运行中", c::online()) } else { ("已停止", c::muted()) };
+        let port = ct.ports.first().and_then(|p| p.split("->").next()).map(str::to_string).unwrap_or_default();
+        let up_btn = div()
+            .id(("st-up", k))
+            .h(px(28.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .rounded(px(t::RADIUS_MD))
+            .cursor_pointer()
+            .text_size(px(t::TYPE_CONTROL))
+            .when(upgradable, |d| d.bg(c::accent()).text_color(c::on_accent()).font_weight(FontWeight::SEMIBOLD).hover(|s| s.opacity(0.88)))
+            .when(!upgradable, |d| d.text_color(c::secondary()).hover(|s| s.bg(c::field_hover()).text_color(c::text())))
+            .gap(px(6.0))
+            .when(up_busy, |d| d.child(crate::ui::dot_spinner(("st-up-spin", k), if upgradable { c::on_accent() } else { c::muted() })))
+            .child(if upgradable { "升级" } else { "更改版本" })
+            .when(!(up_busy || un_busy), |d| d.on_click(cx.listener(move |this, _, window, cx| this.store_upgrade_open(&n2, &a2, &p2, window, cx))));
+        let un_btn = div()
+            .id(("st-un", k))
+            .h(px(28.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .rounded(px(t::RADIUS_MD))
+            .cursor_pointer()
+            .text_size(px(t::TYPE_CONTROL))
+            .text_color(c::danger())
+            .hover(|s| s.bg(c::field_hover()))
+            .gap(px(6.0))
+            .when(un_busy, |d| d.child(crate::ui::dot_spinner(("st-un-spin", k), c::danger())))
+            .child("卸载")
+            .when(!(up_busy || un_busy), |d| d.on_click(cx.listener(move |this, _, window, cx| this.store_uninstall_open(&project, &app_id, &project.clone(), window, cx))));
         div()
-            .h(px(40.0))
+            .flex_shrink_0()
+            .h(px(64.0))
             .px(px(14.0))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(10.0))
-            .when(k > 0, |d| d.border_t_1().border_color(c::border()))
-            .child(div().size(px(6.0)).flex_shrink_0().rounded_full().bg(if ct.running() { c::online() } else { c::ghost() }))
-            .child(div().w(px(200.0)).flex_shrink_0().truncate().font_family(MONO).text_size(px(t::TYPE_CONTROL)).child(SharedString::from(name)))
-            .child(div().w(px(120.0)).flex_shrink_0().truncate().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(SharedString::from(app.name.clone())))
-            .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(SharedString::from(ver)))
-            .child(link("st-up", "升级", c::secondary()).on_click(cx.listener(move |this, _, window, cx| this.store_upgrade_open(&n2, &a2, &p2, window, cx))))
-            .child(link("st-un", "卸载", c::danger()).on_click(cx.listener(move |this, _, window, cx| this.store_uninstall_open(&project, &app_id, &project.clone(), window, cx))))
+            .gap(px(14.0))
+            .rounded(px(t::RADIUS_XL))
+            .border_1()
+            .border_color(if upgradable { c::accent().opacity(0.45) } else { c::border() })
+            .child(div().size(px(36.0)).flex_shrink_0().flex().items_center().justify_center().rounded(px(t::RADIUS_MD)).bg(c::field()).border_1().border_color(c::field_border()).child(icon(ic, 18.0, c::secondary())))
+            .child(
+                div()
+                    .w(px(240.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .child(div().truncate().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).child(SharedString::from(app.name.clone())))
+                    .child(mono(name, c::ghost())),
+            )
+            .child(div().flex_1().min_w(px(180.0)).child(ver_cell))
+            .child(div().w(px(84.0)).flex_shrink_0().flex().flex_row().items_center().gap(px(6.0)).child(div().size(px(6.0)).rounded_full().bg(st_color)).child(div().text_size(px(t::TYPE_CAPTION)).text_color(st_color).child(st_text)))
+            .child(div().w(px(140.0)).flex_shrink_0().child(mono(port, c::ghost())))
+            .child(div().flex().flex_row().items_center().gap(px(6.0)).child(up_btn).child(un_btn))
     }
 
     fn store_card(&self, a: &AppDef, ai: usize, cat: &appstore::Catalog, cx: &mut Context<Self>) -> Stateful<Div> {

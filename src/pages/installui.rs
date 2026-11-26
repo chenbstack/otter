@@ -83,6 +83,19 @@ impl AppUi {
         self.open
     }
 
+    /// 正在跑的安装/升级/卸载任务里,属于这个容器的任务标题
+    pub(super) fn job_of(&self, container: &str) -> Option<&str> {
+        self.job.as_ref().filter(|j| j.container == container && j.done.is_none()).map(|j| j.title.as_str())
+    }
+
+    /// 丢掉某应用缓存的版本列表,下次用到时重新取
+    pub(super) fn forget_tags(&mut self, id: &str) {
+        self.tags.remove(id);
+        self.tag_req.retain(|x| x != id);
+        self.tag_srv_done.retain(|x| x != id);
+        self.tag_errs.remove(id);
+    }
+
     pub(super) fn tags_of(&self, id: &str) -> Option<Vec<String>> {
         self.tags.get(id).map(|t| t.0.clone())
     }
@@ -223,13 +236,17 @@ impl Home {
         if self.dock.api.tags.contains_key(&id) || self.dock.api.tag_req.contains(&id) {
             return;
         }
-        let Some((repo, search, pages)) = appstore::hub_pages(app) else {
+        let Some((repo, search, mut pages)) = appstore::hub_pages(app) else {
             if let Some(l) = appstore::select_versions(app, &[]) {
                 self.dock.api.version = appstore::default_index(app, &l);
                 self.dock.api.tags.insert(id, (l, "目录"));
             }
             return;
         };
+        // 目录里有版本列表时,Hub 只补比列表更新的:按更新时间排序,取第一页就够
+        if appstore::fallback_versions(app).is_some() {
+            pages = 1;
+        }
         self.dock.api.tag_req.push(id.clone());
         let key = format!("apptags-{id}");
         let routes = match if self.demo { None } else { self.api_docker() } {
@@ -243,7 +260,7 @@ impl Home {
         let app = app.clone();
         cx.spawn(async move |this, cx| {
             let r = cx.background_executor().spawn(async move { appstore::fetch_hub_local(&repo, search.as_deref(), pages) }).await;
-            let _ = this.update(cx, |h, cx| match r.ok().and_then(|raw| appstore::select_versions(&app, &appstore::parse_tag_names(&raw))) {
+            let _ = this.update(cx, |h, cx| match r.ok().and_then(|raw| appstore::select_versions(&app, &appstore::with_catalog_names(&app, appstore::parse_tag_names(&raw)))) {
                 Some(l) => h.api_tags_arrived(&app, l, "本机", cx),
                 None => h.api_tag_error(&app.id, cx),
             });
@@ -254,6 +271,7 @@ impl Home {
     fn api_tags_arrived(&mut self, app: &AppDef, list: Vec<String>, from: &'static str, cx: &mut Context<Self>) {
         let u = &mut self.dock.api;
         if !u.tags.contains_key(&app.id) {
+            appstore::save_versions(&app.id, &list);
             if u.app == app.id {
                 u.version = appstore::default_index(app, &list);
             }
@@ -268,7 +286,8 @@ impl Home {
         e.0 += 1;
         if e.0 >= e.1 && !u.tags.contains_key(id) {
             // 在线都没取到:有目录里的备份就用备份,没有再报失败
-            match appstore::current().apps.iter().find(|a| a.id == id).and_then(|a| appstore::fallback_versions(a).map(|l| (appstore::default_index(a, &l), l))) {
+            let fb = appstore::current().apps.iter().find(|a| a.id == id).and_then(|a| appstore::fallback_versions(a).and_then(|_| appstore::select_versions(a, &appstore::with_catalog_names(a, Vec::new()))).map(|l| (appstore::default_index(a, &l), l)));
+            match fb {
                 Some((idx, l)) => {
                     if u.app == id {
                         u.version = idx;
@@ -290,7 +309,7 @@ impl Home {
         }
         let Some(r) = self.api_docker().and_then(|d| d.db_take(&format!("apptags-{id}"))) else { return };
         self.dock.api.tag_srv_done.push(id.clone());
-        match r.ok().and_then(|raw| appstore::select_versions(&app, &appstore::parse_tag_names(&raw))) {
+        match r.ok().and_then(|raw| appstore::select_versions(&app, &appstore::with_catalog_names(&app, appstore::parse_tag_names(&raw)))) {
             Some(l) => self.api_tags_arrived(&app, l, "服务器", cx),
             None => self.api_tag_error(&id, cx),
         }
@@ -690,17 +709,8 @@ impl Home {
             .flex_row()
             .items_center()
             .gap(px(14.0))
-            .child(
-                div()
-                    .size(px(44.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .bg(color.opacity(0.14))
-                    .child(if running { crate::ui::dot_spinner(("api-job-spin", 0), color).into_any_element() } else { icon(ic, 20.0, color).into_any_element() }),
-            )
+            // 进行中不放图标(转圈放在当前步骤前面);结束后才显示结果图标
+            .children((!running).then(|| div().size(px(44.0)).flex_shrink_0().flex().items_center().justify_center().rounded_full().bg(color.opacity(0.14)).child(icon(ic, 20.0, color))))
             .child(
                 div()
                     .flex_1()
@@ -731,7 +741,7 @@ impl Home {
                     .flex_row()
                     .items_center()
                     .gap(px(8.0))
-                    .child(icon(sic, 13.0, sc))
+                    .child(div().size(px(13.0)).flex_shrink_0().flex().items_center().justify_center().child(if last && running { crate::ui::dot_spinner(("api-step-spin", 0), sc).into_any_element() } else { icon(sic, 13.0, sc).into_any_element() }))
                     .child(div().text_size(px(t::TYPE_CONTROL)).text_color(if last && running { c::text() } else { c::muted() }).child(SharedString::from(st)))
             })));
         }

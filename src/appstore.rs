@@ -50,6 +50,31 @@ fn load_cached() -> Option<Catalog> {
     parse_catalog(&std::fs::read_to_string(cache_path()?).ok()?).ok()
 }
 
+/// 本地缓存的目录多久没更新了(没有缓存返回 None)
+pub fn cache_age() -> Option<std::time::Duration> {
+    std::fs::metadata(cache_path()?).ok()?.modified().ok()?.elapsed().ok()
+}
+
+/// 目录超过一天没更新(或还没有缓存)
+pub fn cache_stale() -> bool {
+    cache_age().is_none_or(|a| a > std::time::Duration::from_secs(86400))
+}
+
+/// 后台线程:启动时发现超过一天没更新就立刻从仓库更新一次,之后每天一次;失败 1 小时后重试
+pub fn start_daily_refresh() {
+    std::thread::spawn(|| loop {
+        let wait = if cache_stale() {
+            match refresh_remote() {
+                Ok(()) => 86400,
+                Err(_) => 3600,
+            }
+        } else {
+            86400u64.saturating_sub(cache_age().map_or(0, |a| a.as_secs())).max(60)
+        };
+        std::thread::sleep(std::time::Duration::from_secs(wait));
+    });
+}
+
 /// 阻塞:依次请求目录地址,第一个合法的就写缓存并换成当前目录。放后台线程调用
 pub fn refresh_remote() -> Result<(), String> {
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(10))).user_agent("otter").build().into();
@@ -464,6 +489,37 @@ pub fn default_index(a: &App, list: &[String]) -> usize {
 }
 
 /// 在线取版本失败时,用目录里的备份列表;没有备份返回 None
+fn versions_path() -> Option<std::path::PathBuf> {
+    crate::store::data_dir().map(|d| d.join("versions.json"))
+}
+
+/// 本地保存的在线版本列表(上次从 Hub 取到的):{应用 id: [tag]}
+fn load_versions() -> std::collections::HashMap<String, Vec<String>> {
+    versions_path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+/// 把在线取到的版本列表存到本地,下次取不到在线的时候还能用
+pub fn save_versions(id: &str, list: &[String]) {
+    let Some(p) = versions_path() else { return };
+    let mut m = load_versions();
+    m.insert(id.to_string(), list.to_vec());
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    if let Ok(t) = serde_json::to_string(&m) {
+        let _ = std::fs::write(p, t);
+    }
+}
+
+/// 在线取到的 tag 名并上目录里的版本列表和本地保存的上次在线列表(目录和本地是基础,Hub 补更新的)
+pub fn with_catalog_names(a: &App, mut names: Vec<String>) -> Vec<String> {
+    if let Versions::Dockerhub { fallback, .. } = &a.versions {
+        names.extend(fallback.iter().cloned());
+        names.extend(load_versions().remove(&a.id).unwrap_or_default());
+    }
+    names
+}
+
 pub fn fallback_versions(a: &App) -> Option<Vec<String>> {
     match &a.versions {
         Versions::Dockerhub { fallback, .. } if !fallback.is_empty() => select_versions(a, fallback),

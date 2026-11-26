@@ -24,6 +24,7 @@ mod dbinst;
 mod dbsecret;
 mod dbinstall;
 mod dbparams;
+mod appupdate;
 mod dbconf;
 #[allow(dead_code)]
 mod appstore;
@@ -528,6 +529,9 @@ fn main() {
         gpui_kit::open_window(options, cx, move |window, cx| {
             cx.new(|cx| {
                 let mut h = Home::new(demo);
+                if !demo {
+                    appstore::start_daily_refresh();
+                }
                 h.logs_verbose = h.store.as_ref().is_some_and(|s| s.get_setting(settings_page::KEY_LOGS_VERBOSE).as_deref() == Some("on"));
                 // ⌘, 打开设置:用全局按键拦截,不依赖当前焦点在哪个元素里
                 let weak: WeakEntity<Home> = cx.entity().downgrade();
