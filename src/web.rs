@@ -557,47 +557,61 @@ impl InstallSpec {
     }
 }
 
-/// 查 Docker Hub 上 OpenResty 镜像的 tag 的地址
-pub fn tags_url() -> String {
-    "https://hub.docker.com/v2/repositories/openresty/openresty/tags?page_size=100&ordering=last_updated".to_string()
+/// 查 Docker Hub 上 OpenResty 镜像的 tag 的地址(第 `page` 页;镜像有上千个 tag,稳定版本散在前十页里,第 11 页起接口拒绝访问)
+pub fn tags_url(page: u32) -> String {
+    format!("https://hub.docker.com/v2/repositories/openresty/openresty/tags?page_size=100&name=-alpine&page={page}")
 }
 
-/// 服务器上取 tag 列表的脚本:curl,没有就 wget;输出 JSON
+const TAG_PAGES: u32 = 10;
+
+/// 服务器上取 tag 列表的脚本:十页并行请求(curl,没有就 wget),按页序输出一串 JSON
 pub fn tags_script() -> String {
-    let u = tags_url();
-    format!("(curl -fsSL --max-time 12 '{u}' || wget -qO- -T 12 '{u}') 2>&1")
+    format!(
+        "d=$(mktemp -d); for i in $(seq 1 {TAG_PAGES}); do u='https://hub.docker.com/v2/repositories/openresty/openresty/tags?page_size=100&name=-alpine&page='$i; ( curl -fsSL --max-time 15 \"$u\" || wget -qO- -T 15 \"$u\" ) > $d/$i.json 2>/dev/null & done; wait; for i in $(seq 1 {TAG_PAGES}); do cat $d/$i.json 2>/dev/null; echo; done; rm -rf $d"
+    )
 }
 
-/// 从 tags 接口响应里挑出可选版本:`alpine`(跟随最新)排第一,其后是 `1.27.1.2-alpine` 这样的固定版本,新的在前
+/// 从 tags 接口响应(一页,或多页 JSON 连在一起)里挑出可选版本:`alpine`(跟随最新)排第一,其后是 `1.27.1.2-alpine` 这样的固定版本,新的在前;带构建序号的(`1.27.1.2-3-alpine`)和 `-fat` 之类的变体不要
 pub fn parse_tags(json: &str) -> Option<Vec<String>> {
-    let v: Value = serde_json::from_str(json).ok()?;
-    let mut fixed: Vec<(Vec<u32>, String)> = v
-        .get("results")?
-        .as_array()?
-        .iter()
-        .filter_map(|r| r.get("name")?.as_str())
-        .filter_map(|n| {
-            let ver = n.strip_suffix("-alpine")?;
-            let key: Vec<u32> = ver.split('.').map(|p| p.parse().ok()).collect::<Option<_>>()?;
-            (key.len() >= 3).then(|| (key, n.to_string()))
-        })
-        .collect();
+    let mut fixed: Vec<(Vec<u32>, String)> = Vec::new();
+    for v in serde_json::Deserializer::from_str(json).into_iter::<Value>().map_while(Result::ok) {
+        let Some(rs) = v.get("results").and_then(|r| r.as_array()) else { continue };
+        for n in rs.iter().filter_map(|r| r.get("name")?.as_str()) {
+            let Some(ver) = n.strip_suffix("-alpine") else { continue };
+            let Some(key) = ver.split('.').map(|p| p.parse::<u32>().ok()).collect::<Option<Vec<u32>>>() else { continue };
+            if key.len() >= 4 {
+                fixed.push((key, n.to_string()));
+            }
+        }
+    }
     fixed.sort_by(|a, b| b.0.cmp(&a.0));
     fixed.dedup_by(|a, b| a.1 == b.1);
     if fixed.is_empty() {
         return None;
     }
     let mut list = vec!["alpine".to_string()];
-    list.extend(fixed.into_iter().take(40).map(|t| t.1));
+    list.extend(fixed.into_iter().map(|t| t.1));
     Some(list)
 }
 
-/// 本机直接请求 Docker Hub(阻塞,放后台线程调用)
+/// 本机直接请求 Docker Hub(阻塞,放后台线程调用;十页并行)
 pub fn fetch_tags_local() -> Result<Vec<String>, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(12))).user_agent("otter").build().into();
-    let mut resp = agent.get(&tags_url()).call().map_err(|e| format!("请求 Docker Hub 失败:{e}"))?;
-    let body = resp.body_mut().read_to_string().map_err(|e| format!("读取响应失败:{e}"))?;
-    parse_tags(&body).ok_or_else(|| "Docker Hub 返回的内容里没有版本".to_string())
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(15))).user_agent("otter").build().into();
+    let pages: Vec<Result<String, String>> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (1..=TAG_PAGES)
+            .map(|p| {
+                let agent = &agent;
+                sc.spawn(move || -> Result<String, String> {
+                    let mut resp = agent.get(&tags_url(p)).call().map_err(|e| format!("请求 Docker Hub 失败:{e}"))?;
+                    resp.body_mut().read_to_string().map_err(|e| format!("读取响应失败:{e}"))
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("线程异常".into()))).collect()
+    });
+    let first_err = pages.iter().find_map(|r| r.as_ref().err().cloned());
+    let all: String = pages.into_iter().filter_map(Result::ok).collect::<Vec<_>>().join("\n");
+    parse_tags(&all).ok_or_else(|| first_err.unwrap_or_else(|| "Docker Hub 返回的内容里没有版本".to_string()))
 }
 
 // ---------------------------------------------------------------- 读取状态
@@ -2320,8 +2334,10 @@ mod tests {
 
     #[test]
     fn parse_openresty_tags() {
-        let j = r#"{"results":[{"name":"alpine"},{"name":"1.27.1.1-alpine"},{"name":"1.27.1.2-alpine"},{"name":"1.27.1.2-alpine-fat"},{"name":"jammy"},{"name":"1.25.3.2-alpine"},{"name":"1.27.1.1-3-alpine"}]}"#;
-        assert_eq!(parse_tags(j).unwrap(), vec!["alpine", "1.27.1.2-alpine", "1.27.1.1-alpine", "1.25.3.2-alpine"]);
+        let j = r#"{"results":[{"name":"alpine"},{"name":"1.27.1.1-alpine"},{"name":"1.27.1.2-alpine"},{"name":"1.27.1.2-alpine-fat"},{"name":"jammy"}]}
+{"results":[{"name":"1.25.3.2-alpine"},{"name":"1.27.1.1-3-alpine"},{"name":"1.31.9.1-alpine"}]}
+403 forbidden"#;
+        assert_eq!(parse_tags(j).unwrap(), vec!["alpine", "1.31.9.1-alpine", "1.27.1.2-alpine", "1.27.1.1-alpine", "1.25.3.2-alpine"]);
         assert!(parse_tags(r#"{"results":[{"name":"jammy"}]}"#).is_none());
     }
 
@@ -2420,5 +2436,15 @@ mod tests {
         let acct = DnsAcct { id: "cf1".into(), name: "测试".into(), provider: "cloudflare".into() };
         let req = IssueReq { name: "_wildcard_.a.test".into(), domains: vec!["*.a.test".into(), "a.test".into()], ca: "letsencrypt".into(), email: "x@example.com".into(), method: "dns".into(), dns: Some(acct), staging: false, auto: true };
         w("17-issue-dns", issue_job_script(&req, &[]).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod tag_live {
+    /// 真网络:`OTTER_LIVE=1 cargo test live_tags -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_tags() {
+        println!("{:?}", super::fetch_tags_local());
     }
 }
