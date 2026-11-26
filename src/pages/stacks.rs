@@ -442,17 +442,14 @@ impl Home {
                     this.comp_open(&name, window, cx);
                 }))
             }))
-            .child(
-                div()
-                    .id(("more", ix))
-                    .size(px(28.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(t::RADIUS_SM))
-                    .hover(|st| st.bg(c::hover()))
-                    .child(icon(IconName::Ellipsis, 15.0, c::muted())),
-            )
+            .children((s.name != "独立容器").then(|| {
+                let name = s.name.clone();
+                let list: Vec<String> = s.services.iter().map(|x| x.name.clone()).collect();
+                super::syspages::tip(super::dockerpages::icon_btn(("stack-del", ix), IconName::Trash, c::danger().opacity(0.85)), "删除堆栈").on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.ask(super::dockerpages::DockAsk { title: "删除堆栈", tile: IconName::Layers, name: name.clone(), detail: "Compose 堆栈", body: "停止并删除堆栈里的所有容器和网络。数据卷和 compose 文件会保留,以后可以重新部署", label: "删除堆栈", action: crate::docker::Action::ComposeDown(name.clone()), list: list.clone() }, cx);
+                }))
+            }))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let st = &mut this.node_mut().stacks[ix];
                 st.expanded = !st.expanded;

@@ -488,6 +488,8 @@ pub enum Action {
     /// 新建堆栈:建目录、写 docker-compose.yml,再 `docker compose up -d`
     ComposeCreate { project: String, dir: String, text: String, env: String },
     ComposeUp { project: String, dir: String, files: Vec<String>, envs: Vec<String>, pull: bool },
+    /// 删除堆栈:按项目名 `docker compose -p <名> down`(停止并删除容器和网络,数据卷和 compose 文件保留)
+    ComposeDown(String),
     /// 在没装 Docker 的服务器上一键安装(只在「没有安装 Docker」页出现):安装源,以及装完是否配置 Docker Hub 镜像加速
     InstallDocker { source: crate::docker_install::Source, accel: bool },
 }
@@ -508,6 +510,7 @@ impl Action {
             // 走 `run_daemon`,不经过 docker 命令
             Action::SaveDaemon(_) | Action::SaveRestartDaemon(_) => Vec::new(),
             Action::Logout(h) => v(&["logout"], h),
+            Action::ComposeDown(p) => ["compose", "-p", p, "down", "--remove-orphans"].map(String::from).to_vec(),
             Action::ConfirmInsecure(_) | Action::Sys(_) | Action::ComposeCreate { .. } | Action::InstallDocker { .. } => Vec::new(),
             Action::ComposeUp { project, dir, files, envs, pull } => {
                 let mut v: Vec<String> = ["compose", "-p", project, "--project-directory", dir].map(String::from).to_vec();
@@ -527,7 +530,7 @@ impl Action {
     }
     pub fn target(&self) -> &str {
         match self {
-            Action::Start(n) | Action::Stop(n) | Action::Restart(n) | Action::Remove(n) | Action::Pull(n) | Action::RemoveImage(n) | Action::RemoveVolume(n) | Action::Logout(n) | Action::ConfirmInsecure(n) => n,
+            Action::Start(n) | Action::Stop(n) | Action::Restart(n) | Action::Remove(n) | Action::Pull(n) | Action::RemoveImage(n) | Action::RemoveVolume(n) | Action::Logout(n) | Action::ConfirmInsecure(n) | Action::ComposeDown(n) => n,
             Action::Sys(j) => &j.target,
             Action::ComposeUp { project, .. } | Action::ComposeCreate { project, .. } => project,
             Action::PruneImages => "未使用的镜像",
@@ -553,6 +556,7 @@ impl Action {
             Action::ConfirmInsecure(_) => "启用 HTTP 仓库",
             Action::Sys(_) => "执行",
             Action::ComposeUp { .. } => "应用",
+            Action::ComposeDown(_) => "删除堆栈",
             Action::ComposeCreate { .. } => "创建",
             Action::InstallDocker { .. } => "安装",
         }
@@ -2372,7 +2376,7 @@ async fn run_action(r: &Runner, sh: &Shared, a: Action) {
     let key = format!("{}:{}", a.verb(), a.target());
     sh.busy.lock().unwrap().insert(key.clone());
     sh.bump();
-    let timeout = if matches!(a, Action::Pull(_) | Action::PruneImages | Action::ComposeUp { .. } | Action::ComposeCreate { .. }) { Duration::from_secs(600) } else { Duration::from_secs(60) };
+    let timeout = if matches!(a, Action::Pull(_) | Action::PruneImages | Action::ComposeDown(_) | Action::ComposeUp { .. } | Action::ComposeCreate { .. }) { Duration::from_secs(600) } else { Duration::from_secs(60) };
     let res = r.docker(&a.args(), timeout).await;
     // 先把列表刷新到最新再撤掉"进行中",否则动画结束后要等下一轮轮询才看到变化
     let _ = refresh_ps(r, sh).await;
