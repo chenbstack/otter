@@ -124,10 +124,6 @@ fn keep_old<T>(slot: &mut Loaded<T>, new: Result<T, String>) {
     *slot = Some(new);
 }
 
-/// 数据库页停留时自动重读的间隔
-const RELOAD_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
-/// 离开数据库页超过这么久再回来,算重新进入
-const ENTER_GAP: std::time::Duration = std::time::Duration::from_millis(1500);
 
 const SUBS: [&str; 2] = ["数据库", "用户"];
 
@@ -442,13 +438,18 @@ impl Home {
             && m.drop_ask.is_none()
             && m.udrop_ask.is_none()
             && !m.busy
-            && m.loaded_at.is_some_and(|t| t.elapsed() >= RELOAD_EVERY)
+            && m.loaded_at.is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(crate::prefs::page_secs()))
     }
 
     /// 每次渲染前(数据库页在前台时调用):窗口在后台不读;重新获得焦点、或离开数据库页一会儿再回来,马上重读一次(类似 SWR 的 revalidate on focus)
+    /// 离开数据库页:下次进来要重读一次
+    pub(crate) fn dbm_leave(&mut self) {
+        self.dock.dbm.seen = None;
+    }
+
     pub(crate) fn dbm_entered(&mut self, active: bool) {
         let m = &mut self.dock.dbm;
-        let back = m.seen.is_none_or(|t| t.elapsed() >= ENTER_GAP);
+        let back = m.seen.is_none();
         m.active = active;
         if !active {
             m.blurred = true;

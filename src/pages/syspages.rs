@@ -65,6 +65,9 @@ pub(crate) struct SysUi {
     /// 计划、命令两个输入框
     cron_inputs: Option<Vec<Entity<InputState>>>,
     demo_filled: bool,
+    /// 窗口当前是否在前台、是否失去过焦点(只有前台才自动读;重新获得焦点时读一次)
+    active: bool,
+    blurred: bool,
     /// 已经发出「结束」的进程和发出的时间;过 1 秒还在,就把「结束」换成「强制结束」
     killed: HashMap<u32, Instant>,
     /// 刚点删除的计划任务所在行(crontab 行号),让转圈出现在这一行
@@ -95,6 +98,23 @@ fn spec(p: Page) -> Option<(Kind, &'static str)> {
         Page::Cron => Some((Kind::Cron, sysops::CRON_SCRIPT)),
         // 网站页的脚本是动态生成的(见 `sys_sync`)
         Page::Websites => Some((Kind::Web, "")),
+        _ => None,
+    }
+}
+
+/// 新结果替换旧的;新结果是错误而旧的是好数据时保留旧的(重读失败不清掉已经显示的内容)
+fn keep_old<T>(slot: &mut Option<Result<T, String>>, new: Result<T, String>) {
+    if new.is_err() && matches!(slot, Some(Ok(_))) {
+        return;
+    }
+    *slot = Some(new);
+}
+
+/// 页面停留时自动重读的间隔(进程页另有自己的间隔;网站页见 `web_reload_due`)
+fn reload_every(k: Kind) -> Option<Duration> {
+    match k {
+        Kind::Services | Kind::Cron => Some(Duration::from_secs(crate::prefs::page_secs())),
+        Kind::Storage => Some(Duration::from_secs(crate::prefs::page_secs())),
         _ => None,
     }
 }
@@ -187,7 +207,14 @@ impl Home {
     pub(crate) fn sys_due(&self) -> bool {
         // 刚过了 1 秒的「结束」:重绘一次,把按钮换成强制结束
         let force_now = self.page == Page::Processes && self.dock.sys.killed.values().any(|t| t.elapsed() >= FORCE_AFTER && t.elapsed() < FORCE_AFTER + Duration::from_millis(900));
-        force_now || self.web_due() || self.api_due() || (self.page == Page::Processes && !self.demo && !self.dock.sys.inflight.contains(&Kind::Procs) && self.dock.sys.asked.get(&Kind::Procs).is_some_and(|t| t.elapsed() >= proc_every()))
+        force_now || self.web_due() || self.api_due() || (self.page == Page::Processes && self.dock.sys.active && !self.demo && !self.dock.sys.inflight.contains(&Kind::Procs) && self.dock.sys.asked.get(&Kind::Procs).is_some_and(|t| t.elapsed() >= proc_every())) || spec(self.page).is_some_and(|(k, _)| self.sys_reload_due(k))
+    }
+
+    /// 服务、存储、计划任务页:窗口在前台、没有在编辑、上次读取已返回且过了间隔,该重读了
+    fn sys_reload_due(&self, kind: Kind) -> bool {
+        let Some(every) = reload_every(kind) else { return false };
+        let s = &self.dock.sys;
+        s.active && !self.demo && spec(self.page).is_some_and(|(k, _)| k == kind) && s.cron_form.is_none() && !s.inflight.contains(&kind) && s.asked.get(&kind).is_some_and(|t| t.elapsed() >= every)
     }
 
     /// 记下刚发出的结束操作(`dock_act` 调用)
@@ -216,15 +243,15 @@ impl Home {
         let s = &mut self.dock.sys;
         match kind {
             Kind::Procs => {
-                s.procs = Some(res.and_then(|t| sysops::parse_procs(&t)));
+                keep_old(&mut s.procs, res.and_then(|t| sysops::parse_procs(&t)));
                 // 已经结束的进程不用再记
                 if let Some(Ok(l)) = &s.procs {
                     s.killed.retain(|pid, _| l.iter().any(|p| p.pid == *pid));
                 }
             }
-            Kind::Services => s.services = Some(res.and_then(|t| sysops::parse_services(&t))),
-            Kind::Storage => s.storage = Some(res.and_then(|t| sysops::parse_storage(&t))),
-            Kind::Cron => s.cron = Some(res.map(|t| sysops::parse_cron(&t))),
+            Kind::Services => keep_old(&mut s.services, res.and_then(|t| sysops::parse_services(&t))),
+            Kind::Storage => keep_old(&mut s.storage, res.and_then(|t| sysops::parse_storage(&t))),
+            Kind::Cron => keep_old(&mut s.cron, res.map(|t| sysops::parse_cron(&t))),
             Kind::Web => self.web_loaded(res, cx),
             Kind::WebOp => self.web_op_done(res, cx),
             Kind::WebPoll => self.web_polled(res, cx),
@@ -238,6 +265,9 @@ impl Home {
     /// 每次渲染前调用(运维页在前台时):建搜索框、收新数据、按需要发起读取
     pub(crate) fn sys_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let page = self.page;
+        if page != Page::Websites {
+            self.web_page_left();
+        }
         let Some((kind, script)) = spec(page) else { return };
         if self.dock.sys.search.is_none() {
             let s = cx.new(|cx| InputState::new(window, cx).placeholder("搜索"));
@@ -276,10 +306,18 @@ impl Home {
         if kind == Kind::Web {
             self.web_entered(window.is_window_active());
         }
+        // 窗口在后台不读;重新获得焦点时重读一次(类似 SWR 的 revalidate on focus)
+        let active = window.is_window_active();
+        let refocus = active && self.dock.sys.blurred;
+        self.dock.sys.active = active;
+        self.dock.sys.blurred = !active;
+        if refocus && kind != Kind::Web {
+            self.dock.sys.asked.remove(&kind);
+        }
         let idle = !self.dock.sys.inflight.contains(&kind);
         let due = match self.dock.sys.asked.get(&kind) {
             None => true,
-            Some(t) => (kind == Kind::Procs && t.elapsed() >= proc_every()) || (kind == Kind::Web && self.web_reload_due()),
+            Some(t) => active && ((kind == Kind::Procs && t.elapsed() >= proc_every()) || (kind == Kind::Web && self.web_reload_due()) || self.sys_reload_due(kind)),
         };
         if idle && due {
             if kind == Kind::Web {

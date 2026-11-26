@@ -40,6 +40,9 @@ pub(crate) struct DockAsk {
 pub(crate) struct DockUi {
     /// 当前页读的快照(真实或 demo)
     pub snap: Arc<Snapshot>,
+    /// 窗口当前是否在前台、是否失去过焦点:只有前台才轮询服务器,重新获得焦点时刷新一次
+    win_active: bool,
+    win_blurred: bool,
     /// 调试:截图时等数据库实例出现后再打开的弹层(见 `debug_dbm`)
     pub dbm_dbg: Option<String>,
     search: Option<Entity<InputState>>,
@@ -85,7 +88,7 @@ const PENDING_MAX_SECS: u64 = 60;
 
 impl DockUi {
     pub fn new() -> Self {
-        Self { snap: Arc::new(Snapshot::default()), dbm_dbg: None, search: None, pull: None, pull_open: false, pull_reg: None, pull_reg_open: false, inst_src: None, inst_src_open: false, inst_accel: false, inst_log_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), comp: Default::default(), api: Default::default(), dbm: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, pending: Vec::new(), polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
+        Self { snap: Arc::new(Snapshot::default()), win_active: false, win_blurred: false, dbm_dbg: None, search: None, pull: None, pull_open: false, pull_reg: None, pull_reg_open: false, inst_src: None, inst_src_open: false, inst_accel: false, inst_log_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), comp: Default::default(), api: Default::default(), dbm: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, pending: Vec::new(), polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
     }
 }
 
@@ -104,7 +107,7 @@ pub(crate) fn table(id: &'static str, header: Div, rows: Vec<Stateful<Div>>) -> 
         .min_h_0()
         .flex()
         .flex_col()
-        .rounded(px(t::RADIUS_XL))
+        .rounded(px(t::RADIUS_LG))
         .border_1()
         .border_color(c::dialog_border())
         .overflow_hidden()
@@ -118,7 +121,7 @@ pub(crate) fn table_flow(header: Div, rows: Vec<Stateful<Div>>) -> Div {
         .flex_shrink_0()
         .flex()
         .flex_col()
-        .rounded(px(t::RADIUS_XL))
+        .rounded(px(t::RADIUS_LG))
         .border_1()
         .border_color(c::dialog_border())
         .overflow_hidden()
@@ -232,7 +235,16 @@ impl Home {
         }
         let want_sizes = self.page == Page::Volumes;
         let Some(d) = self.workspace.tabs[a].docker.as_ref() else { return };
-        d.touch();
+        let active = window.is_window_active();
+        let refocus = active && self.dock.win_blurred;
+        self.dock.win_active = active;
+        self.dock.win_blurred = !active;
+        if active {
+            d.touch();
+        }
+        if refocus {
+            d.refresh();
+        }
         d.want_volume_sizes(want_sizes);
         self.dock.mon = d.monitor();
         self.dock.mon_err = d.monitor_error().map(Into::into);
@@ -255,6 +267,8 @@ impl Home {
         self.sys_sync(window, cx);
         if self.page == Page::Database {
             self.dbm_entered(window.is_window_active());
+        } else {
+            self.dbm_leave();
         }
         self.ct_sync(window, cx);
         self.comp_sync(window, cx);
@@ -274,7 +288,9 @@ impl Home {
         }
         if let Some(a) = self.workspace.active {
             if let Some(d) = self.workspace.tabs[a].docker.as_ref() {
-                d.touch();
+                if self.dock.win_active {
+                    d.touch();
+                }
                 redraw |= d.version() != self.dock.seen || !matches!(d.status(), docker::Status::Ready | docker::Status::Failed(_));
             }
         }
@@ -714,8 +730,8 @@ impl Home {
                     .into_any_element(),
             );
         }
-        // 网站页、数据库页自己会自动重读(进入页面、重新获得焦点、停留每 20 秒),不需要手动刷新
-        if matches!(self.page, Page::Websites | Page::Database) {
+        // 配置、镜像仓库是编辑页,保留手动刷新(自动重读会冲掉正在改的内容);其余页面都自动重读(进入页面、重新获得焦点、停留时定时),不需要手动刷新
+        if !matches!(self.page, Page::Config | Page::Registry) {
             return v;
         }
         v.push(div().id("dock-refresh").size(px(30.0)).flex().items_center().justify_center().cursor_pointer().child(icon(IconName::RefreshCw, 15.0, c::muted())).hover(|s| s.opacity(0.7)).on_click(cx.listener(|this, _, _, cx| {

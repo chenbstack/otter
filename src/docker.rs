@@ -673,7 +673,6 @@ impl Drop for Docker {
     }
 }
 
-const POLL_PS: Duration = Duration::from_secs(5);
 const POLL_STATS: Duration = Duration::from_secs(10);
 const POLL_DF: Duration = Duration::from_secs(30);
 const WATCH_TTL_MS: u64 = 4000;
@@ -2225,7 +2224,7 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
             continue;
         }
         let due = |t: &Option<Instant>, every: Duration| t.map(|t| t.elapsed() >= every).unwrap_or(true);
-        if due(&pol.last_ps, POLL_PS) {
+        if due(&pol.last_ps, Duration::from_secs(crate::prefs::page_secs())) {
             pol.last_ps = Some(Instant::now());
             if let Err(e) = refresh_ps(&runner, &sh).await {
                 *sh.problem.lock().unwrap() = Some(classify(&e));

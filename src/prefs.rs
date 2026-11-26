@@ -49,6 +49,8 @@ pub const KEY_LAST_ACTIVE: &str = "last_active_node";
 
 // 刷新频率(秒)
 num_pref!(proc_secs, set_proc_secs, PROC_SECS, KEY_PROC_SECS, "refresh_proc_secs", 3, 1, 60);
+/// 其余页面(容器、镜像、存储卷、服务、存储、计划任务、网站、数据库)自动重读的间隔
+num_pref!(page_secs, set_page_secs, PAGE_SECS, KEY_PAGE_SECS, "refresh_page_secs", 10, 5, 600);
 num_pref!(ctlog_secs, set_ctlog_secs, CTLOG_SECS, KEY_CTLOG_SECS, "refresh_ctlog_secs", 2, 1, 60);
 
 // AI 提权:是否允许在确认框里选「10/30 分钟内免确认」
@@ -70,6 +72,7 @@ pub fn restore(st: &crate::store::Store) {
     if let Some(v) = num(KEY_BELL) { set_bell(v) }
     if let Some(v) = num(KEY_PROC_SECS) { set_proc_secs(v) }
     if let Some(v) = num(KEY_CTLOG_SECS) { set_ctlog_secs(v) }
+    if let Some(v) = num(KEY_PAGE_SECS) { set_page_secs(v) }
     set_cursor_blink(flag(st, KEY_CURSOR_BLINK, false));
     set_copy_on_select(flag(st, KEY_COPY_ON_SELECT, true));
     set_right_click_paste(flag(st, KEY_RIGHT_PASTE, false));

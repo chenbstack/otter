@@ -34,10 +34,6 @@ const COL_CERT_USE: f32 = 70.0;
 const COL_CERT_ACT: f32 = 60.0;
 
 /// 后台任务的轮询间隔
-/// 网站页停留时自动重读状态的间隔
-const RELOAD_EVERY: Duration = Duration::from_secs(20);
-/// 离开网站页超过这么久再回来,算重新进入
-const ENTER_GAP: Duration = Duration::from_millis(1500);
 const POLL_EVERY: Duration = Duration::from_secs(2);
 /// 任务日志面板显示的行数
 const JOB_LINES: usize = 12;
@@ -468,12 +464,17 @@ impl Home {
     /// 自动重读状态:页面在前台、没在操作(没有抽屉、弹窗、任务、进行中的读取),距上次读取超过 `RELOAD_EVERY`
     pub(crate) fn web_reload_due(&self) -> bool {
         let w = self.web_ui();
-        w.active && w.sd.is_none() && w.dlg.is_none() && w.job.is_none() && w.busy.is_none() && !self.dock.sys.inflight.contains(&Kind::Web) && self.dock.sys.asked.get(&Kind::Web).is_some_and(|t| t.elapsed() >= RELOAD_EVERY)
+        w.active && w.sd.is_none() && w.dlg.is_none() && w.job.is_none() && w.busy.is_none() && !self.dock.sys.inflight.contains(&Kind::Web) && self.dock.sys.asked.get(&Kind::Web).is_some_and(|t| t.elapsed() >= Duration::from_secs(crate::prefs::page_secs()))
     }
 
-    /// 每次渲染前(`sys_sync` 调用):窗口在后台不读;重新获得焦点、或离开网站页一会儿再回来,马上重读一次(类似 SWR 的 revalidate on focus)
+    /// 离开网站页:下次进来要重读一次
+    pub(super) fn web_page_left(&mut self) {
+        self.web_mut().seen = None;
+    }
+
+    /// 每次渲染前(`sys_sync` 调用):窗口在后台不读;重新获得焦点、或进入网站页、窗口重新获得焦点时,马上重读一次(类似 SWR 的 revalidate on focus)
     pub(crate) fn web_entered(&mut self, active: bool) {
-        let back = self.web_ui().seen.is_none_or(|t| t.elapsed() >= ENTER_GAP);
+        let back = self.web_ui().seen.is_none();
         let w = self.web_mut();
         w.active = active;
         if !active {

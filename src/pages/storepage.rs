@@ -37,6 +37,8 @@ pub(crate) struct StoreUi {
     /// 0 没拉过 / 1 拉取中 / 2 成功 / 3 失败
     remote: u8,
     remote_err: String,
+    /// 进入商店页的时间(离开页面清掉):为空就是刚进来,要拉一次在线目录
+    seen: Option<std::time::Instant>,
     up: Option<Upgrade>,
     un: Option<Uninstall>,
     /// 正在看详情的应用 id
@@ -49,6 +51,8 @@ impl Home {
     /// 每次渲染前:商店页第一次出现时去拉在线目录;收升级需要的实例记录
     pub(crate) fn store_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.page != Page::Store {
+            // 离开了商店页:下次进来要重新拉一次在线目录
+            self.dock.api.st.seen = None;
             return;
         }
         if self.dock.api.st.q.is_none() {
@@ -61,7 +65,10 @@ impl Home {
                 self.api_demo_job(&m);
             }
         }
-        if self.dock.api.st.remote == 0 && !self.demo {
+        // 每次进入商店页拉一次在线目录(拉取中不重复拉;失败了下次进入再试)。拉取期间继续显示已有目录
+        let entered = self.dock.api.st.seen.is_none();
+        self.dock.api.st.seen = Some(std::time::Instant::now());
+        if entered && self.dock.api.st.remote != 1 && !self.demo {
             self.store_refresh(cx);
         }
         if let Some(u) = self.dock.api.st.up.as_ref().filter(|u| u.rec.is_none() && u.err.is_none()) {

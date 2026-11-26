@@ -474,6 +474,7 @@ impl Home {
         let cq = self.pref_switch(cx, "set-cq", p::confirm_quit, p::set_confirm_quit, p::KEY_CONFIRM_QUIT);
         let dm = self.num_select(cx, "set-dmode", IconName::SquareTerminal, &[0, 1, 2], p::default_mode(), mode_fmt, p::KEY_DEFAULT_MODE, p::set_default_mode);
         let pr = self.num_select(cx, "set-proc", IconName::RefreshCw, &[1, 3, 5, 10], p::proc_secs(), secs, p::KEY_PROC_SECS, p::set_proc_secs);
+        let pg = self.num_select(cx, "set-page", IconName::RefreshCw, &[5, 10, 30, 60], p::page_secs(), secs, p::KEY_PAGE_SECS, p::set_page_secs);
         let cl = self.num_select(cx, "set-ctlog", IconName::RefreshCw, &[1, 2, 5, 10], p::ctlog_secs(), secs, p::KEY_CTLOG_SECS, p::set_ctlog_secs);
         div()
             .flex()
@@ -491,6 +492,7 @@ impl Home {
                 "刷新频率",
                 vec![
                     Self::setting_row("进程列表", "进程页自动刷新的间隔", pr),
+                    Self::setting_row("其他页面", "容器、镜像、存储卷、服务、存储、计划任务、网站、数据库自动刷新的间隔;窗口在后台时不刷新,回到前台立刻刷新一次", pg),
                     Self::setting_row("容器日志", "容器日志面板自动刷新的间隔", cl),
                 ],
             ))
