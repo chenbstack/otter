@@ -219,7 +219,6 @@ impl Home {
 
     /// 页头:图标、标题、副标题和右侧的操作按钮。`gated` 为真(没连上、没权限等)时不显示操作
     fn dock_head(&self, gated: bool, cx: &mut Context<Self>) -> Div {
-        let hide = self.hide_charts;
         // 吸顶时按钮已经移到顶部那一条里,这里不再画(同一个按钮只画一份)
         let gated = gated || self.dock_stuck();
         div()
@@ -256,22 +255,13 @@ impl Home {
             .child(div().flex_1())
             .when(!gated, |d| {
                 d.gap(px(8.0))
-                    .when(self.page == Page::Stacks, |d| {
-                        d.child(
-                            button("toggle-charts", if hide { IconName::Eye } else { IconName::EyeOff }, if hide { "显示图表" } else { "隐藏图表" })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.hide_charts = !this.hide_charts;
-                                    cx.notify();
-                                })),
-                        )
-                    })
                     .children(self.dock_header_actions(cx))
             })
     }
 
     /// 页头和页签一起,堆栈页放在虚拟列表的第一项里跟着滚动
     fn dock_head_block(&self, cx: &mut Context<Self>) -> Div {
-        div().h(px(STACK_HEAD_H)).flex().flex_col().child(self.dock_head(false, cx)).child(self.docker_tabs_slot(cx))
+        div().w_full().h(px(STACK_HEAD_H)).flex().flex_col().child(self.dock_head(false, cx)).child(self.docker_tabs_slot(cx))
     }
 
     /// 页签在页头下面的位置:吸顶时真正的页签画在顶部,这里留一个同样高的空位,内容不跳
