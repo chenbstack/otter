@@ -16,7 +16,6 @@ use crate::sysops::Kind;
 use crate::web::{self, CertEntry, DnsAcct, IssueReq, SiteEntry, SiteKind, SiteSpec, WebState};
 
 // 尺寸 token(见 docs/design/tokens.md「网站页」)
-const DLG_W_SELF: f32 = 520.0;
 const DLG_W_DNS: f32 = 540.0;
 const DLG_W_SITE: f32 = 560.0;
 const DLG_W_SITE_FORM: f32 = 540.0;
@@ -45,9 +44,9 @@ pub(crate) enum Dlg {
     /// 直接编辑配置原文
     Raw(String),
     CertUpload,
-    CertSelf,
     Issue,
     Dns,
+    Acme,
     Logs,
 }
 
@@ -76,6 +75,7 @@ enum Pending {
     DeleteSite(String),
     DeleteCert(String),
     DeleteDns(String),
+    DeleteAcme(String),
     Adopt(web::Target),
     Unadopt,
 }
@@ -141,6 +141,10 @@ pub(crate) struct WebUi {
     s_enabled: bool,
     // 申请证书表单
     i_zero: bool,
+    /// 弹窗栈:从一个弹窗里打开另一个时,把下层的弹窗和输入框压在这里,上层关掉后恢复(支持多层)
+    stack: Vec<(Dlg, Vec<Entity<InputState>>, Vec<Entity<TextareaState>>)>,
+    /// 申请证书选中的证书账号(ACME 账号 id)
+    i_ca: Option<String>,
     i_dns: bool,
     i_acct: Option<String>,
     i_staging: bool,
@@ -374,7 +378,7 @@ impl Home {
                 }
                 OpTag::Save | OpTag::Plain => {
                     if tag == OpTag::Save {
-                        self.web_mut().dlg = None;
+                        self.web_leave();
                     }
                     let msg = if out.is_empty() { format!("已完成:{label}") } else { format!("{label}:{}", out.lines().next().unwrap_or("")) };
                     self.web_notice(msg, cx);
@@ -571,28 +575,83 @@ impl Home {
         cx.notify();
     }
 
-    fn web_open_self(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.web_inputs(&["证书名,留空则用第一个域名", "example.com 或 192.168.1.1.nip.io", "365"], &[], window, cx);
-        self.web_set(2, "365", window, cx);
-        self.web_mut().dlg = Some(Dlg::CertSelf);
+    /// 拖入的证书/私钥文件:按内容分辨后填进两个文本框;证书名为空时用文件名(去扩展名)
+    fn web_drop_certs(&mut self, paths: &[std::path::PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let (mut cert, mut key, mut stem) = (None, None, None);
+        for p in paths.iter().take(4) {
+            match std::fs::metadata(p) {
+                Ok(m) if m.len() <= 256 * 1024 => {}
+                _ => continue,
+            }
+            let Ok(text) = std::fs::read_to_string(p) else { continue };
+            if text.contains("PRIVATE KEY-----") {
+                key = Some(text);
+            } else if text.contains("BEGIN CERTIFICATE-----") {
+                cert = Some(text);
+                stem = p.file_stem().map(|s| s.to_string_lossy().to_string());
+            }
+        }
+        if cert.is_none() && key.is_none() {
+            self.web_mut().err = Some("没有识别到证书或私钥(要 PEM 文本格式)".into());
+            cx.notify();
+            return;
+        }
+        self.web_mut().err = None;
+        for (i, v) in [(0, cert), (1, key)] {
+            if let (Some(v), Some(e)) = (v, self.web_ui().area.get(i).cloned()) {
+                e.update(cx, |s, cx| s.set_value(v, window, cx));
+            }
+        }
+        if let Some(st) = stem.filter(|_| self.web_val(0, cx).is_empty()) {
+            self.web_set(0, &crate::srvdata::name_of_domain(&st), window, cx);
+        }
         cx.notify();
     }
 
     fn web_open_issue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.web_inputs(&["example.com *.example.com", "证书名,留空则用第一个域名", "you@example.com,用于接收到期通知"], &[], window, cx);
+        self.web_inputs(&["example.com *.example.com", "证书名,留空则用第一个域名"], &[], window, cx);
         let w = self.web_mut();
-        (w.i_zero, w.i_dns, w.i_acct, w.i_staging, w.i_auto, w.i_warn) = (false, false, None, false, true, None);
+        w.stack.clear();
+        (w.i_zero, w.i_dns, w.i_acct, w.i_staging, w.i_auto, w.i_warn) = (false, true, None, false, true, None);
         // 默认选第一个已有的 DNS 账号
         let first = self.web_state().and_then(|s| s.dns.first().map(|d| d.id.clone()));
         self.web_mut().i_acct = first;
+        let ca = self.web_state().and_then(|s| s.acme.first().map(|a| a.id.clone()));
+        self.web_mut().i_ca = ca;
         self.web_mut().dlg = Some(Dlg::Issue);
         cx.notify();
     }
 
+    /// 关掉当前弹窗;若是从别的弹窗里打开的,回到下一层(表单内容保留)
+    fn web_leave(&mut self) {
+        let w = self.web_mut();
+        w.dlg = None;
+        if let Some((d, ins, area)) = w.stack.pop() {
+            (w.dlg, w.ins, w.area, w.err) = (Some(d), ins, area, None);
+        }
+    }
+
+    /// 在当前弹窗之上再开一层:先把当前这层压栈
+    fn web_push(&mut self) {
+        let w = self.web_mut();
+        if let Some(d) = w.dlg.clone() {
+            w.stack.push((d, w.ins.clone(), w.area.clone()));
+        }
+    }
+
     fn web_open_dns(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.web_push();
         self.web_inputs(&["账号名,如 主域名", "", ""], &[1, 2], window, cx);
         self.web_mut().d_prov = 0;
         self.web_mut().dlg = Some(Dlg::Dns);
+        cx.notify();
+    }
+
+    fn web_open_acme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.web_push();
+        self.web_inputs(&["you@example.com,用于接收到期通知"], &[], window, cx);
+        self.web_mut().i_zero = false;
+        self.web_mut().dlg = Some(Dlg::Acme);
         cx.notify();
     }
 
@@ -613,8 +672,8 @@ impl Home {
         if w.busy.is_some() && !matches!(w.dlg, Some(Dlg::Logs)) {
             return;
         }
-        w.dlg = None;
-        w.err = None;
+        self.web_leave();
+        self.web_mut().err = None;
         cx.notify();
     }
 
@@ -674,12 +733,6 @@ impl Home {
                 let (n, cert, key) = (self.web_val(0, cx), self.web_area_val(0, cx), self.web_area_val(1, cx));
                 web::cert_upload_script(&n, &cert, &key, false).map(|s| ("上传证书", s))
             }
-            Dlg::CertSelf => {
-                let doms = web::split_domains(&self.web_val(1, cx));
-                let name = Some(self.web_val(0, cx)).filter(|n| !n.is_empty()).or_else(|| doms.first().map(|d| crate::srvdata::name_of_domain(d))).unwrap_or_default();
-                let days: u32 = self.web_val(2, cx).parse().unwrap_or(0);
-                if days == 0 { Err("有效期要填天数".into()) } else { web::cert_self_script(&name, &doms, days).map(|s| ("生成自签证书", s)) }
-            }
             Dlg::Dns => {
                 let (name, k1, k2) = (self.web_val(0, cx), self.web_val(1, cx), self.web_val(2, cx));
                 let prov = web::dns_providers()[self.web_ui().d_prov.min(2)];
@@ -688,8 +741,16 @@ impl Home {
                 } else {
                     let id = crate::srvdata::name_of_domain(&format!("{}-{}", prov.0, name));
                     let all = self.web_state().map(|s| s.dns.clone()).unwrap_or_default();
+                    self.web_mut().i_acct = Some(id.clone());
                     web::dns_account_script(&id, prov.0, &name, [&k1, &k2], &all).map(|s| ("保存 DNS 账号", s))
                 }
+            }
+            Dlg::Acme => {
+                let ca = if self.web_ui().i_zero { "zerossl" } else { "letsencrypt" };
+                let all = self.web_state().map(|s| s.acme.clone()).unwrap_or_default();
+                let email = self.web_val(0, cx);
+                self.web_mut().i_ca = Some(web::acme_acct_id(ca, &email));
+                web::acme_account_script(ca, &email, &all).map(|s| ("注册证书账号", s))
             }
             Dlg::Issue => return self.web_issue(cx),
             Dlg::Logs => return,
@@ -708,11 +769,12 @@ impl Home {
         let domains = web::split_domains(&self.web_val(0, cx));
         let name = Some(self.web_val(1, cx)).filter(|n| !n.is_empty()).or_else(|| domains.first().map(|d| crate::srvdata::name_of_domain(d))).unwrap_or_default();
         let dns = w.i_acct.as_ref().and_then(|id| self.web_state().and_then(|s| s.dns.iter().find(|d| &d.id == id).cloned()));
+        let Some(acct) = w.i_ca.as_ref().and_then(|id| self.web_state().and_then(|s| s.acme.iter().find(|a| &a.id == id).cloned())) else { return Err("先选择或添加一个证书账号".into()) };
         let req = IssueReq {
             name,
             domains,
-            ca: if w.i_zero { "zerossl" } else { "letsencrypt" }.into(),
-            email: self.web_val(2, cx),
+            ca: acct.ca.clone(),
+            email: acct.email.clone(),
             method: if w.i_dns { "dns" } else { "http" }.into(),
             dns: if w.i_dns { dns } else { None },
             staging: w.i_staging,
@@ -792,6 +854,13 @@ impl Home {
                 Err(e) => self.web_notice(e, cx),
             },
             Pending::Unadopt => self.web_run("取消接管", web::unadopt_script(), OpTag::Plain, cx),
+            Pending::DeleteAcme(id) => {
+                let (all, certs) = self.web_state().map(|s| (s.acme.clone(), s.certs.clone())).unwrap_or_default();
+                match web::acme_account_delete_script(&id, &all, &certs) {
+                    Ok(s) => self.web_run("删除证书账号", s, OpTag::Plain, cx),
+                    Err(e) => self.web_notice(e, cx),
+                }
+            }
             Pending::DeleteDns(id) => {
                 let all = self.web_state().map(|s| s.dns.clone()).unwrap_or_default();
                 match web::dns_account_delete_script(&id, &all) {
@@ -876,15 +945,26 @@ impl Home {
 
     // ---------------------------------------------------------------- 页头
 
+    /// 页头右侧:引擎控制按钮,所有页签都显示
     pub(crate) fn web_header_actions(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut v: Vec<AnyElement> = Vec::new();
         if !self.web_installed() {
-            return v;
+            return Vec::new();
         }
+        match &self.web_ui().st {
+            Some(Ok(st)) => {
+                let st = st.clone();
+                self.web_ctl_buttons(&st, cx)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// 页签行右侧:当前页签的主要操作(新建站点、证书操作)
+    fn web_tab_actions(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut v: Vec<AnyElement> = Vec::new();
         match self.web_ui().tab {
             0 => v.push(button("web-site-add", IconName::Plus, "新建站点").on_click(cx.listener(|this, _, window, cx| this.web_open_site(None, window, cx))).into_any_element()),
             1 => {
-                v.push(button("web-cert-self", IconName::FileKey, "自签").on_click(cx.listener(|this, _, window, cx| this.web_open_self(window, cx))).into_any_element());
                 v.push(button("web-cert-up", IconName::Upload, "上传").on_click(cx.listener(|this, _, window, cx| this.web_open_upload(window, cx))).into_any_element());
                 v.push(button("web-cert-issue", IconName::ShieldCheck, "申请证书").on_click(cx.listener(|this, _, window, cx| this.web_open_issue(window, cx))).into_any_element());
             }
@@ -919,10 +999,56 @@ impl Home {
                     })),
             );
         }
+        if self.web_installed() {
+            row = row.child(div().flex_1()).child(div().flex().flex_row().items_center().gap(px(8.0)).children(self.web_tab_actions(cx)));
+        }
         row
     }
 
+    /// 页头副标题:版本、运行状态(带颜色)、镜像;没装或还没读到时返回 None,用普通说明文字
+    pub(crate) fn web_header_info(&self) -> Option<Div> {
+        let Some(Ok(st)) = &self.web_ui().st else { return None };
+        if !st.installed() {
+            return None;
+        }
+        let (state, color) = match st.container.as_ref().map(|c| c.0.as_str()) {
+            Some("running") => ("运行中", c::online()),
+            Some("exited") | Some("created") => ("已停止", c::warn()),
+            Some(_) => ("异常", c::danger()),
+            None => ("未安装", c::ghost()),
+        };
+        let image = st.container.as_ref().map(|c| c.1.clone()).unwrap_or_default();
+        let dot = || div().text_color(c::ghost()).child("·");
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .text_size(px(t::TYPE_CONTROL))
+                .text_color(c::muted())
+                .child(SharedString::from(format!("OpenResty {}", st.version)))
+                .child(dot())
+                .child(div().flex().flex_row().items_center().gap(px(5.0)).text_color(color).child(div().size(px(6.0)).rounded_full().bg(color)).child(state))
+                .child(dot())
+                .child(div().font_family(MONO).text_size(px(t::TYPE_CAPTION)).child(SharedString::from(image))),
+        )
+    }
+
     pub(crate) fn web_subtitle(&self) -> String {
+        // 装好后显示版本和运行状态;没装或还没读到时显示页面说明
+        if let Some(Ok(st)) = &self.web_ui().st {
+            if st.installed() {
+                let state = match st.container.as_ref().map(|c| c.0.as_str()) {
+                    Some("running") => "运行中",
+                    Some("exited") | Some("created") => "已停止",
+                    Some(_) => "异常",
+                    None => "未安装",
+                };
+                let image = st.container.as_ref().map(|c| c.1.clone()).unwrap_or_default();
+                return format!("OpenResty {} · {} · {}", st.version, state, image);
+            }
+        }
         format!("{} 上的 OpenResty 站点、证书和自动续期", self.node().name)
     }
 
@@ -1315,25 +1441,23 @@ impl Home {
 
     // ---- 设置 ----
 
-    fn web_settings(&self, st: &WebState, cx: &mut Context<Self>) -> AnyElement {
+    /// 引擎控制按钮(重启、停止/启动、错误日志、卸载/取消接管):放在设置页签的页头右侧
+    fn web_ctl_buttons(&self, st: &WebState, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let busy = self.web_ui().busy.is_some();
+        // 页头上的图标按钮,文字放在悬停提示里;卸载是红色纯文字按钮(和数据库页的卸载一样,悬停才有底色)
         let btn = |id: &'static str, ic: IconName, label: &'static str| {
-            let b = button(id, ic, label);
+            let b = if label == "卸载" {
+                div().id(id).h(px(30.0)).px(px(12.0)).flex().items_center().rounded(px(t::RADIUS_MD)).cursor_pointer().text_size(px(t::TYPE_CONTROL)).text_color(c::danger()).hover(|s| s.bg(c::field_hover())).child(label)
+            } else {
+                super::syspages::tip(super::dockerpages::icon_btn((id, 0), ic, c::muted()).size(px(30.0)), label)
+            };
             if busy { b.opacity(0.5) } else { b }
         };
         let running = st.running();
-        let (state_text, state_color) = match st.container.as_ref().map(|c| c.0.as_str()) {
-            Some("running") => ("运行中", c::online()),
-            Some(s) if s == "exited" || s == "created" => ("已停止", c::warn()),
-            Some(_) => ("异常", c::danger()),
-            None => ("未安装", c::ghost()),
-        };
-        let mut ctl = div().flex().flex_row().flex_wrap().gap(px(8.0));
-        ctl = ctl.child(btn("web-reload", IconName::RefreshCw, "重载配置").on_click(cx.listener(|this, _, _, cx| this.web_ctl("重载配置", "reload", cx))));
-        ctl = ctl.child(btn("web-test", IconName::Check, "测试配置").on_click(cx.listener(|this, _, _, cx| this.web_ctl("测试配置", "test", cx))));
-        ctl = ctl.child(btn("web-restart", IconName::RefreshCw, "重启").on_click(cx.listener(|this, _, _, cx| this.web_ctl("重启 OpenResty", "restart", cx))));
+        let mut ctl: Vec<AnyElement> = Vec::new();
+        ctl.push(btn("web-restart", IconName::RotateCcw, "重启").on_click(cx.listener(|this, _, _, cx| this.web_ctl("重启 OpenResty", "restart", cx))).into_any_element());
         if running {
-            ctl = ctl.child(btn("web-stop", IconName::Square, "停止").on_click(cx.listener(|this, _, _, cx| {
+            ctl.push(btn("web-stop", IconName::Square, "停止").on_click(cx.listener(|this, _, _, cx| {
                 this.web_ask(
                     WebConfirm {
                         title: "停止 OpenResty",
@@ -1346,13 +1470,14 @@ impl Home {
                     },
                     cx,
                 );
-            })));
+            }))
+            .into_any_element());
         } else {
-            ctl = ctl.child(btn("web-start", IconName::Play, "启动").on_click(cx.listener(|this, _, _, cx| this.web_ctl("启动 OpenResty", "start", cx))));
+            ctl.push(btn("web-start", IconName::Play, "启动").on_click(cx.listener(|this, _, _, cx| this.web_ctl("启动 OpenResty", "start", cx))).into_any_element());
         }
-        ctl = ctl.child(btn("web-log-err", IconName::ScrollText, "错误日志").on_click(cx.listener(|this, _, _, cx| this.web_open_logs(None, true, cx))));
+        ctl.push(btn("web-log-err", IconName::ScrollText, "错误日志").on_click(cx.listener(|this, _, _, cx| this.web_open_logs(None, true, cx))).into_any_element());
         if st.target.adopted {
-            ctl = ctl.child(btn("web-unadopt", IconName::X, "取消接管").on_click(cx.listener(|this, _, _, cx| {
+            ctl.push(btn("web-unadopt", IconName::X, "取消接管").on_click(cx.listener(|this, _, _, cx| {
                 this.web_ask(
                     WebConfirm {
                         title: "取消接管",
@@ -1365,9 +1490,10 @@ impl Home {
                     },
                     cx,
                 );
-            })));
+            }))
+            .into_any_element());
         } else {
-        ctl = ctl.child(btn("web-uninstall", IconName::Trash, "卸载").on_click(cx.listener(|this, _, _, cx| {
+        ctl.push(btn("web-uninstall", IconName::Trash, "卸载").on_click(cx.listener(|this, _, _, cx| {
             this.web_ask(
                 WebConfirm {
                     title: "卸载 OpenResty",
@@ -1380,13 +1506,30 @@ impl Home {
                 },
                 cx,
             );
-        })));
+        }))
+            .into_any_element());
         }
+        ctl
+    }
+
+
+    fn web_settings(&self, st: &WebState, cx: &mut Context<Self>) -> AnyElement {
+        let busy = self.web_ui().busy.is_some();
+        let btn = |id: &'static str, ic: IconName, label: &'static str| {
+            let b = button(id, ic, label);
+            if busy { b.opacity(0.5) } else { b }
+        };
+        let (state_text, state_color) = match st.container.as_ref().map(|c| c.0.as_str()) {
+            Some("running") => ("运行中", c::online()),
+            Some(s) if s == "exited" || s == "created" => ("已停止", c::warn()),
+            Some(_) => ("异常", c::danger()),
+            None => ("未安装", c::ghost()),
+        };
         let engine = card(
             "OpenResty",
             format!("{} · {}", st.version, st.container.as_ref().map(|c| c.1.clone()).unwrap_or_default()),
             Some(pill(state_text, state_color, state_color.opacity(0.14)).into_any_element()),
-            ctl,
+            div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(SharedString::from(format!("站点配置目录 {}", st.target.conf))),
         );
 
         // 自动续期
@@ -1472,10 +1615,41 @@ impl Home {
         if st.acme.is_empty() {
             ac = ac.child(small("第一次申请证书时自动创建", c::ghost()));
         }
-        for a in &st.acme {
-            ac = ac.child(div().flex().flex_row().gap(px(10.0)).items_center().h(px(28.0)).child(icon(IconName::ShieldCheck, 14.0, c::ghost())).child(div().text_size(px(t::TYPE_CONTROL)).child(SharedString::from(a.email.clone()))).child(pill(if a.ca == "zerossl" { "ZeroSSL" } else { "Let's Encrypt" }, c::secondary(), c::idle_soft())));
+        for (i, a) in st.acme.iter().enumerate() {
+            let (id, em) = (a.id.clone(), a.email.clone());
+            ac = ac.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(10.0))
+                    .items_center()
+                    .h(px(34.0))
+                    .child(icon(IconName::ShieldCheck, 14.0, c::ghost()))
+                    .child(div().text_size(px(t::TYPE_CONTROL)).font_weight(FontWeight::MEDIUM).child(SharedString::from(a.email.clone())))
+                    .child(pill(if a.ca == "zerossl" { "ZeroSSL" } else { "Let's Encrypt" }, c::secondary(), c::idle_soft()))
+                    .child(div().flex_1())
+                    .child(tip(icon_btn(("wa-del", i), IconName::Trash, c::danger()), "删除").on_click(cx.listener(move |this, _, _, cx| {
+                        this.web_ask(
+                            WebConfirm {
+                                title: "删除证书账号",
+                                name: em.clone(),
+                                detail: "证书账号".into(),
+                                points: vec![(IconName::Trash, c::danger(), "从服务器删除账号私钥".into()), (IconName::TriangleAlert, c::warn(), "还有证书在用它时不能删除;删除后再申请要重新注册".into())],
+                                label: "删除账号",
+                                danger: true,
+                                act: Pending::DeleteAcme(id.clone()),
+                            },
+                            cx,
+                        );
+                    }))),
+            );
         }
-        let acme = card("证书账号", "ACME 账号,私钥在服务器 secrets/ 里(权限 700)", None, ac);
+        let acme = card(
+            "证书账号",
+            "ACME 账号,私钥在服务器 secrets/ 里(权限 700)",
+            Some(btn("web-acme-add", IconName::Plus, "添加").on_click(cx.listener(|this, _, window, cx| this.web_open_acme(window, cx))).into_any_element()),
+            ac,
+        );
 
         // 数据目录
         let mut dir = div().flex().flex_col().gap(px(8.0)).child(div().font_family(MONO).text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(SharedString::from(format!("{}   布局版本 {}", crate::srvdata::WEB, st.layout.unwrap_or(0)))));
@@ -1592,9 +1766,9 @@ impl Home {
                 Dlg::Site(edit) => self.web_dlg_site(edit.is_some(), cx),
                 Dlg::Raw(file) => self.web_dlg_raw(&file, cx),
                 Dlg::CertUpload => self.web_dlg_upload(cx),
-                Dlg::CertSelf => self.web_dlg_self(cx),
                 Dlg::Issue => self.web_dlg_issue(cx),
                 Dlg::Dns => self.web_dlg_dns(cx),
+                Dlg::Acme => self.web_dlg_acme(cx),
                 Dlg::Logs => self.web_dlg_logs(cx),
             };
             v.push(m.into_any_element());
@@ -1982,6 +2156,26 @@ impl Home {
         let Some(ins) = (!w.ins.is_empty()).then(|| w.ins.clone()) else { return div().id("web-dlg-empty") };
         let body = self
             .web_body()
+            .child(
+                div()
+                    .id("web-up-drop")
+                    .flex_shrink_0()
+                    .h(px(84.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(4.0))
+                    .rounded(px(t::RADIUS_MD))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(c::field_border())
+                    .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(c::accent_soft()).border_color(c::accent()))
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.web_drop_certs(paths.paths(), window, cx)))
+                    .child(icon(IconName::FileUp, 22.0, c::muted()))
+                    .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::secondary()).child("把证书和私钥文件拖到这里"))
+                    .child(div().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(".pem / .crt / .cer / .key,会按内容自动分辨;也可以直接粘贴到下面")),
+            )
             .child(field("证书名", "小写字母、数字、点和短横线", &ins[0]))
             .child(area_field("证书(含中间证书链)", "fullchain.pem 的内容", w.area.first(), 120.0))
             .child(area_field("私钥", "privkey.pem 的内容,上传后不再显示", w.area.get(1), 120.0));
@@ -1990,26 +2184,21 @@ impl Home {
         self.web_modal("web-dlg-up", DLG_W_SITE, [self.web_title("上传证书", "已有的证书文件").into_any_element(), body.into_any_element(), foot.into_any_element()], cx)
     }
 
-    fn web_dlg_self(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let w = self.web_ui();
-        let Some(ins) = (w.ins.len() >= 3).then(|| w.ins.clone()) else { return div().id("web-dlg-empty") };
-        let body = self.web_body().child(field("证书名", "留空则用第一个域名", &ins[0])).child(field("域名", "多个用空格分隔", &ins[1])).child(field("有效期(天)", "自签证书浏览器会提示不受信任,适合内网和测试", &ins[2]));
-        let err = w.err.clone().map(|e| (e, c::danger()));
-        let foot = self.web_footer(err, "生成", !self.web_val(1, cx).is_empty(), cx);
-        self.web_modal("web-dlg-self", DLG_W_SELF, [self.web_title("生成自签证书", "用 openssl 在服务器上生成").into_any_element(), body.into_any_element(), foot.into_any_element()], cx)
-    }
-
     fn web_dlg_issue(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let w = self.web_ui();
-        let Some(ins) = (w.ins.len() >= 3).then(|| w.ins.clone()) else { return div().id("web-dlg-empty") };
+        let Some(ins) = (w.ins.len() >= 2).then(|| w.ins.clone()) else { return div().id("web-dlg-empty") };
         let dns_list: Vec<DnsAcct> = self.web_state().map(|s| s.dns.clone()).unwrap_or_default();
-        let mut ca = div().flex().flex_row().gap(px(4.0));
-        for (i, (z, l)) in [(false, "Let's Encrypt"), (true, "ZeroSSL")].into_iter().enumerate() {
-            ca = ca.child(opt_chip(("wi-ca", i), l, w.i_zero == z).on_click(cx.listener(move |this, _, _, cx| {
-                this.web_mut().i_zero = z;
+        let acme_list: Vec<web::AcmeAcct> = self.web_state().map(|s| s.acme.clone()).unwrap_or_default();
+        let mut ca = div().flex().flex_row().flex_wrap().gap(px(4.0));
+        for (i, a) in acme_list.iter().enumerate() {
+            let id = a.id.clone();
+            let label = format!("{} · {}", a.email, if a.ca == "zerossl" { "ZeroSSL" } else { "Let's Encrypt" });
+            ca = ca.child(opt_chip(("wi-ca", i), label, w.i_ca.as_deref() == Some(&a.id)).on_click(cx.listener(move |this, _, _, cx| {
+                this.web_mut().i_ca = Some(id.clone());
                 cx.notify();
             })));
         }
+        ca = ca.child(opt_chip(("wi-ca", 999), "+ 添加账号", false).on_click(cx.listener(|this, _, window, cx| this.web_open_acme(window, cx))));
         let mut method = div().flex().flex_row().gap(px(4.0));
         for (i, (d, l)) in [(false, "HTTP 验证"), (true, "DNS 验证")].into_iter().enumerate() {
             method = method.child(opt_chip(("wi-m", i), l, w.i_dns == d).on_click(cx.listener(move |this, _, _, cx| {
@@ -2018,7 +2207,7 @@ impl Home {
                 cx.notify();
             })));
         }
-        let mut body = self.web_body().child(field("域名", "多个用空格分隔;泛域名写 *.example.com(只能用 DNS 验证)", &ins[0])).child(field("证书名", "留空则用第一个域名", &ins[1])).child(field("邮箱", "Let's Encrypt 用它发送到期提醒", &ins[2])).child(labeled("颁发机构", "", ca)).child(labeled("验证方式", if w.i_dns { "在 DNS 里添加一条临时记录,可申请泛域名" } else { "域名需已解析到这台服务器,且 80 端口能从外网访问" }, method));
+        let mut body = self.web_body().child(field("域名", "多个用空格分隔;泛域名写 *.example.com(只能用 DNS 验证)", &ins[0])).child(field("证书名", "留空则用第一个域名", &ins[1])).child(labeled("证书账号", if acme_list.is_empty() { "还没有证书账号,先添加一个(邮箱用于接收到期通知)" } else { "在哪个颁发机构、用哪个邮箱申请" }, ca)).child(labeled("验证方式", if w.i_dns { "在 DNS 里添加一条临时记录,可申请泛域名" } else { "域名需已解析到这台服务器,且 80 端口能从外网访问" }, method));
         if w.i_dns {
             let mut chips = div().flex().flex_row().flex_wrap().gap(px(4.0));
             for (i, d) in dns_list.iter().enumerate() {
@@ -2041,11 +2230,7 @@ impl Home {
                     *v = !*v;
                     cx.notify();
                 })))
-                .child(toggle("wi-stg", "测试环境", "先试跑,签出的证书不受信任", w.i_staging).on_click(cx.listener(|this, _, _, cx| {
-                    let v = &mut this.web_mut().i_staging;
-                    *v = !*v;
-                    cx.notify();
-                }))),
+
         );
         if let Some(ws) = w.i_warn.as_ref().filter(|v| !v.is_empty()) {
             let mut b = div().flex().flex_col().gap(px(4.0)).p(px(10.0)).rounded(px(t::RADIUS_MD)).border_1().border_color(c::warn().opacity(0.35)).bg(c::warn().opacity(0.08));
@@ -2056,7 +2241,7 @@ impl Home {
         }
         let warned = w.i_warn.as_ref().is_some_and(|v| !v.is_empty());
         let err = w.err.clone().map(|e| (e, c::danger()));
-        let can = !self.web_val(0, cx).is_empty() && !self.web_val(2, cx).is_empty();
+        let can = !self.web_val(0, cx).is_empty() && w.i_ca.is_some();
         let foot = self.web_footer(err, if warned { "仍然申请" } else { "申请" }, can, cx);
         self.web_modal("web-dlg-issue", DLG_W_ISSUE, [self.web_title("申请证书", "免费证书,通过 acme.sh 在服务器上申请").into_any_element(), body.into_any_element(), foot.into_any_element()], cx)
     }
@@ -2078,14 +2263,34 @@ impl Home {
             1 => ["", "AccessKey ID", "AccessKey Secret"],
             _ => ["", "DNSPod ID", "DNSPod Token"],
         };
-        let mut body = self.web_body().child(field("账号名", "用来在申请证书时区分", &ins[0])).child(labeled("服务商", "", chips)).child(field(keys[0], hints[1], &ins[1]));
+        let mut body = self.web_body().child(labeled("服务商", "", chips)).child(field("账号名", "用来在申请证书时区分", &ins[0])).child(field(keys[0], hints[1], &ins[1]));
         if !keys[1].is_empty() {
             body = body.child(field(keys[1], hints[2], &ins[2]));
         }
-        body = body.child(self.web_banner(IconName::Lock, c::muted(), "密钥保存在服务器 /opt/otter/websites/secrets/dns/,权限 600,只有 root 能读。这样 Otter 不开着,服务器也能自动续期;之后界面不会再显示它,要改就重新添加。"));
+        body = body.child(div().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child("密钥保存在服务器 /opt/otter/websites/secrets/dns/,权限 600,只有 root 能读。这样 Otter 不开着,服务器也能自动续期;之后界面不会再显示它,要改就重新添加。"));
         let err = w.err.clone().map(|e| (e, c::danger()));
         let foot = self.web_footer(err, "保存", !self.web_val(0, cx).is_empty() && !self.web_val(1, cx).is_empty(), cx);
         self.web_modal("web-dlg-dns", DLG_W_DNS, [self.web_title("添加 DNS 账号", "用于 DNS 验证和泛域名证书").into_any_element(), body.into_any_element(), foot.into_any_element()], cx)
+    }
+
+    fn web_dlg_acme(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let w = self.web_ui();
+        let Some(ins) = (!w.ins.is_empty()).then(|| w.ins.clone()) else { return div().id("web-dlg-empty") };
+        let mut ca = div().flex().flex_row().gap(px(4.0));
+        for (i, (z, l)) in [(false, "Let's Encrypt"), (true, "ZeroSSL")].into_iter().enumerate() {
+            ca = ca.child(opt_chip(("wa-ca", i), l, w.i_zero == z).on_click(cx.listener(move |this, _, _, cx| {
+                this.web_mut().i_zero = z;
+                cx.notify();
+            })));
+        }
+        let body = self
+            .web_body()
+            .child(labeled("颁发机构", "", ca))
+            .child(field("邮箱", "颁发机构用它发送到期提醒", &ins[0]))
+            .child(div().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child("会在服务器上向颁发机构注册账号,私钥保存在 /opt/otter/websites/secrets/acme/,只有 root 能读。申请证书时选同一个邮箱就复用它。"));
+        let err = w.err.clone().map(|e| (e, c::danger()));
+        let foot = self.web_footer(err, "注册", self.web_val(0, cx).contains('@'), cx);
+        self.web_modal("web-dlg-acme", DLG_W_DNS, [self.web_title("添加证书账号", "ACME 账号,申请证书时使用").into_any_element(), body.into_any_element(), foot.into_any_element()], cx)
     }
 
     fn web_dlg_logs(&self, cx: &mut Context<Self>) -> Stateful<Div> {

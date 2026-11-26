@@ -39,6 +39,8 @@ pub(crate) struct StoreUi {
     remote_err: String,
     up: Option<Upgrade>,
     un: Option<Uninstall>,
+    /// 正在看详情的应用 id
+    detail: Option<String>,
 }
 
 const T_REC: &str = "apprec";
@@ -53,6 +55,11 @@ impl Home {
             let q = cx.new(|cx| InputState::new(window, cx).placeholder("搜索应用"));
             cx.observe(&q, |_, _, cx| cx.notify()).detach();
             self.dock.api.st.q = Some(q);
+            // 截图用:OTTER_STORE_DETAIL=<应用 id> 直接打开详情抽屉
+            self.dock.api.st.detail = std::env::var("OTTER_STORE_DETAIL").ok();
+            if let Ok(m) = std::env::var("OTTER_SHOT_JOB") {
+                self.api_demo_job(&m);
+            }
         }
         if self.dock.api.st.remote == 0 && !self.demo {
             self.store_refresh(cx);
@@ -211,6 +218,9 @@ impl Home {
         let cols = (((self.dock.view_w - 56.0) / 300.0).floor() as usize).clamp(1, 4);
         let mut cards = Vec::new();
         for (ai, a) in cat.apps.iter().enumerate() {
+            if !a.supports(&self.dock.snap.arch) {
+                continue;
+            }
             if !sel.is_empty() && a.category != sel {
                 continue;
             }
@@ -278,6 +288,7 @@ impl Home {
         };
         let n = self.dock.snap.containers.iter().filter(|c| c.app.as_deref() == Some(a.id.as_str())).count();
         let id = a.id.clone();
+        let id2 = a.id.clone();
         let cname = cat.categories.iter().find(|c| c.id == a.category).map(|c| c.name.clone()).unwrap_or_else(|| a.category.clone());
         let pill = (n > 0).then(|| div().h(px(20.0)).px(px(8.0)).flex().items_center().gap(px(5.0)).rounded_full().bg(c::online().opacity(0.14)).text_size(px(t::TYPE_MICRO)).text_color(c::online()).child(SharedString::from(format!("已安装 {n}"))));
         div()
@@ -307,6 +318,7 @@ impl Home {
             .child(
                 div().flex().flex_row().justify_end().child(
                     div()
+                        .id(("st-inst", ai))
                         .h(px(26.0))
                         .px(px(12.0))
                         .flex()
@@ -317,16 +329,128 @@ impl Home {
                         .border_color(c::field_border())
                         .text_size(px(t::TYPE_CAPTION))
                         .text_color(c::secondary())
+                        .cursor_pointer()
+                        .hover(|s| s.bg(c::field_hover()))
                         .child(icon(IconName::Plus, 12.0, c::muted()))
-                        .child(if n == 0 { "安装" } else { "再装一个" }),
+                        .child(if n == 0 { "安装" } else { "再装一个" })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.api_open(&id2, window, cx)
+                        })),
                 ),
             )
-            .on_click(cx.listener(move |this, _, window, cx| this.api_open(&id, window, cx)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.dock.api.st.detail = Some(id.clone());
+                cx.notify();
+            }))
     }
 
     /// 升级、卸载的确认框
+    /// 应用详情抽屉:介绍、主要功能、官网和开源地址
+    fn store_detail(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let id = self.dock.api.st.detail.clone()?;
+        let cat = appstore::current();
+        let a = cat.apps.iter().find(|a| a.id == id)?.clone();
+        let cname = cat.categories.iter().find(|c| c.id == a.category).map(|c| c.name.clone()).unwrap_or_else(|| a.category.clone());
+        let ic = match a.icon.as_str() {
+            "database" => IconName::Database,
+            "globe" => IconName::Globe,
+            "activity" => IconName::Activity,
+            "hard-drive" => IconName::HardDrive,
+            "notebook-pen" => IconName::NotebookPen,
+            _ => IconName::Package,
+        };
+        let close = |this: &mut Self, cx: &mut Context<Self>| {
+            this.dock.api.st.detail = None;
+            cx.notify();
+        };
+        let tag = |t: String| div().h(px(20.0)).px(px(8.0)).flex().items_center().rounded(px(t::RADIUS_SM)).bg(c::idle_soft()).font_family(MONO).text_size(px(t::TYPE_MICRO)).text_color(c::muted()).child(SharedString::from(t));
+        let mut tags = vec![tag(cname)];
+        if !a.arch.is_empty() {
+            tags.push(tag(a.arch.join(" / ")));
+        }
+        let head = div()
+            .h(px(52.0))
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(16.0))
+            .border_b_1()
+            .border_color(c::border())
+            .child(icon(ic, 16.0, c::secondary()))
+            .child(div().flex_1().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::BOLD).child(SharedString::from(a.name.clone())))
+            .child(super::syspages::tip(super::dockerpages::icon_btn(("st-d-x", 0), IconName::X, c::muted()).on_click(cx.listener(move |this, _, _, cx| close(this, cx))), "关闭"));
+        let section = |title: &'static str| div().text_size(px(t::TYPE_CONTROL)).font_weight(FontWeight::SEMIBOLD).child(title);
+        let intro = if a.description.is_empty() { a.summary.clone() } else { a.description.clone() };
+        let mut body = div().id("st-detail-body").flex_1().min_h_0().overflow_y_scroll().p(px(16.0)).flex().flex_col().gap(px(16.0));
+        body = body.child(div().flex().flex_row().gap(px(6.0)).children(tags));
+        body = body.child(div().flex().flex_col().gap(px(6.0)).child(section("介绍")).child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).line_height(px(20.0)).child(SharedString::from(intro))));
+        if !a.features.is_empty() {
+            body = body.child(
+                div().flex().flex_col().gap(px(6.0)).child(section("主要功能")).children(a.features.iter().map(|f| {
+                    div().flex().flex_row().gap(px(8.0)).text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(div().mt(px(8.0)).size(px(4.0)).flex_shrink_0().rounded_full().bg(c::ghost())).child(div().flex_1().min_w_0().child(SharedString::from(f.clone())))
+                })),
+            );
+        }
+        let links: Vec<(&'static str, &'static str, IconName, String)> = [("st-d-web", "官网", IconName::Globe, a.website.clone()), ("st-d-repo", "开源项目", IconName::ExternalLink, a.repo.clone())].into_iter().filter_map(|(i, l, ic, u)| u.map(|u| (i, l, ic, u))).collect();
+        if !links.is_empty() {
+            body = body.child(div().flex().flex_col().gap(px(6.0)).child(section("链接")).children(links.into_iter().map(|(i, l, ic, u)| {
+                let u2 = u.clone();
+                div()
+                    .id(i)
+                    .h(px(28.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .cursor_pointer()
+                    .rounded(px(t::RADIUS_SM))
+                    .hover(|s| s.bg(c::field_hover()))
+                    .child(icon(ic, 13.0, c::muted()))
+                    .child(div().w(px(56.0)).flex_shrink_0().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(l))
+                    .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_size(px(t::TYPE_CAPTION)).text_color(c::secondary()).child(SharedString::from(u)))
+                    .on_click(move |_, _, _| crate::update::open_page(&u2))
+            })));
+        }
+        let aid = a.id.clone();
+        let n = self.dock.snap.containers.iter().filter(|c| c.app.as_deref() == Some(a.id.as_str())).count();
+        let foot = div().h(px(56.0)).flex_shrink_0().flex().flex_row().items_center().justify_end().px(px(16.0)).border_t_1().border_color(c::border()).child(
+            div()
+                .id("st-d-install")
+                .h(px(34.0))
+                .px(px(18.0))
+                .flex()
+                .items_center()
+                .rounded(px(t::RADIUS_MD))
+                .bg(c::accent())
+                .text_size(px(t::TYPE_CONTROL))
+                .text_color(c::on_accent())
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.9))
+                .child(if n == 0 { "安装" } else { "再装一个" })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.dock.api.st.detail = None;
+                    this.api_open(&aid, window, cx);
+                })),
+        );
+        Some(
+            crate::ui::drawer("st-detail", 520.0, cx.listener(move |this, _, _, cx| close(this, cx)), [head.into_any_element(), body.into_any_element(), foot.into_any_element()])
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                    if e.keystroke.key == "escape" {
+                        this.dock.api.st.detail = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
+                .into_any_element(),
+        )
+    }
+
     pub(crate) fn store_dialogs(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut v = Vec::new();
+        v.extend(self.store_detail(cx));
         if let Some(u) = &self.dock.api.st.up {
             let title = format!("升级 {}({})", u.app.name, u.container);
             let (cur, body): (String, AnyElement) = match (&u.rec, &u.err) {

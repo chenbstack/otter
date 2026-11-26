@@ -247,7 +247,7 @@ impl Home {
                     .child(div().text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).child(self.page.label()))
                     // 副标题行定高:数据库页这里是带标签的实例信息,比纯文字高,不定高的话切页签时页头会跳
                     .child(
-                        div().h(px(24.0)).flex().items_center().child(match (self.page == Page::Database && !gated).then(|| self.dbm_header_info()).flatten() {
+                        div().h(px(24.0)).flex().items_center().child(match (self.page == Page::Database && !gated).then(|| self.dbm_header_info()).flatten().or_else(|| (self.page == Page::Websites && !gated).then(|| self.web_header_info()).flatten()) {
                             Some(info) => info.into_any_element(),
                             None => div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(self.dock_subtitle()).into_any_element(),
                         }),

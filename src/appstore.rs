@@ -101,6 +101,21 @@ pub struct App {
     pub category: String,
     #[serde(default)]
     pub icon: String,
+    /// 详细介绍(详情页顶部的一段话)
+    #[serde(default)]
+    pub description: String,
+    /// 主要功能,每条一行
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// 官网
+    #[serde(default)]
+    pub website: Option<String>,
+    /// 开源项目地址
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// 支持的 CPU 架构:`amd64` / `arm64`(也认 x86_64、aarch64)。缺省或空 = 不限
+    #[serde(default)]
+    pub arch: Vec<String>,
     /// `database` / `website`:和对应页面联动
     #[serde(default)]
     pub kind: Option<String>,
@@ -137,6 +152,9 @@ pub enum Versions {
         /// Hub 接口的 `name=` 过滤(子串),用于 tag 特别多的镜像
         #[serde(default)]
         search: Option<String>,
+        /// 在线取版本失败时用的备份(tag 原名,同样按 `match` 过滤排序)。写在目录文件里,随目录更新
+        #[serde(default)]
+        fallback: Vec<String>,
     },
     Static {
         list: Vec<String>,
@@ -418,40 +436,63 @@ pub fn select_versions(a: &App, names: &[String]) -> Option<Vec<String>> {
     }
 }
 
-/// 版本列表里默认选哪一项
+/// 版本列表里默认选哪一项。默认不选浮动标签(`17`、`8.4`、`latest` 这类会随新版本移动的):
+/// - `latest`:列表里最新的具体版本(跳过 `extra` 和位数较少的浮动标签)
+/// - `pin:P`:`P` 这条线上最新的具体版本,如 `pin:8.4` → `8.4.9`
+/// - 其他:按 tag 原名精确匹配(想默认用浮动标签时这样写)
 pub fn default_index(a: &App, list: &[String]) -> usize {
     let (def, extra) = match &a.versions {
-        Versions::Dockerhub { default, extra, .. } => (default.as_str(), extra.len()),
+        Versions::Dockerhub { default, extra, .. } => (default.as_str(), extra.len().min(list.len())),
         Versions::Static { default, .. } => (default.as_str(), 0),
         Versions::None { .. } => return 0,
     };
+    // 浮动标签 = 列表里还有别的 tag 以它加「.」开头(17 之于 17.5、8.4 之于 8.4.9);具体版本取列表里第一个非浮动的(列表已按新到旧排好)
+    let floating = |i: usize| {
+        let dot = format!("{}.", list[i]);
+        list.iter().any(|t| t.starts_with(&dot))
+    };
+    let concrete = |cands: Vec<usize>| -> Option<usize> { cands.into_iter().find(|&i| !floating(i)) };
     if let Some(p) = def.strip_prefix("pin:") {
         let dot = format!("{p}.");
-        return list.iter().position(|t| t == p).or_else(|| list.iter().position(|t| t.starts_with(&dot))).unwrap_or(0);
+        let cands: Vec<usize> = (extra..list.len()).filter(|&i| list[i] == p || list[i].starts_with(&dot)).collect();
+        return concrete(cands).unwrap_or(0);
     }
     if def == "latest" {
-        return extra.min(list.len().saturating_sub(1));
+        return concrete((extra..list.len()).collect()).unwrap_or(extra.min(list.len().saturating_sub(1)));
     }
     list.iter().position(|t| t == def).unwrap_or(0)
 }
 
-/// 取不到版本列表时,表单里先放的那个 tag
+/// 在线取版本失败时,用目录里的备份列表;没有备份返回 None
+pub fn fallback_versions(a: &App) -> Option<Vec<String>> {
+    match &a.versions {
+        Versions::Dockerhub { fallback, .. } if !fallback.is_empty() => select_versions(a, fallback),
+        _ => None,
+    }
+}
+
+/// 取不到版本列表时,表单里先放的那个 tag:优先用目录里的备份列表算出的具体版本
 pub fn fallback_version(a: &App) -> String {
-    let d = match &a.versions {
+    if let Some(l) = fallback_versions(a) {
+        if let Some(t) = l.get(default_index(a, &l)) {
+            return t.clone();
+        }
+    }
+    match &a.versions {
         Versions::Dockerhub { default, extra, .. } => match default.strip_prefix("pin:") {
-            Some(p) => return p.to_string(),
-            None if default == "latest" => return extra.first().cloned().unwrap_or_else(|| "latest".into()),
+            Some(p) => p.to_string(),
+            None if default == "latest" => extra.first().cloned().unwrap_or_else(|| "latest".into()),
             None => default.clone(),
         },
         Versions::Static { default, list } => {
             if default == "latest" {
-                return list.first().cloned().unwrap_or_else(|| "latest".into());
+                list.first().cloned().unwrap_or_else(|| "latest".into())
+            } else {
+                default.clone()
             }
-            default.clone()
         }
         Versions::None { tag } => tag.clone(),
-    };
-    d
+    }
 }
 
 // ---------------------------------------------------------------- 表单值和渲染
@@ -1124,18 +1165,18 @@ mod tests {
         let a = app("postgres");
         let list = select_versions(&a, &names).unwrap();
         assert_eq!(list, ["18.0", "17.10", "17.5", "17", "16.9", "9.6.24"]);
-        assert_eq!(default_index(&a, &list), 0);
+        assert_eq!(list[default_index(&a, &list)], "18.0");
         let m = app("mysql");
         let names: Vec<String> = ["9.1", "8.4.5", "8.4", "8.0.40"].map(String::from).to_vec();
         let list = select_versions(&m, &names).unwrap();
-        assert_eq!(list[default_index(&m, &list)], "8.4");
-        assert_eq!(fallback_version(&m), "8.4");
+        assert_eq!(list[default_index(&m, &list)], "8.4.5");
+        assert!(!fallback_version(&m).ends_with("8.4"));
         // 多页 JSON 连在一起
         let raw = r#"{"results":[{"name":"1.27.1.2-alpine"},{"name":"1.27.1.2-3-alpine"},{"name":"alpine"}]} {"results":[{"name":"1.25.3.1-alpine"},{"name":"1.27.1.2-fat"}]}"#;
         let o = app("openresty");
         let list = select_versions(&o, &parse_tag_names(raw)).unwrap();
         assert_eq!(list, ["alpine", "1.27.1.2-alpine", "1.25.3.1-alpine"]);
-        assert_eq!(default_index(&o, &list), 0);
+        assert_eq!(list[default_index(&o, &list)], "1.27.1.2-alpine");
         let mn = app("minio");
         let list = select_versions(&mn, &["RELEASE.2025-01-02T03-04-05Z".into(), "RELEASE.2024-12-01T00-00-00Z".into(), "latest".into()]).unwrap();
         assert_eq!(list[0], "RELEASE.2025-01-02T03-04-05Z");
@@ -1194,5 +1235,61 @@ mod tests {
         assert!(parse_catalog(evil).unwrap_err().contains("privileged"));
         let evil2 = r#"{"schema":1,"apps":[{"id":"x","name":"X","versions":{"source":"none","tag":"1"},"profile":"shell","compose":"services:\n"}]}"#;
         assert!(parse_catalog(evil2).is_err());
+    }
+}
+
+/// 把 `uname -m` / `docker version` 里的各种写法归一成 `amd64` / `arm64` / `arm` 等
+pub fn norm_arch(a: &str) -> String {
+    match a.trim().to_lowercase().as_str() {
+        "x86_64" | "x86-64" | "amd64" => "amd64".into(),
+        "aarch64" | "arm64" | "arm64v8" => "arm64".into(),
+        "armv7l" | "armv7" | "armhf" | "arm" => "arm".into(),
+        o => o.to_string(),
+    }
+}
+
+impl App {
+    /// 这台服务器能不能装:没声明架构的应用不限;服务器架构未知时先显示
+    pub fn supports(&self, server_arch: &str) -> bool {
+        let sa = norm_arch(server_arch);
+        sa.is_empty() || self.arch.is_empty() || self.arch.iter().any(|x| norm_arch(x) == sa)
+    }
+}
+
+#[cfg(test)]
+mod arch_tests {
+    use super::*;
+    #[test]
+    fn arch_filter() {
+        let cat = current();
+        let a = cat.apps.iter().find(|a| a.id == "postgres").unwrap();
+        assert!(a.supports("") && a.supports("x86_64") && a.supports("aarch64"));
+        let mut b = a.clone();
+        b.arch = vec!["amd64".into()];
+        assert!(b.supports("x86_64") && b.supports("") && !b.supports("aarch64"));
+        assert_eq!(norm_arch("arm64v8"), "arm64");
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    #[test]
+    fn fallback_versions_from_catalog() {
+        let cat = parse_catalog(EMBEDDED).unwrap();
+        let pg = cat.apps.iter().find(|a| a.id == "postgres").unwrap();
+        let l = fallback_versions(pg).unwrap();
+        assert!(l.len() > 5 && l.iter().all(|t| regex::Regex::new(r"^\d+(\.\d+){0,2}$").unwrap().is_match(t)));
+        // 每个带备份的应用,默认版本都不是浮动标签
+        for a in cat.apps.iter().filter(|a| fallback_versions(a).is_some()) {
+            let l = fallback_versions(a).unwrap();
+            let d = fallback_version(a);
+            eprintln!("default {} = {d}", a.id);
+            assert!(!l.iter().any(|t| t.starts_with(&format!("{d}."))), "{} 默认 {d} 是浮动标签", a.id);
+            assert_ne!(d, "latest");
+        }
+        // 静态/无版本的应用没有备份
+        let none = cat.apps.iter().find(|a| matches!(a.versions, Versions::None { .. }));
+        assert!(none.is_none_or(|a| fallback_versions(a).is_none()));
     }
 }

@@ -43,6 +43,8 @@ pub(crate) struct AppJob {
 #[derive(Default)]
 pub(crate) struct AppUi {
     pub(super) open: bool,
+    /// 任务页的「详细输出」是否展开
+    log_open: bool,
     app: String,
     version: usize,
     ver_open: bool,
@@ -183,9 +185,23 @@ impl Home {
         self.api_fetch_tags(&app, cx);
     }
 
+    /// 截图用:OTTER_SHOT_JOB=run|ok|fail 直接显示任务页
+    pub(super) fn api_demo_job(&mut self, mode: &str) {
+        let now = Instant::now();
+        let (log, done): (&str, Option<i32>) = match mode {
+            "run" => ("==> 检查环境\n==> 拉取镜像\n Image openresty/openresty:1.31.9.1-alpine Pulling\n", None),
+            "fail" => ("==> 检查环境\n==> 拉取镜像\nError response from daemon: pull access denied for minio/minio, repository does not exist\n", Some(1)),
+            _ => ("==> 检查环境\n==> 拉取镜像\n Image openresty/openresty:1.31.9.1-alpine Pulled\n==> 启动容器\n Container otter-openresty Started\n==> OpenResty 已启动\n", Some(0)),
+        };
+        self.dock.api.app = "openresty".into();
+        self.dock.api.open = true;
+        self.dock.api.job = Some(AppJob { title: "安装 OpenResty".into(), app_name: "OpenResty".into(), container: "otter-openresty".into(), kind: Some("website".into()), starting: false, inflight: false, offset: 0, log: log.into(), started: now, last: now, done, secrets: vec![], notes: String::new(), url: "http://192.168.64.5:80".into(), close_on_ok: false });
+    }
+
     pub(super) fn api_close(&mut self, cx: &mut Context<Self>) {
         let u = &mut self.dock.api;
         u.open = false;
+        u.log_open = false;
         if u.job.as_ref().is_some_and(|j| j.done.is_some()) {
             u.job = None;
         }
@@ -246,7 +262,16 @@ impl Home {
         let e = u.tag_errs.entry(id.to_string()).or_insert((0, 1));
         e.0 += 1;
         if e.0 >= e.1 && !u.tags.contains_key(id) {
-            u.tag_fail.push(id.to_string());
+            // 在线都没取到:有目录里的备份就用备份,没有再报失败
+            match appstore::current().apps.iter().find(|a| a.id == id).and_then(|a| appstore::fallback_versions(a).map(|l| (appstore::default_index(a, &l), l))) {
+                Some((idx, l)) => {
+                    if u.app == id {
+                        u.version = idx;
+                    }
+                    u.tags.insert(id.to_string(), (l, "内置备份"));
+                }
+                None => u.tag_fail.push(id.to_string()),
+            }
         }
         cx.notify();
     }
@@ -588,7 +613,7 @@ impl Home {
             }
         }
         let hint = match j.done {
-            None => format!("已运行 {} 秒;任务在服务器上独立运行,关掉 Otter 也不会中断", j.started.elapsed().as_secs()),
+            None => "任务在服务器上独立运行,关掉 Otter 也不会中断".to_string(),
             _ => String::new(),
         };
         div().flex_shrink_0().flex().flex_row().items_center().gap(px(10.0)).px(px(16.0)).py(px(12.0)).border_t_1().border_color(c::border()).child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(SharedString::from(hint))).child(right)
@@ -597,61 +622,179 @@ impl Home {
     fn api_job_body(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let Some(j) = self.dock.api.job.as_ref() else { return div().id("api-job-body") };
         let running = j.done.is_none();
+        let failed = j.done.is_some_and(|c| c != 0);
         let (ic, color) = match j.done {
             None => (IconName::Clock, c::accent()),
             Some(0) => (IconName::Check, c::online()),
             Some(_) => (IconName::TriangleAlert, c::danger()),
         };
-        let step = j.log.lines().rev().find(|l| l.starts_with("==>")).map(|l| l.trim_start_matches("==>").trim().to_string());
-        let status = match j.done {
-            None => step.unwrap_or_else(|| "正在启动…".into()),
-            Some(0) => format!("{} 完成", j.title),
-            Some(-1) => "任务被中断(服务器重启或被结束)".into(),
-            Some(c) => format!("失败(退出码 {c}){}", web::explain(&j.log).map(|e| format!(":{e}")).unwrap_or_default()),
+        let steps: Vec<String> = j.log.lines().filter(|l| l.starts_with("==>")).map(|l| l.trim_start_matches("==>").trim().to_string()).collect();
+        let (headline, sub) = match j.done {
+            None => (j.title.clone(), format!("{} · 已运行 {} 秒", steps.last().cloned().unwrap_or_else(|| "正在启动…".into()), j.started.elapsed().as_secs())),
+            Some(0) => (format!("{} 完成", j.title), "已在服务器上启动".to_string()),
+            Some(-1) => (format!("{} 中断", j.title), "任务被中断(服务器重启或被结束)".into()),
+            Some(c) => (format!("{} 失败", j.title), format!("退出码 {c}{}", web::explain(&j.log).map(|e| format!(":{e}")).unwrap_or_default())),
         };
-        let lines: Vec<&str> = j.log.lines().collect();
-        let tail = lines[lines.len().saturating_sub(LOG_LINES)..].join("\n");
-        let mut col = div().id("api-job-body").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap(px(14.0)).p(px(16.0)).child(
-            div()
-                .flex_shrink_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(if running { crate::ui::dot_spinner(("api-job-spin", 0), color).into_any_element() } else { icon(ic, 16.0, color).into_any_element() })
-                .child(div().flex_1().min_w_0().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(if j.done.is_some_and(|c| c != 0) { c::danger() } else { c::text() }).child(SharedString::from(status))),
-        );
+        let hero = div()
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(14.0))
+            .child(
+                div()
+                    .size(px(44.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(color.opacity(0.14))
+                    .child(if running { crate::ui::dot_spinner(("api-job-spin", 0), color).into_any_element() } else { icon(ic, 20.0, color).into_any_element() }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(div().text_size(px(t::TYPE_TITLE)).font_weight(FontWeight::BOLD).text_color(if failed { c::danger() } else { c::text() }).child(SharedString::from(headline)))
+                    .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(SharedString::from(sub))),
+            );
+        let mut col = div().id("api-job-body").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap(px(18.0)).p(px(20.0)).child(hero);
+
+        // 进行中和失败时列出步骤:做完的打勾,当前的转圈,失败的标红
+        if !steps.is_empty() && j.done != Some(0) {
+            let n = steps.len();
+            col = col.child(div().flex_shrink_0().flex().flex_col().gap(px(6.0)).children(steps.into_iter().enumerate().map(|(i, st)| {
+                let last = i + 1 == n;
+                let (sc, sic) = if last && running {
+                    (c::accent(), IconName::Clock)
+                } else if last && failed {
+                    (c::danger(), IconName::TriangleAlert)
+                } else {
+                    (c::online(), IconName::Check)
+                };
+                div()
+                    .h(px(22.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(icon(sic, 13.0, sc))
+                    .child(div().text_size(px(t::TYPE_CONTROL)).text_color(if last && running { c::text() } else { c::muted() }).child(SharedString::from(st)))
+            })));
+        }
+
         if j.done == Some(0) {
-            let row = |k: String, v: String, id: usize, cx: &mut Context<Self>| {
+            let row = |k: String, v: String, id: usize, first: bool, cx: &mut Context<Self>| {
                 let vc = v.clone();
                 div()
-                    .flex_shrink_0()
+                    .h(px(40.0))
+                    .px(px(14.0))
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(12.0))
-                    .child(div().w(px(80.0)).text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(SharedString::from(k)))
-                    .child(div().flex_1().min_w_0().font_family(MONO).text_size(px(t::TYPE_CONTROL)).child(SharedString::from(v)))
+                    .when(!first, |d| d.border_t_1().border_color(c::border()))
+                    .child(div().w(px(72.0)).flex_shrink_0().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(SharedString::from(k)))
+                    .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_size(px(t::TYPE_CONTROL)).child(SharedString::from(v)))
                     .child(super::syspages::tip(super::dockerpages::icon_btn(("api-copy", id), IconName::Copy, c::muted()).on_click(cx.listener(move |_, _, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(vc.clone())))), "复制"))
             };
-            let mut card = div().flex_shrink_0().flex().flex_col().gap(px(8.0)).p(px(12.0)).rounded(px(t::RADIUS_MD)).border_1().border_color(c::field_border()).bg(c::field());
-            card = card.child(row("容器".into(), j.container.clone(), 0, cx));
+            let mut card = div().flex_shrink_0().flex().flex_col().rounded(px(t::RADIUS_XL)).border_1().border_color(c::border()).overflow_hidden();
+            card = card.child(row("容器".into(), j.container.clone(), 0, true, cx));
             if !j.url.is_empty() {
-                card = card.child(row("访问地址".into(), j.url.clone(), 1, cx));
+                card = card.child(row("访问地址".into(), j.url.clone(), 1, false, cx));
             }
             for (i, (k, v)) in j.secrets.iter().enumerate() {
-                card = card.child(row(k.clone(), v.clone(), 2 + i, cx));
+                card = card.child(row(k.clone(), v.clone(), 2 + i, false, cx));
             }
             col = col.child(card);
             if !j.secrets.is_empty() {
-                col = col.child(div().flex_shrink_0().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child("密码只在这里显示这一次,Otter 不会保存。请现在复制;之后可以在服务器上该堆栈目录的 .env 里找到。"));
+                col = col.child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .flex_row()
+                        .gap(px(8.0))
+                        .p(px(12.0))
+                        .rounded(px(t::RADIUS_MD))
+                        .bg(c::warn_soft())
+                        .child(icon(IconName::TriangleAlert, 14.0, c::warn()))
+                        .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child("密码只在这里显示这一次,Otter 不会保存。请现在复制;之后可以在服务器上该堆栈目录的 .env 里找到。")),
+                );
             }
             if !j.notes.is_empty() {
                 col = col.child(div().flex_shrink_0().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(SharedString::from(j.notes.clone())));
             }
+            // 下一步
+            let next = match j.kind.as_deref() {
+                Some("website") => Some((Page::Websites, "去「网站」页添加站点")),
+                Some("database") => Some((Page::Database, "去「数据库」页管理")),
+                _ => None,
+            };
+            if let Some((pg, text)) = next {
+                col = col.child(
+                    div().flex_shrink_0().flex().flex_row().child(
+                        div()
+                            .id("api-next")
+                            .h(px(30.0))
+                            .px(px(12.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .rounded(px(t::RADIUS_MD))
+                            .border_1()
+                            .border_color(c::field_border())
+                            .bg(c::raised())
+                            .text_size(px(t::TYPE_CONTROL))
+                            .text_color(c::secondary())
+                            .cursor_pointer()
+                            .hover(|s| s.bg(c::raised_hi()))
+                            .child(text)
+                            .child(icon(IconName::ChevronRight, 13.0, c::muted()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.page = pg;
+                                this.api_close(cx);
+                            })),
+                    ),
+                );
+            }
         }
-        if !tail.is_empty() {
-            col = col.child(div().flex_shrink_0().rounded(px(t::RADIUS_MD)).bg(c::field()).border_1().border_color(c::field_border()).p(px(10.0)).font_family(MONO).text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(SharedString::from(tail)));
+
+        // 详细输出:成功后默认收起,失败时默认展开
+        let lines: Vec<&str> = j.log.lines().collect();
+        if !lines.is_empty() {
+            let open = self.dock.api.log_open || failed;
+            let tail = lines[lines.len().saturating_sub(LOG_LINES)..].join("\n");
+            col = col.child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .id("api-log-toggle")
+                            .h(px(24.0))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .cursor_pointer()
+                            .text_size(px(t::TYPE_CAPTION))
+                            .text_color(c::ghost())
+                            .hover(|s| s.text_color(c::secondary()))
+                            .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 13.0, c::ghost()))
+                            .child(SharedString::from(format!("详细输出({} 行)", lines.len())))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.dock.api.log_open = !this.dock.api.log_open;
+                                cx.notify();
+                            })),
+                    )
+                    .when(open, |d| d.child(div().rounded(px(t::RADIUS_MD)).bg(c::field()).border_1().border_color(c::field_border()).p(px(10.0)).font_family(MONO).text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(SharedString::from(tail)))),
+            );
         }
         col
     }
@@ -663,20 +806,6 @@ impl Home {
         let row2 = |a: Div, b: Div| div().flex_shrink_0().flex().flex_row().gap(px(12.0)).child(a).child(b);
         let full = |d: Div| div().flex_shrink_0().flex().flex_row().child(d);
         let half = |l: &str, inner: AnyElement, mono: bool| field_col(SharedString::from(l.to_string()), None, inner, mono, false);
-
-        // 同类应用(如四种数据库)的切换
-        let same: Vec<AppDef> = app.kind.as_ref().map(|k| appstore::current().apps.iter().filter(|a| a.kind.as_ref() == Some(k) && a.category == app.category).cloned().collect()).unwrap_or_default();
-        let kinds = (same.len() > 1).then(|| {
-            div().flex().flex_row().gap(px(6.0)).children(same.iter().enumerate().map(|(i, a)| {
-                let id = a.id.clone();
-                super::syspages::chip(("api-kind", i), a.name.clone(), a.id == app.id).on_click(cx.listener(move |this, _, window, cx| {
-                    if this.dock.api.app != id {
-                        this.api_load(&id, window, cx);
-                        cx.notify();
-                    }
-                }))
-            }))
-        });
 
         // 版本
         let none_ver = matches!(app.versions, appstore::Versions::None { .. });
@@ -771,7 +900,6 @@ impl Home {
         if !app.summary.is_empty() {
             body = body.child(div().flex_shrink_0().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(SharedString::from(app.summary.clone())));
         }
-        body = body.children(kinds);
         if !none_ver {
             body = body.child(full(div().flex_1().min_w_0().flex().flex_row().child(ver_col))).child(
                 div()
@@ -970,7 +1098,7 @@ impl Home {
                             .flex_row()
                             .items_center()
                             .gap(px(12.0))
-                            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.0)).child(div().text_size(px(t::TYPE_CONTROL)).child(SharedString::from(p.label.clone()))).child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(SharedString::from(desc))))
+                            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.0)).child(div().text_size(px(t::TYPE_CONTROL)).child(SharedString::from(p.label.clone()))).children((!desc.is_empty()).then(|| div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(SharedString::from(desc)))))
                             .child(Self::pill_switch(FLAG_IDS[idx.min(7)], on).on_click(cx.listener(move |this, _, _, cx| {
                                 let e = this.dock.api.flags.entry(pid.clone()).or_insert(false);
                                 *e = !*e;

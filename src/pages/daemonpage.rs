@@ -429,7 +429,7 @@ pub(super) fn labeled(label: &'static str, hint: &'static str, body: impl IntoEl
         .gap(px(5.0))
         .child(div().text_size(px(t::TYPE_CAPTION)).font_weight(FontWeight::SEMIBOLD).text_color(c::secondary()).child(label))
         .child(body)
-        .child(div().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(hint))
+        .children((!hint.is_empty()).then(|| div().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(hint)))
 }
 
 pub(super) fn field(label: &'static str, hint: &'static str, input: &Entity<InputState>) -> Div {

@@ -1408,6 +1408,7 @@ echo OK
 }
 
 /// 生成自签证书
+#[allow(dead_code)] // 界面已去掉「自签」入口,脚本和测试暂留
 pub fn cert_self_script(name: &str, domains: &[String], days: u32) -> Result<String, String> {
     if !valid_name(name) {
         return Err("证书名只能用小写字母、数字、点、下划线和短横线".into());
@@ -1617,6 +1618,74 @@ echo "==> 证书已签发"
     .replace("@ACCTJSON@", &write_file_cmd(&format!("{}/accounts/acme.json", srvdata::WEB), &acct_json, "644"))
     .replace("@RELOAD@", &reload_cmd());
     Ok(body)
+}
+
+fn acme_index(list: &[AcmeAcct], extra: Option<&AcmeAcct>, created: &str) -> String {
+    let mut v: Vec<Value> = list.iter().filter(|a| extra.map_or(true, |e| e.id != a.id)).map(|a| json!({"id": a.id, "ca": a.ca, "email": a.email, "created": ""})).collect();
+    if let Some(e) = extra {
+        v.push(json!({"id": e.id, "ca": e.ca, "email": e.email, "created": created}));
+    }
+    serde_json::to_string_pretty(&v).unwrap_or_default() + "\n"
+}
+
+/// 单独注册 ACME 账号(不申请证书):在 acme.sh 容器里 `--register-account`,账号数据放 `secrets/acme/<id>`,索引写 `accounts/acme.json`。
+/// 失败时输出 `ERR:` 开头的行(不写索引)
+pub fn acme_account_script(ca: &str, email: &str, all: &[AcmeAcct]) -> Result<String, String> {
+    if !email.contains('@') || email.contains(char::is_whitespace) || email.contains(['\'', '"', ';', '$', '`', '\\']) {
+        return Err("请填写有效的邮箱(用于接收到期通知)".into());
+    }
+    if !matches!(ca, "letsencrypt" | "zerossl") {
+        return Err("不支持的证书颁发机构".into());
+    }
+    let id = acme_acct_id(ca, email);
+    if !valid_name(&id) {
+        return Err("邮箱里有不支持的字符".into());
+    }
+    if all.iter().any(|a| a.id == id) {
+        return Err("这个邮箱在该颁发机构下已经有账号了".into());
+    }
+    let acct = AcmeAcct { id: id.clone(), ca: ca.into(), email: email.into() };
+    let idx = acme_index(all, Some(&acct), &chrono::Utc::now().format("%Y-%m-%d").to_string());
+    Ok(format!(
+        "{}\n{}",
+        srvdata::lock_prelude(),
+        fill(
+            r#"@PRE@; A=$W/secrets/acme/@ACCT@
+umask 077; mkdir -p $A $W/accounts; chmod 700 $W/secrets $A
+docker image inspect @IMG@ >/dev/null 2>&1 || docker pull @IMG@ >/dev/null 2>&1 || { rmdir $A 2>/dev/null; echo 'ERR:拉取 acme.sh 镜像失败,请检查服务器能否访问 Docker Hub'; exit 0; }
+if out=$(docker run --rm --entrypoint acme.sh -v "$A":/acme.sh @IMG@ --register-account --server @CA@ --accountemail @EMAIL@ 2>&1); then
+@IDX@
+  echo OK
+else
+  rm -rf $A; echo "ERR:向 @CAN@ 注册失败:$(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
+fi
+"#,
+        )
+        .replace("@ACCT@", &id)
+        .replace("@IMG@", ACME_IMAGE)
+        .replace("@CA@", ca)
+        .replace("@CAN@", if ca == "zerossl" { "ZeroSSL" } else { "Let's Encrypt" })
+        .replace("@EMAIL@", &quote(email))
+        .replace("@IDX@", &write_file_cmd(&format!("{}/accounts/acme.json", srvdata::WEB), &idx, "644"))
+    ))
+}
+
+/// 删除 ACME 账号:有证书还在用它(续期要用)就拒绝
+pub fn acme_account_delete_script(id: &str, all: &[AcmeAcct], certs: &[CertEntry]) -> Result<String, String> {
+    if !valid_name(id) {
+        return Err("账号 id 不合法".into());
+    }
+    let used: Vec<&str> = certs.iter().filter(|c| c.meta.acct.as_deref() == Some(id)).map(|c| c.name.as_str()).collect();
+    if !used.is_empty() {
+        return Err(format!("证书 {} 还在用这个账号续期,先删除这些证书", used.join("、")));
+    }
+    let idx = acme_index(&all.iter().filter(|a| a.id != id).cloned().collect::<Vec<_>>(), None, "");
+    Ok(format!(
+        "{}\nrm -rf {}/secrets/acme/{id}\n{}\necho OK\n",
+        srvdata::lock_prelude(),
+        srvdata::WEB,
+        write_file_cmd(&format!("{}/accounts/acme.json", srvdata::WEB), &idx, "644")
+    ))
 }
 
 /// 申请前的预检:服务器的公网 IP、各域名解析到哪、80 端口是谁在听
@@ -2063,6 +2132,21 @@ mod tests {
     }
 
     const STATE: &str = "@@DOCKER\nok\n@@LAYOUT\n{\"layout\":1,\"by\":\"otter\"}\n@@PORTS\n80 nginx\n@@PANEL\n@@CONTAINER\nrunning openresty/openresty:alpine\n@@VERSION\nnginx version: openresty/1.27.1.1\n@@SITES\n@@F a.example.com.conf\n__SITE__\n@@F 00-default.conf\n# otter:default\nserver {}\n@@F legacy.conf\nserver { listen 81; }\n@@CERTS\n@@C a.example.com\n{\"source\":\"acme\",\"main\":\"a.example.com\",\"domains\":[\"a.example.com\"],\"acct\":\"letsencrypt-me-at-x-com\",\"auto\":true}\n@@X\nnotAfter=Mar  5 12:00:00 2027 GMT\nissuer=C = US, O = Let's Encrypt, CN = R11\nsubject=CN = a.example.com\nX509v3 Subject Alternative Name: \n    DNS:a.example.com, DNS:*.b.example.com\n@@C self1\n{\"source\":\"self\"}\n@@X\nnotAfter=Jan 10 00:00:00 2030 GMT\nissuer=CN = self1\nsubject=CN = self1\n@@ACME\n[{\"id\":\"letsencrypt-me-at-x-com\",\"ca\":\"letsencrypt\",\"email\":\"me@x.com\"}]\n@@DNS\n[{\"id\":\"cf\",\"name\":\"主域\",\"provider\":\"cloudflare\"}]\n@@CRON\n# otter:cert-renew x\n17 3 * * * root /opt/otter/websites/bin/renew.sh\n@@RENEW\n2027-01-01 03:17:01 a 续期成功\n@@HEALTH\nsecrets 755\nkey /opt/otter/websites/certs/x/privkey.pem\n@@END\n";
+
+    #[test]
+    fn acme_account_scripts() {
+        let a = AcmeAcct { id: acme_acct_id("letsencrypt", "me@x.com"), ca: "letsencrypt".into(), email: "me@x.com".into() };
+        let s = acme_account_script("zerossl", "you@y.org", &[a.clone()]).unwrap();
+        assert!(s.contains("--register-account --server zerossl"));
+        assert!(s.contains("secrets/acme/zerossl-you-at-y.org"));
+        assert!(acme_account_script("letsencrypt", "me@x.com", &[a.clone()]).is_err());
+        assert!(acme_account_script("letsencrypt", "a b@x.com", &[]).is_err());
+        assert!(acme_account_script("other", "me@x.com", &[]).is_err());
+        let used = CertEntry { name: "c".into(), meta: CertMeta { acct: Some(a.id.clone()), ..Default::default() }, ..Default::default() };
+        assert!(acme_account_delete_script(&a.id, &[a.clone()], &[used]).is_err());
+        let d = acme_account_delete_script(&a.id, &[a.clone()], &[]).unwrap();
+        assert!(d.contains("rm -rf") && d.contains(&format!("secrets/acme/{}", a.id)));
+    }
 
     #[test]
     fn state_is_parsed() {
