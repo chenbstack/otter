@@ -61,30 +61,6 @@ pub fn check_tag(installed: &str, list: &[String]) -> Status {
     }
 }
 
-/// 检查更新时只需要同一条线上的 tag:返回查询用的前缀(`8.12.0` → `8.12.`,`18.7` → `18.`),
-/// 浮动标签(不以数字开头)不需要版本列表,返回 None
-pub fn line_prefix(tag: &str) -> Option<String> {
-    let (parts, _) = split(tag)?;
-    let n = if parts.len() >= 3 { 2 } else { 1 };
-    Some(parts[..n].iter().map(|p| format!("{p}.")).collect())
-}
-
-/// 本机请求这条线上的 tag 列表(只取 2 页并行,比完整版本列表小得多);失败返回 None
-pub fn fetch_line_tags(repo: &str, prefix: &str) -> Option<Vec<String>> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(15))).user_agent("otter").build().into();
-    let res: Vec<Option<String>> = std::thread::scope(|sc| {
-        let hs: Vec<_> = (1..=2)
-            .map(|p| {
-                let (agent, url) = (&agent, crate::appstore::hub_url(repo, Some(prefix), p));
-                sc.spawn(move || agent.get(&url).call().ok().and_then(|mut r| r.body_mut().read_to_string().ok()))
-            })
-            .collect();
-        hs.into_iter().map(|h| h.join().ok().flatten()).collect()
-    });
-    let raw: Vec<String> = res.into_iter().flatten().collect();
-    (!raw.is_empty()).then(|| crate::appstore::parse_tag_names(&raw.join("\n")))
-}
-
 /// Docker Hub 上某个 tag 的地址
 pub fn hub_tag_url(repo: &str, tag: &str) -> String {
     format!("https://hub.docker.com/v2/repositories/{repo}/tags/{tag}")

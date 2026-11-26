@@ -96,6 +96,10 @@ impl AppUi {
         self.tag_errs.remove(id);
     }
 
+    pub(super) fn tags_failed(&self, id: &str) -> bool {
+        self.tag_fail.iter().any(|x| x == id) && !self.tags.contains_key(id)
+    }
+
     pub(super) fn tags_of(&self, id: &str) -> Option<Vec<String>> {
         self.tags.get(id).map(|t| t.0.clone())
     }
@@ -234,6 +238,14 @@ impl Home {
     pub(super) fn api_fetch_tags(&mut self, app: &AppDef, cx: &mut Context<Self>) {
         let id = app.id.clone();
         if self.dock.api.tags.contains_key(&id) || self.dock.api.tag_req.contains(&id) {
+            return;
+        }
+        // 统一入口:24 小时内更新过的本地版本列表直接用,不请求 Hub;过期了才往下走,用 Hub 补最新的
+        if let Some(l) = appstore::fresh_versions(app) {
+            if self.dock.api.app == id {
+                self.dock.api.version = appstore::default_index(app, &l);
+            }
+            self.dock.api.tags.insert(id, (l, "本地"));
             return;
         }
         let Some((repo, search, mut pages)) = appstore::hub_pages(app) else {
@@ -966,7 +978,11 @@ impl Home {
         };
         let ver_col = div().flex_1().min_w_0().flex().flex_col().gap(px(6.0)).child(label("版本")).child(div().h(px(34.0)).child(select));
         let src_note = match u.tags.get(&app.id) {
-            Some(t) => format!("版本列表来自{}", if t.1 == "目录" { "应用目录".to_string() } else { format!("{}的 Docker Hub", t.1) }),
+            Some(t) => format!("版本列表来自{}", match t.1 {
+                "目录" => "应用目录".to_string(),
+                "本地" => "本地(24 小时内更新过)".to_string(),
+                f => format!("{f}的 Docker Hub"),
+            }),
             None if loading => "服务器和本机都会尝试访问 Docker Hub".to_string(),
             None => "服务器和本机都没能访问 Docker Hub,请手填版本号".to_string(),
         };

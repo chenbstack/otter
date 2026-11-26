@@ -35,8 +35,6 @@ pub(crate) struct Upd {
     asked: bool,
     /// 检查时实例用的 tag;实例的 tag 变了(升级过)结果就作废
     tag: String,
-    fetching: bool,
-    tags: Option<Option<Vec<String>>>,
     local: Option<String>,
     hub: Option<Option<std::collections::HashSet<String>>>,
 }
@@ -180,41 +178,13 @@ impl Home {
             if self.dock.api.st.upd.get(&name).is_some_and(|u| u.status.is_some()) {
                 continue;
             }
-            let Some((repo, _, _)) = appstore::hub_pages(&app) else {
-                self.dock.api.st.upd.entry(name).or_default().status = Some(Status::Unknown);
-                continue;
-            };
-            {
-                let u = self.dock.api.st.upd.entry(name.clone()).or_default();
-                if u.tags.is_none() {
-                    match appupdate::line_prefix(&tag) {
-                        None => u.tags = Some(Some(Vec::new())),
-                        Some(prefix) if !u.fetching => {
-                            u.fetching = true;
-                            let n2 = name.clone();
-                            cx.spawn(async move |this, cx| {
-                                let r = cx.background_executor().spawn(async move { appupdate::fetch_line_tags(&repo, &prefix) }).await;
-                                let _ = this.update(cx, |h, cx| {
-                                    if let Some(u) = h.dock.api.st.upd.get_mut(&n2) {
-                                        u.tags = Some(r);
-                                    }
-                                    cx.notify();
-                                });
-                            })
-                            .detach();
-                            continue;
-                        }
-                        Some(_) => continue,
-                    }
-                }
-            }
-            let versions = match self.dock.api.st.upd.get(&name).and_then(|u| u.tags.clone()) {
-                Some(Some(v)) => v,
-                Some(None) => {
+            // 版本列表走统一入口(24 小时内更新过用本地的,否则用 Hub 补最新)
+            self.api_fetch_tags(&app, cx);
+            let Some(versions) = self.dock.api.tags_of(&app.id) else {
+                if self.dock.api.tags_failed(&app.id) {
                     self.dock.api.st.upd.entry(name).or_default().status = Some(Status::Unknown);
-                    continue;
                 }
-                None => continue,
+                continue;
             };
             let key = format!("stdig-{name}");
             let u = self.dock.api.st.upd.entry(name.clone()).or_default();

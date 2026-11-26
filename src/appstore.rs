@@ -488,21 +488,30 @@ pub fn default_index(a: &App, list: &[String]) -> usize {
     list.iter().position(|t| t == def).unwrap_or(0)
 }
 
-/// 在线取版本失败时,用目录里的备份列表;没有备份返回 None
 fn versions_path() -> Option<std::path::PathBuf> {
     crate::store::data_dir().map(|d| d.join("versions.json"))
 }
 
-/// 本地保存的在线版本列表(上次从 Hub 取到的):{应用 id: [tag]}
-fn load_versions() -> std::collections::HashMap<String, Vec<String>> {
+/// 本地保存的某个应用的在线版本列表:上次从 Hub 取到的时间(unix 秒)和列表
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct SavedVersions {
+    at: u64,
+    list: Vec<String>,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+fn load_versions() -> std::collections::HashMap<String, SavedVersions> {
     versions_path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
 
-/// 把在线取到的版本列表存到本地,下次取不到在线的时候还能用
+/// 把在线取到的版本列表连同时间存到本地
 pub fn save_versions(id: &str, list: &[String]) {
     let Some(p) = versions_path() else { return };
     let mut m = load_versions();
-    m.insert(id.to_string(), list.to_vec());
+    m.insert(id.to_string(), SavedVersions { at: now_secs(), list: list.to_vec() });
     if let Some(d) = p.parent() {
         let _ = std::fs::create_dir_all(d);
     }
@@ -515,11 +524,26 @@ pub fn save_versions(id: &str, list: &[String]) {
 pub fn with_catalog_names(a: &App, mut names: Vec<String>) -> Vec<String> {
     if let Versions::Dockerhub { fallback, .. } = &a.versions {
         names.extend(fallback.iter().cloned());
-        names.extend(load_versions().remove(&a.id).unwrap_or_default());
+        names.extend(load_versions().remove(&a.id).map(|s| s.list).unwrap_or_default());
     }
     names
 }
 
+/// 版本列表的统一入口(第一步):本地保存的在线列表 24 小时内更新过,就用「目录 + 本地」直接算出列表,不请求 Hub;
+/// 没有或过期返回 None,由调用方请求 Hub 补最新的(`with_catalog_names` 合并后 `save_versions`)。
+/// 不是 Docker Hub 来源的应用不走这里
+pub fn fresh_versions(a: &App) -> Option<Vec<String>> {
+    if !matches!(a.versions, Versions::Dockerhub { .. }) {
+        return None;
+    }
+    let saved = load_versions().remove(&a.id)?;
+    if now_secs().saturating_sub(saved.at) >= 86400 {
+        return None;
+    }
+    select_versions(a, &with_catalog_names(a, Vec::new()))
+}
+
+/// 在线取版本失败时,用目录里的备份列表;没有备份返回 None
 pub fn fallback_versions(a: &App) -> Option<Vec<String>> {
     match &a.versions {
         Versions::Dockerhub { fallback, .. } if !fallback.is_empty() => select_versions(a, fallback),
