@@ -156,7 +156,10 @@ pub(crate) struct WebUi {
     i_dns: bool,
     i_acct: Option<String>,
     i_staging: bool,
-    i_auto: bool,
+    /// 全局设置里「压缩」:None 不写(沿用 nginx 默认),Some(开/关)
+    g_gzip: Option<bool>,
+    /// 性能页的输入框(和 `web::global::ITEMS` 一一对应)
+    perf: Vec<Entity<InputState>>,
     i_warn: Option<Vec<String>>,
     // DNS 账号表单
     d_prov: usize,
@@ -672,7 +675,7 @@ impl Home {
         self.web_inputs(&["example.com *.example.com", "证书名,留空则用第一个域名"], &[], window, cx);
         let w = self.web_mut();
         w.stack.clear();
-        (w.i_zero, w.i_dns, w.i_acct, w.i_staging, w.i_auto, w.i_warn) = (false, true, None, false, true, None);
+        (w.i_zero, w.i_dns, w.i_acct, w.i_staging, w.i_warn) = (false, true, None, false, None);
         // 默认选第一个已有的 DNS 账号
         let first = self.web_state().and_then(|s| s.dns.first().map(|d| d.id.clone()));
         self.web_mut().i_acct = first;
@@ -687,7 +690,7 @@ impl Home {
         self.web_push();
         self.web_inputs(&["example.com *.example.com", "证书名,留空则用第一个域名"], &[], window, cx);
         let w = self.web_mut();
-        (w.i_zero, w.i_dns, w.i_acct, w.i_staging, w.i_auto, w.i_warn) = (false, true, None, false, true, None);
+        (w.i_zero, w.i_dns, w.i_acct, w.i_staging, w.i_warn) = (false, true, None, false, None);
         let first = self.web_state().and_then(|s| s.dns.first().map(|d| d.id.clone()));
         self.web_mut().i_acct = first;
         let ca = self.web_state().and_then(|s| s.acme.first().map(|a| a.id.clone()));
@@ -722,6 +725,43 @@ impl Home {
         self.web_mut().d_prov = 0;
         self.web_mut().dlg = Some(Dlg::Dns);
         cx.notify();
+    }
+
+    /// 性能页:输入框预填 nginx.conf 里现在写着的值(没写的留空,占位符是 nginx 默认值)
+    fn web_perf_init(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(conf) = self.web_state().and_then(|s| s.nginx_conf.clone()) else { return };
+        let cur = web::global::parse(&conf);
+        let ins: Vec<Entity<InputState>> = web::global::ITEMS
+            .iter()
+            .zip(&cur)
+            .map(|(it, v)| {
+                let e = cx.new(|cx| InputState::new(window, cx).placeholder(format!("默认 {}", it.default)));
+                if let Some(v) = v {
+                    e.update(cx, |s, cx| s.set_value(v.as_str(), window, cx));
+                }
+                cx.observe(&e, |_, _, cx| cx.notify()).detach();
+                e
+            })
+            .collect();
+        let w = self.web_mut();
+        w.perf = ins;
+        w.g_gzip = web::global::ITEMS.iter().position(|i| i.name == "gzip").and_then(|k| cur[k].as_deref().map(|v| v == "on"));
+        cx.notify();
+    }
+
+    /// 性能页:输入框 → 值数组(空 = 不写,用 nginx 默认)
+    fn web_perf_vals(&self, cx: &App) -> web::global::Vals {
+        web::global::ITEMS
+            .iter()
+            .enumerate()
+            .map(|(i, it)| {
+                if it.name == "gzip" {
+                    self.web_ui().g_gzip.map(|b| if b { "on" } else { "off" }.to_string())
+                } else {
+                    self.web_ui().perf.get(i).map(|e| e.read(cx).value().trim().to_string()).filter(|v| !v.is_empty())
+                }
+            })
+            .collect()
     }
 
     fn web_open_acme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -859,7 +899,7 @@ impl Home {
             method: if w.i_dns { "dns" } else { "http" }.into(),
             dns: if w.i_dns { dns } else { None },
             staging: w.i_staging,
-            auto: w.i_auto,
+            auto: true,
         };
         req.check()?;
         if self.web_state().is_some_and(|s| s.certs.iter().any(|c| c.name == req.name)) {
@@ -997,6 +1037,7 @@ impl Home {
             "panel" => w.st = Some(Ok(web::WebState { docker: "ok".into(), panel: Some("1panel".into()), ..Default::default() })),
             "certs" => w.tab = 1,
             "settings" => w.tab = 2,
+            "perf" => w.tab = 3,
             "job" => {
                 w.job = Some(JobView { title: "安装 OpenResty".into(), offset: 0, log: "==> 初始化数据目录 /opt/otter\n==> 写入配置\n==> 拉取镜像 openresty/openresty:alpine\nalpine: Pulling from openresty/openresty\n5d3e392a13a0: Pull complete\nc0a1e1f4b3d2: Downloading [=====>      ] 4.2MB/12MB\n".into(), last: Instant::now(), started: Instant::now(), done: None, cert: None })
             }
@@ -1085,7 +1126,7 @@ impl Home {
     /// 站点 / 证书 / 设置页签:版式和数据库页的页签一致,挂在页头下面
     pub(crate) fn web_tabs(&self, cx: &mut Context<Self>) -> Div {
         let mut row = div().flex().flex_row().items_center().gap(px(4.0)).pb(px(10.0)).flex_shrink_0();
-        for (i, (name, ic)) in [("站点", IconName::Globe), ("证书", IconName::ShieldCheck), ("设置", IconName::Settings)].into_iter().enumerate() {
+        for (i, (name, ic)) in [("站点", IconName::Globe), ("证书", IconName::ShieldCheck), ("设置", IconName::Settings), ("性能调整", IconName::Gauge)].into_iter().enumerate() {
             let active = self.web_ui().tab == i as u8;
             row = row.child(
                 div()
@@ -1102,8 +1143,11 @@ impl Home {
                     .when(!active, |d| d.rounded(px(t::RADIUS_MD)).border_1().border_color(gpui_kit::transparent_black()).text_color(c::muted()).hover(|s| s.bg(c::field_hover()).text_color(c::secondary())))
                     .child(icon(ic, 14.0, if active { c::accent() } else { c::ghost() }))
                     .child(name)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         this.web_mut().tab = i as u8;
+                        if i == 3 && this.web_ui().perf.is_empty() {
+                            this.web_perf_init(window, cx);
+                        }
                         cx.notify();
                     })),
             );
@@ -1221,6 +1265,7 @@ impl Home {
         match self.web_ui().tab {
             0 => col.child(self.web_sites(&st, cx)),
             1 => col.child(self.web_certs(&st, cx)),
+            3 => col.child(self.web_perf(&st, cx)),
             _ => col.child(self.web_settings(&st, cx)),
         }
         .into_any_element()
@@ -1633,6 +1678,124 @@ impl Home {
     }
 
 
+    /// 性能调整页:OpenResty 全局默认值(nginx.conf 的 http 块),站点里可以单独覆盖
+    fn web_perf(&self, st: &WebState, cx: &mut Context<Self>) -> AnyElement {
+        let note = |t: &'static str| div().flex_shrink_0().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(t);
+        if st.target.adopted || st.nginx_conf.is_none() {
+            return card("性能调整", "全局默认值", None, note("只能调整 Otter 自己安装的 OpenResty;接管的 nginx 请直接改它的配置。")).into_any_element();
+        }
+        let w = self.web_ui();
+        if w.perf.is_empty() {
+            return card("性能调整", "全局默认值", None, note("正在读取…")).into_any_element();
+        }
+        let mut cells: Vec<AnyElement> = Vec::new();
+        for (i, it) in web::global::ITEMS.iter().enumerate() {
+            if it.name == "gzip" {
+                let mut ch = div().flex().flex_row().gap(px(4.0));
+                // 没写这条指令时 nginx 实际是关;选「关」不写任何东西,保持原样
+                for (k, (v, l)) in [(Some(true), "开"), (Some(false), "关")].into_iter().enumerate() {
+                    let on = w.g_gzip.unwrap_or(false) == v.unwrap_or(false);
+                    ch = ch.child(opt_chip(("wg-gz", k), l, on).on_click(cx.listener(move |this, _, _, cx| {
+                        let was_none = this.web_ui().g_gzip.is_none();
+                        if v == Some(false) && was_none {
+                            return cx.notify();
+                        }
+                        this.web_mut().g_gzip = v;
+                        cx.notify();
+                    })));
+                }
+                cells.push(labeled(it.label, it.desc, ch).into_any_element());
+            } else {
+                cells.push(field(it.label, it.desc, &w.perf[i]).into_any_element());
+            }
+        }
+        let mut grid = div().flex().flex_col().gap(px(14.0));
+        let mut it = cells.into_iter();
+        while let Some(a) = it.next() {
+            grid = grid.child(div().flex().flex_row().items_start().gap(px(16.0)).child(div().flex_1().min_w_0().child(a)).child(div().flex_1().min_w_0().children(it.next())));
+        }
+        let vals = self.web_perf_vals(cx);
+        let bad = web::global::ITEMS.iter().zip(&vals).find_map(|(it, v)| v.as_deref().and_then(|v| web::global::check_value(it, v).err()));
+        let busy = w.busy.is_some();
+        let conf = st.nginx_conf.clone().unwrap_or_default();
+        let save = button("web-perf-save", IconName::Check, "保存并重载").on_click(cx.listener(move |this, _, _, cx| {
+            let vals = this.web_perf_vals(cx);
+            let tg = this.web_target();
+            match web::global::save_script(&conf, &vals, &tg) {
+                Ok(sc) => this.web_run("保存性能设置", sc, OpTag::Plain, cx),
+                Err(e) => this.web_notice(&e, cx),
+            }
+        }));
+        let mut foot = div().flex().flex_row().items_center().gap(px(12.0));
+        match &bad {
+            Some(e) => foot = foot.child(div().flex_1().text_size(px(t::TYPE_CAPTION)).text_color(c::danger()).child(SharedString::from(e.clone()))),
+            None => foot = foot.child(div().flex_1().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child("留空 = 不写这一条,用 nginx 自己的默认值;改完先用 nginx -t 检查,不通过自动还原")),
+        }
+        if bad.is_none() && !busy {
+            foot = foot.child(save);
+        }
+        card("性能调整", "所有站点的默认值,写在服务器 nginx.conf 的 http 块里;站点设置里可以单独覆盖", None, div().flex().flex_col().gap(px(16.0)).child(grid).child(foot)).into_any_element()
+    }
+
+    /// 默认站点与 HTTPS 安全:HTTPS 防窜站、拒绝默认 SSL 握手(只对 Otter 装的 OpenResty)
+    fn web_security(&self, st: &WebState, cx: &mut Context<Self>) -> Option<Div> {
+        if st.target.adopted || !st.running() {
+            return None;
+        }
+        let dc = st.default_conf.clone()?;
+        let (http, https) = st.target.ports;
+        let (guard, reject) = web::default_state(&dc, https);
+        let covered = web::default_covered(&st.sites);
+        let https_default = covered.contains(&https);
+        let apply = move |this: &mut Self, g: bool, r: bool, label: &'static str, cx: &mut Context<Self>| match web::default_conf_script(http, https, g, r, &covered, &this.web_target()) {
+            Ok(sc) => this.web_run(label, sc, OpTag::Plain, cx),
+            Err(e) => this.web_notice(&e, cx),
+        };
+        let a2 = apply.clone();
+        let mut body = div().flex().flex_col().gap(px(14.0)).child(
+            toggle("web-guard", "HTTPS 防窜站", "给默认站点加一个 HTTPS 兜底:用没绑定的域名或 IP 访问 HTTPS 时断开连接,不会落到别的站点上看到它的内容", guard).on_click(cx.listener(move |this, _, _, cx| {
+                apply(this, !guard, reject, if guard { "关闭防窜站" } else { "开启防窜站" }, cx)
+            })),
+        );
+        let (rej_hint, rej_on) = if !guard {
+            ("需要先开启 HTTPS 防窜站", false)
+        } else if https_default {
+            ("已经设置了默认站点,这个设置不生效;取消默认站点后可用", reject)
+        } else {
+            ("防窜站的 HTTPS 兜底直接拒绝握手,不暴露任何证书;关闭后用一张自签证书接住再断开", reject)
+        };
+        let t = toggle("web-reject", "拒绝默认 SSL 握手", rej_hint, rej_on);
+        body = body.child(if guard && !https_default {
+            t.on_click(cx.listener(move |this, _, _, cx| a2(this, guard, !reject, if reject { "关闭拒绝默认握手" } else { "开启拒绝默认握手" }, cx)))
+        } else {
+            t.opacity(0.5)
+        });
+        // 默认站点:没匹配到域名的请求交给哪个站点
+        let cur = web::default_site(&st.sites).and_then(|e| e.spec.as_ref()).map(|s| s.name.clone());
+        let mut ch = div().flex().flex_row().flex_wrap().gap(px(8.0));
+        let mut opts: Vec<(Option<String>, String)> = vec![(None, "无".into())];
+        for e in st.sites.iter().filter(|e| e.enabled) {
+            if let Some(sp) = &e.spec {
+                opts.push((Some(sp.name.clone()), sp.name.clone()));
+            }
+        }
+        for (k, (val, label)) in opts.into_iter().enumerate() {
+            let on = val == cur;
+            ch = ch.child(opt_chip(("web-defsite", k), label, on).on_click(cx.listener(move |this, _, _, cx| {
+                if on {
+                    return;
+                }
+                let Some(st) = this.web_state() else { return };
+                match web::default_site_script(&st.sites, val.as_deref(), http, https, guard, reject, &this.web_target()) {
+                    Ok(sc) => this.web_run(if val.is_some() { "设置默认站点" } else { "取消默认站点" }, sc, OpTag::Plain, cx),
+                    Err(e) => this.web_notice(&e, cx),
+                }
+            })));
+        }
+        body = body.child(labeled("默认站点", "没匹配到域名的请求交给它,不设置就由兜底配置断开连接", ch));
+        Some(card("默认站点与 HTTPS 安全", "没匹配到域名的请求怎么处理;只对 Otter 安装的 OpenResty 生效", None, body))
+    }
+
     fn web_settings(&self, st: &WebState, cx: &mut Context<Self>) -> AnyElement {
         let busy = self.web_ui().busy.is_some();
         let btn = |id: &'static str, ic: IconName, label: &'static str| {
@@ -1771,14 +1934,16 @@ impl Home {
             ac,
         );
 
-        // 数据目录
-        let mut dir = div().flex().flex_col().gap(px(8.0)).child(div().font_family(MONO).text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(SharedString::from(format!("{}   布局版本 {}", crate::srvdata::WEB, st.layout.unwrap_or(0)))));
-        if !st.health.is_empty() {
+        // 数据目录:标题一行(检查结果/修复按钮在右上角),路径一行;有问题时问题列在路径下面
+        let mut dir = div().flex().flex_col().gap(px(8.0)).child(div().font_family(MONO).text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(crate::srvdata::WEB));
+        let status: AnyElement = if st.health.is_empty() {
+            small("权限检查通过", c::online()).into_any_element()
+        } else {
             for h in &st.health {
                 dir = dir.child(small(h.clone(), c::warn()));
             }
-            dir = dir.child(
-                div().flex().flex_row().child(btn("web-fix", IconName::ShieldCheck, "修复权限").on_click(cx.listener(|this, _, _, cx| {
+            btn("web-fix", IconName::ShieldCheck, "修复权限")
+                .on_click(cx.listener(|this, _, _, cx| {
                     this.web_ask(
                         WebConfirm {
                             title: "修复权限",
@@ -1791,13 +1956,12 @@ impl Home {
                         },
                         cx,
                     );
-                }))),
-            );
-        } else {
-            dir = dir.child(small("权限检查通过", c::online()));
-        }
-        let data = card("数据目录", "配置、证书、账号都在这里;整目录可以打包迁到另一台服务器", None, dir);
-        div().flex().flex_col().gap(px(14.0)).child(engine).child(renew).child(dns_card).child(acme).child(data).into_any_element()
+                }))
+                .into_any_element()
+        };
+        let data = card("数据目录", "配置、证书、账号都在这里;整目录可以打包迁到另一台服务器", Some(status), dir);
+        let security = self.web_security(st, cx);
+        div().flex().flex_col().gap(px(14.0)).child(engine).children(security).child(renew).child(dns_card).child(acme).child(data).into_any_element()
     }
 
     // ---------------------------------------------------------------- 弹窗
@@ -2337,18 +2501,6 @@ impl Home {
             chips = chips.child(opt_chip(("wi-d", 999), "+ 添加账号", false).on_click(cx.listener(|this, _, window, cx| this.web_open_dns(window, cx))));
             body = body.child(labeled("DNS 账号", if dns_list.is_empty() { "还没有 DNS 账号,先添加一个" } else { "" }, chips));
         }
-        body = body.child(
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(24.0))
-                .child(toggle("wi-auto", "自动续期", "到期前 30 天由服务器自动续", w.i_auto).on_click(cx.listener(|this, _, _, cx| {
-                    let v = &mut this.web_mut().i_auto;
-                    *v = !*v;
-                    cx.notify();
-                })))
-
-        );
         if let Some(ws) = w.i_warn.as_ref().filter(|v| !v.is_empty()) {
             let mut b = div().flex().flex_col().gap(px(4.0)).p(px(10.0)).rounded(px(t::RADIUS_MD)).border_1().border_color(c::warn().opacity(0.35)).bg(c::warn().opacity(0.08));
             for m in ws {

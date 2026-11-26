@@ -9,12 +9,12 @@
 use super::*;
 
 #[derive(Debug)]
-struct PNode {
-    words: Vec<String>,
-    kids: Option<Vec<PNode>>,
+pub(super) struct PNode {
+    pub(super) words: Vec<String>,
+    pub(super) kids: Option<Vec<PNode>>,
     /// 第一个词的起点、结尾(`;` 或 `}` 之后)
-    start: usize,
-    end: usize,
+    pub(super) start: usize,
+    pub(super) end: usize,
     /// `{` 之后的位置(块才有意义)
     body_start: usize,
 }
@@ -121,7 +121,7 @@ fn parse_nodes(toks: &[Tok], i: &mut usize) -> Vec<PNode> {
     nodes
 }
 
-fn parse_tree(text: &str) -> Vec<PNode> {
+pub(super) fn parse_tree(text: &str) -> Vec<PNode> {
     let toks = lex(text);
     let mut i = 0;
     parse_nodes(&toks, &mut i)
@@ -131,11 +131,11 @@ fn is_blank(s: &str) -> bool {
     s.chars().all(|c| c == ' ' || c == '\t')
 }
 
-fn line_start(text: &str, pos: usize) -> usize {
+pub(super) fn line_start(text: &str, pos: usize) -> usize {
     text[..pos].rfind('\n').map(|p| p + 1).unwrap_or(0)
 }
 
-fn line_end(text: &str, pos: usize) -> usize {
+pub(super) fn line_end(text: &str, pos: usize) -> usize {
     text[pos..].find('\n').map(|p| pos + p).unwrap_or(text.len())
 }
 

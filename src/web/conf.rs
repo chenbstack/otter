@@ -43,11 +43,12 @@ struct Srv<'a> {
     ssl: bool,
     v6: bool,
     quic: bool,
+    default_server: bool,
 }
 
 /// 一个 server 块的监听:只认 `PORT [ssl]`、`[::]:PORT [ssl]`、`PORT quic`、`[::]:PORT quic`;多个不同端口、绑定地址等返回 None
 fn server_listen(n: &NgxNode) -> Option<Srv<'_>> {
-    let (mut port, mut ssl, mut v6, mut quic) = (None, false, false, false);
+    let (mut port, mut ssl, mut v6, mut quic, mut ds) = (None, false, false, false, false);
     for l in all(kids(n), "listen") {
         let a = args(l);
         let addr = a.first()?;
@@ -66,9 +67,10 @@ fn server_listen(n: &NgxNode) -> Option<Srv<'_>> {
             }
             port = Some(p);
             ssl |= flags.iter().any(|f| f == "ssl");
+            ds |= flags.iter().any(|f| f == "default_server");
         }
     }
-    Some(Srv { node: n, port: port?, ssl, v6, quic })
+    Some(Srv { node: n, port: port?, ssl, v6, quic, default_server: ds })
 }
 
 fn cert_name(path: &str) -> Option<String> {
@@ -185,7 +187,7 @@ pub fn parse_conf(text: &str, site: &str, hint: Option<&SiteSpec>) -> Option<Par
     let ssl_srv = servers.iter().find(|s| s.ssl);
     let pc = kids(primary.node);
 
-    let mut adv = Advanced { http3, ..Default::default() };
+    let mut adv = Advanced { http3, default_server: servers.iter().any(|s| s.default_server), ..Default::default() };
     // HTTPS 相关(在 SSL server 里)
     let mut hsts = false;
     if let Some(s) = ssl_srv {
@@ -302,7 +304,7 @@ pub fn parse_conf(text: &str, site: &str, hint: Option<&SiteSpec>) -> Option<Par
         if locations.is_empty() {
             return None;
         }
-        // 读取超时:出现最多的值是站点默认(300 视为没设),其余的记在各自的路径上
+        // 读取超时:出现最多的值是站点默认,其余的记在各自的路径上;没写的沿用全局默认
         let mut best: Option<(u32, usize)> = None;
         for t in timeouts.iter().flatten() {
             let n = timeouts.iter().flatten().filter(|x| *x == t).count();
@@ -310,10 +312,16 @@ pub fn parse_conf(text: &str, site: &str, hint: Option<&SiteSpec>) -> Option<Par
                 best = Some((*t, n));
             }
         }
-        let dflt = best.map(|b| b.0).unwrap_or(300);
-        adv.read_timeout = (dflt != 300).then_some(dflt);
+        // 只有每条路径都写了才算有站点默认;有的没写,说明是个别路径单独设的
+        let dflt = if timeouts.iter().all(Option::is_some) { best.map(|b| b.0) } else { None };
+        adv.read_timeout = dflt;
         for (l, t) in locations.iter_mut().zip(&timeouts) {
-            l.timeout = t.filter(|x| *x != dflt);
+            l.timeout = t.filter(|x| Some(*x) != dflt);
+        }
+        // 连接/发送超时是站点级:取第一条代理路径上写的
+        if let Some(first) = locs.iter().find(|l| arg0(kids(l), "proxy_pass").is_some()) {
+            adv.connect_timeout = arg0(kids(first), "proxy_connect_timeout").and_then(secs);
+            adv.send_timeout = arg0(kids(first), "proxy_send_timeout").and_then(secs);
         }
         SiteKind::Proxy { locations, upstreams }
     } else if one(pc, "root").is_some() {
@@ -442,6 +450,8 @@ mod tests {
     fn roundtrip_all_extras() {
         let mut s = proxy_spec();
         s.adv = Advanced {
+            connect_timeout: Some(5),
+            send_timeout: Some(120),
             gzip: Some(true),
             gzip_level: Some(4),
             gzip_types: Some("text/css".into()),

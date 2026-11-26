@@ -10,6 +10,7 @@ use crate::sysops::quote;
 pub const CONTAINER: &str = "otter-openresty";
 pub const ACME_IMAGE: &str = "neilpang/acme.sh";
 pub mod conf;
+pub mod global;
 pub mod patch;
 
 /// 证书目录在容器里的挂载点
@@ -316,8 +317,13 @@ pub struct SiteSpec {
 pub struct Advanced {
     /// 上传大小上限,如 `100m`、`2g`、`0`(不限);None 沿用全局设置
     pub max_body: Option<String>,
-    /// 反向代理读取超时(秒);None 用 300
+    /// 反向代理读取超时(秒);None 不写,沿用全局默认(OpenResty 全局设置)
     pub read_timeout: Option<u32>,
+    /// 默认站点:没匹配到域名的请求交给它(监听写 `default_server`)
+    pub default_server: bool,
+    /// 连接后端 / 向后端发送的超时(秒);None 沿用全局默认
+    pub connect_timeout: Option<u32>,
+    pub send_timeout: Option<u32>,
     /// 允许的 TLS 协议版本(`TLSv1`、`TLSv1.1`、`TLSv1.2`、`TLSv1.3`);None 用 TLSv1.2 + TLSv1.3
     pub tls_protocols: Option<Vec<String>>,
     /// `ssl_ciphers` 的值(只影响 TLS 1.2 及以下);None 用 nginx 默认
@@ -530,8 +536,10 @@ impl SiteSpec {
         {
             return Err("上传大小要写成 100m、512k、2g 这样,0 表示不限".into());
         }
-        if self.adv.read_timeout.is_some_and(|t| t == 0 || t > 86400) {
-            return Err("读取超时要在 1–86400 秒之间".into());
+        for (v, what) in [(self.adv.read_timeout, "读取超时"), (self.adv.connect_timeout, "连接超时"), (self.adv.send_timeout, "发送超时")] {
+            if v.is_some_and(|t| t == 0 || t > 86400) {
+                return Err(format!("{what}要在 1–86400 秒之间"));
+            }
         }
         if let Some(p) = &self.adv.tls_protocols
             && (p.is_empty() || p.iter().any(|v| !TLS_VERSIONS.contains(&v.as_str())))
@@ -843,6 +851,15 @@ fn header_line(s: &SiteSpec) -> String {
     if let Some(v) = s.adv.read_timeout {
         h += &format!(" timeout={v}");
     }
+    if s.adv.default_server {
+        h += " ds=1";
+    }
+    if let Some(v) = s.adv.connect_timeout {
+        h += &format!(" ctimeout={v}");
+    }
+    if let Some(v) = s.adv.send_timeout {
+        h += &format!(" stimeout={v}");
+    }
     if let Some(v) = &s.adv.tls_protocols {
         h += &format!(" tlsv={}", esc(&v.join(",")));
     }
@@ -1041,7 +1058,16 @@ fn proxy_location(s: &SiteSpec, l: &Location, tg: &Target) -> String {
     if https {
         t += "        proxy_ssl_server_name on;\n";
     }
-    t += &format!("        proxy_read_timeout {}s;\n    }}\n", l.timeout.or(s.adv.read_timeout).unwrap_or(300));
+    if let Some(v) = s.adv.connect_timeout {
+        t += &format!("        proxy_connect_timeout {v}s;\n");
+    }
+    if let Some(v) = s.adv.send_timeout {
+        t += &format!("        proxy_send_timeout {v}s;\n");
+    }
+    if let Some(v) = l.timeout.or(s.adv.read_timeout) {
+        t += &format!("        proxy_read_timeout {v}s;\n");
+    }
+    t += "    }\n";
     t
 }
 
@@ -1224,9 +1250,10 @@ fn body(s: &SiteSpec, tg: &Target) -> String {
     let mut out: Vec<String> = Vec::new();
     for l in &s.listeners {
         let ssl = if l.ssl() { " ssl" } else { "" };
-        let mut t = format!("server {{\n    listen {}{ssl};\n", l.port);
+        let ds = if s.adv.default_server { " default_server" } else { "" };
+        let mut t = format!("server {{\n    listen {}{ssl}{ds};\n", l.port);
         if s.ipv6 {
-            t += &format!("    listen [::]:{}{ssl};\n", l.port);
+            t += &format!("    listen [::]:{}{ssl}{ds};\n", l.port);
         }
         if l.ssl() && s.adv.http3 {
             t += &format!("    listen {} quic;\n", l.port);
@@ -1327,6 +1354,9 @@ pub fn parse_site(text: &str) -> Option<(SiteSpec, bool)> {
     let mut adv = Advanced {
         max_body: Some(g("body")).filter(|v| !v.is_empty()),
         read_timeout: g("timeout").parse().ok(),
+        default_server: g("ds") == "1",
+        connect_timeout: g("ctimeout").parse().ok(),
+        send_timeout: g("stimeout").parse().ok(),
         tls_protocols: Some(g("tlsv")).filter(|v| !v.is_empty()).map(|v| v.split(',').map(str::to_string).collect()),
         ciphers: Some(g("ciphers")).filter(|v| !v.is_empty()),
         no_http2: g("h2") == "0",
@@ -1347,13 +1377,109 @@ pub fn parse_site(text: &str) -> Option<(SiteSpec, bool)> {
 // ---------------------------------------------------------------- 配置文件、compose
 
 pub fn nginx_conf() -> String {
-    "# managed by otter (layout 1)\nworker_processes auto;\nerror_log /var/log/nginx/error.log warn;\nevents {\n    worker_connections 4096;\n}\nhttp {\n    include mime.types;\n    default_type application/octet-stream;\n    server_tokens off;\n    sendfile on;\n    keepalive_timeout 65;\n    client_max_body_size 100m;\n    log_format main '$remote_addr - $remote_user [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\" $request_time';\n    access_log /var/log/nginx/access.log main;\n    map $http_upgrade $connection_upgrade {\n        default upgrade;\n        '' close;\n    }\n    ssl_session_cache shared:SSL:10m;\n    ssl_session_timeout 1d;\n    gzip on;\n    gzip_types text/plain text/css application/json application/javascript text/xml application/xml image/svg+xml;\n    include /etc/nginx/conf.d/*.conf;\n}\n".to_string()
+    "# managed by otter (layout 1)\nworker_processes auto;\nerror_log /var/log/nginx/error.log warn;\nevents {\n    worker_connections 4096;\n}\nhttp {\n    include mime.types;\n    default_type application/octet-stream;\n    server_tokens off;\n    sendfile on;\n    keepalive_timeout 65;\n    proxy_read_timeout 300s;\n    client_max_body_size 100m;\n    log_format main '$remote_addr - $remote_user [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\" $request_time';\n    access_log /var/log/nginx/access.log main;\n    map $http_upgrade $connection_upgrade {\n        default upgrade;\n        '' close;\n    }\n    ssl_session_cache shared:SSL:10m;\n    ssl_session_timeout 1d;\n    gzip on;\n    gzip_comp_level 5;\n    gzip_min_length 1k;\n    gzip_types text/plain text/css application/json application/javascript text/xml application/xml image/svg+xml;\n    include /etc/nginx/conf.d/*.conf;\n}\n".to_string()
 }
 
 /// 默认站点:没匹配到域名的请求(包括直接用 IP 访问)一律断开;证书验证用的路径仍然放行
 pub fn default_conf(http: u16, https: u16) -> String {
+    default_conf_with(http, https, true, true, &[])
+}
+
+/// 默认站点配置(没匹配到域名的请求落到这里)。
+/// `guard`(HTTPS 防窜站):写默认 HTTPS 站点;不写的话,用没绑定的域名/IP 访问 HTTPS 会落到第一个 HTTPS 站点上(窜站)。
+/// `reject`(拒绝默认 SSL 握手):默认 HTTPS 站点直接拒绝握手,不暴露证书;否则用自签证书接住再 444。
+/// `covered`:已被某个站点标了 `default_server` 的端口,这里不再写,避免同端口两个默认
+pub fn default_conf_with(http: u16, https: u16, guard: bool, reject: bool, covered: &[u16]) -> String {
     let t = Target::own();
-    format!("# managed by otter (layout 1)\n# otter:default\nserver {{\n    listen {http} default_server;\n    server_name _;\n{}    location / {{\n        return 444;\n    }}\n}}\n\nserver {{\n    listen {https} ssl default_server;\n    server_name _;\n    ssl_reject_handshake on;\n}}\n", acme_loc(&t, false))
+    let ds = |p: u16| if covered.contains(&p) { "" } else { " default_server" };
+    let mut out = format!("# managed by otter (layout 1)\n# otter:default\nserver {{\n    listen {http}{};\n    server_name _;\n{}    location / {{\n        return 444;\n    }}\n}}\n", ds(http), acme_loc(&t, false));
+    if guard {
+        let tls = if reject {
+            "    ssl_reject_handshake on;\n".to_string()
+        } else {
+            format!("    ssl_certificate {CONF_MOUNT}/{DEFAULT_PEM};\n    ssl_certificate_key {CONF_MOUNT}/{DEFAULT_KEY};\n    location / {{\n        return 444;\n    }}\n")
+        };
+        out += &format!("\nserver {{\n    listen {https} ssl{};\n    server_name _;\n{tls}}}\n", ds(https));
+    }
+    out
+}
+
+/// 默认 HTTPS 站点的自签证书(放在站点配置目录里,不是 `.conf` 所以不会被当配置加载)
+pub const DEFAULT_PEM: &str = "00-default.pem";
+pub const DEFAULT_KEY: &str = "00-default.key";
+
+/// 读出默认站点配置的当前状态:(HTTPS 防窜站, 拒绝默认 SSL 握手)
+pub fn default_state(conf: &str, https: u16) -> (bool, bool) {
+    let guard = conf.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with(&format!("listen {https} ssl")) && l.ends_with(';')
+    });
+    (guard, guard && conf.lines().any(|l| l.trim() == "ssl_reject_handshake on;"))
+}
+
+/// 当前被标为默认站点的站点(启用的)
+pub fn default_site(sites: &[SiteEntry]) -> Option<&SiteEntry> {
+    sites.iter().find(|e| e.enabled && e.spec.as_ref().is_some_and(|s| s.adv.default_server))
+}
+
+/// 已被默认站点占着 `default_server` 的端口;`00-default.conf` 在这些端口上不再写 `default_server`
+pub fn default_covered(sites: &[SiteEntry]) -> Vec<u16> {
+    let mut v: Vec<u16> = default_site(sites).and_then(|e| e.spec.as_ref()).map(|s| s.listeners.iter().map(|l| l.port).collect()).unwrap_or_default();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// 设置/取消默认站点:同一个事务里改站点文件(新旧默认站点的 `default_server`)和 `00-default.conf`
+pub fn default_site_script(sites: &[SiteEntry], target: Option<&str>, http: u16, https: u16, guard: bool, reject: bool, t: &Target) -> Result<String, String> {
+    if t.adopted {
+        return Err("接管的 nginx 不在这里改默认站点".into());
+    }
+    let mut a = String::new();
+    let mut covered: Vec<u16> = Vec::new();
+    for e in sites {
+        let Some(spec) = &e.spec else { continue };
+        let want = target == Some(spec.name.as_str());
+        if want && !e.enabled {
+            return Err("这个站点没有启用,不能设为默认站点".into());
+        }
+        if want {
+            covered = spec.listeners.iter().map(|l| l.port).collect();
+        }
+        if spec.adv.default_server != want {
+            let mut ns = spec.clone();
+            ns.adv.default_server = want;
+            a += &site_save_actions(&ns, e.enabled, t, (e.modified && e.from_conf).then_some(e.text.as_str()))?;
+        }
+    }
+    if target.is_some() && covered.is_empty() {
+        return Err("没找到这个站点".into());
+    }
+    covered.sort_unstable();
+    covered.dedup();
+    a += &default_conf_actions(http, https, guard, reject, &covered);
+    Ok(tx_script(&a))
+}
+
+/// 改默认站点配置:事务写 `00-default.conf`;需要自签证书时按需生成
+pub fn default_conf_script(http: u16, https: u16, guard: bool, reject: bool, covered: &[u16], t: &Target) -> Result<String, String> {
+    if t.adopted {
+        return Err("接管的 nginx 不在这里改默认站点".into());
+    }
+    Ok(tx_script(&default_conf_actions(http, https, guard, reject, covered)))
+}
+
+fn default_conf_actions(http: u16, https: u16, guard: bool, reject: bool, covered: &[u16]) -> String {
+    let f = "00-default.conf";
+    let mut a = format!("bk {f}; {}\n", write_file_cmd(&format!("$C/{f}"), &default_conf_with(http, https, guard, reject, covered), "644").replace(&format!("'$C/{f}'"), &format!("\"$C/{f}\"")));
+    if guard && !reject {
+        a += &format!(
+            "[ -f \"$C/{k}\" ] || {{ openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj /CN=localhost -keyout \"$C/{k}\" -out \"$C/{p}\" >/dev/null 2>&1 || fail '生成自签证书失败(服务器上要有 openssl)'; chmod 600 \"$C/{k}\"; }}\n",
+            k = DEFAULT_KEY,
+            p = DEFAULT_PEM
+        );
+    }
+    a
 }
 
 /// 安装 OpenResty 的表单(安装抽屉填的东西)
@@ -1542,6 +1668,7 @@ docker ps --format '{{.Names}}' 2>/dev/null | grep -qi 1panel && echo 1panel
 [ -d /www/server/panel ] && echo baota
 echo '@@CONTAINER'; docker inspect -f '{{.State.Status}} {{.Config.Image}}' $N 2>/dev/null
 echo '@@VERSION'; docker exec $N $B -v 2>&1 | head -n1
+echo '@@NGINXCONF'; cat $W/conf/nginx.conf 2>/dev/null | head -c 200000
 echo '@@SITES'
 for f in $CONF/*.conf $CONF/*.conf.off; do [ -f "$f" ] || continue; echo "@@F $(basename "$f")"; head -c 30000 "$f"; echo; done
 echo '@@CERTS'
@@ -1695,6 +1822,10 @@ pub struct WebState {
     /// 容器状态和镜像
     pub container: Option<(String, String)>,
     pub version: String,
+    /// Otter 装的 OpenResty 的 `nginx.conf` 原文(全局设置的事实源);读不到是 None
+    pub nginx_conf: Option<String>,
+    /// 默认站点配置 `00-default.conf` 的原文(Otter 生成的);没有是 None
+    pub default_conf: Option<String>,
     pub sites: Vec<SiteEntry>,
     pub certs: Vec<CertEntry>,
     pub acme: Vec<AcmeAcct>,
@@ -1868,11 +1999,13 @@ pub fn parse_state(out: &str) -> WebState {
             "PANEL" => st.panel = text.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string),
             "CONTAINER" => st.container = text.trim().split_once(' ').map(|(a, b)| (a.to_string(), b.to_string())),
             "VERSION" => st.version = text.trim().rsplit('/').next().unwrap_or("").trim().to_string(),
+            "NGINXCONF" => st.nginx_conf = Some(text).filter(|t| !t.trim().is_empty()),
             "SITES" => {
                 for blk in text.split("@@F ").skip(1) {
                     let (file, content) = blk.split_once('\n').unwrap_or((blk, ""));
                     let file = file.trim().to_string();
                     if content.contains("# otter:default") {
+                        st.default_conf = Some(content.to_string());
                         continue;
                     }
                     let parsed = parse_site(content);
@@ -2227,6 +2360,11 @@ pub fn site_save_script(spec: &SiteSpec, enabled: bool, t: &Target) -> Result<St
 
 /// 同 `site_save_script`;`old` 是站点现有的、被手工改过的正文:就地修改它(保留 Otter 不管理的内容),而不是整体重新生成
 pub fn site_save_script_from(spec: &SiteSpec, enabled: bool, t: &Target, old: Option<&str>) -> Result<String, String> {
+    Ok(tx_script(&site_save_actions(spec, enabled, t, old)?))
+}
+
+/// 保存站点的事务动作(不含事务外壳),可以和别的动作拼在同一个事务里
+fn site_save_actions(spec: &SiteSpec, enabled: bool, t: &Target, old: Option<&str>) -> Result<String, String> {
     spec.check()?;
     if matches!(spec.kind, SiteKind::Static { .. }) && t.sites.is_none() {
         return Err("这个 OpenResty 没有挂载静态站点目录,建不了静态站点".into());
@@ -2250,7 +2388,7 @@ pub fn site_save_script_from(spec: &SiteSpec, enabled: bool, t: &Target, old: Op
         let d = format!("$SITES/{}", spec.name);
         a += &format!("mkdir -p \"{d}\"; [ -e \"{d}/index.html\" ] || printf '<!doctype html><meta charset=utf-8><title>{n}</title><h1>{n}</h1>' > \"{d}/index.html\"\n", n = spec.name);
     }
-    Ok(tx_script(&a))
+    Ok(a)
 }
 
 /// 直接覆盖配置原文(编辑原文;文件名只允许 `xxx.conf` / `xxx.conf.off`)
@@ -3238,6 +3376,16 @@ mod tests {
         std::fs::write(path, render_site(&spec, &Target::own())).unwrap();
     }
 
+    /// 把默认站点配置的几种组合写到目录里,给 `nginx -t` 真跑(`OTTER_DUMP_DIR=… cargo test dump_global -- --ignored`)
+    #[test]
+    #[ignore]
+    fn dump_global() {
+        let Ok(dir) = std::env::var("OTTER_DUMP_DIR") else { return };
+        std::fs::write(format!("{dir}/nginx.conf"), nginx_conf()).unwrap();
+        std::fs::create_dir_all(format!("{dir}/conf.d")).unwrap();
+        std::fs::write(format!("{dir}/conf.d/00-default.conf"), default_conf_with(80, 443, true, false, &[])).unwrap();
+    }
+
     #[test]
     #[ignore]
     fn dump_extras_sites() {
@@ -3263,7 +3411,7 @@ mod tests {
         assert!(t.contains("proxy_read_timeout 600s;"));
         // 没填就不写
         let plain = render_site(&proxy("p"), &Target::own());
-        assert!(!plain.contains("client_max_body_size") && plain.contains("proxy_read_timeout 300s;"));
+        assert!(!plain.contains("client_max_body_size") && !plain.contains("proxy_read_timeout"));
         let mut bad = proxy("b");
         bad.adv.max_body = Some("10x".into());
         assert!(bad.check().is_err());
@@ -3346,7 +3494,8 @@ mod tests {
         assert_eq!(s.spec.as_ref().unwrap().name, "a.example.com");
         assert!(!s.modified && s.enabled);
         // 手改过:以正文为准,能读懂的进表单,读不懂的列出
-        let edited = site.replace("proxy_read_timeout 300s;", "proxy_read_timeout 90s;\n        proxy_buffering off;");
+        let edited = site.replace("proxy_http_version 1.1;\n", "proxy_http_version 1.1;\n        proxy_read_timeout 90s;\n        proxy_buffering off;\n");
+        assert_ne!(edited, site);
         let st2 = parse_state(&STATE.replace("__SITE__", edited.trim_end()));
         let e = st2.sites.iter().find(|s| s.spec.is_some()).unwrap();
         assert!(e.modified && e.from_conf);
@@ -3649,6 +3798,29 @@ mod tests {
 403 forbidden"#;
         assert_eq!(parse_tags(j).unwrap(), vec!["alpine", "1.31.9.1-alpine", "1.27.1.2-alpine", "1.27.1.1-alpine", "1.25.3.2-alpine"]);
         assert!(parse_tags(r#"{"results":[{"name":"jammy"}]}"#).is_none());
+    }
+
+    #[test]
+    fn default_conf_options() {
+        let on = default_conf(80, 443);
+        assert!(on.contains("listen 80 default_server;") && on.contains("listen 443 ssl default_server;") && on.contains("ssl_reject_handshake on;"));
+        assert_eq!(default_state(&on, 443), (true, true));
+        // 拒绝握手关:用自签证书;80 被站点占了就不写 default_server
+        let cert = default_conf_with(80, 443, true, false, &[80]);
+        assert_eq!(default_state(&cert, 443), (true, false));
+        assert!(cert.contains("listen 80;") && cert.contains("listen 443 ssl default_server;") && cert.contains("00-default.pem"));
+        // 防窜站关:没有默认 HTTPS 站点,拒绝握手也无从谈起
+        let off = default_conf_with(80, 443, false, true, &[]);
+        assert_eq!(default_state(&off, 443), (false, false));
+        assert!(!off.contains("443") && !off.contains("ssl"));
+        let sc = default_conf_script(80, 443, true, false, &[], &Target::own()).unwrap();
+        assert!(sc.contains("openssl req -x509") && sc.contains("bk 00-default.conf"));
+        let o = std::process::Command::new("bash").arg("-n").arg("-c").arg(&sc).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        assert!(!default_conf_script(80, 443, true, true, &[], &Target::own()).unwrap().contains("openssl req"));
+        let mut ad = Target::own();
+        ad.adopted = true;
+        assert!(default_conf_script(80, 443, true, true, &[], &ad).is_err());
     }
 
     #[test]

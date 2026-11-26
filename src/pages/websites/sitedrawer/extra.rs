@@ -420,6 +420,39 @@ impl Home {
 
     // ---------------------------------------------------------------- 流量限制
 
+    /// 预设:点一下把下面的输入填好(不动「不受限制的 IP」),之后还能手改
+    fn sd_limit_presets(&self, cx: &mut Context<Self>) -> AnyElement {
+        // (名称, 说明, 每秒请求数, 突发, 不延迟, 并发连接, 限速, 前面不限速)
+        type P = (&'static str, &'static str, &'static str, &'static str, bool, &'static str, &'static str, &'static str);
+        const PRESETS: [P; 5] = [
+            ("不限制", "清空下面所有限制", "", "", false, "", "", ""),
+            ("宽松", "普通网站:每秒 20 个请求,突发 40,并发 50", "20", "40", true, "50", "", ""),
+            ("标准", "防一般刷接口:每秒 10 个请求,突发 20,并发 20", "10", "20", true, "20", "", ""),
+            ("严格", "登录、验证码等敏感站:每秒 2 个请求,突发 5,并发 10", "2", "5", false, "10", "", ""),
+            ("下载站", "不限请求数:并发 5,每连接 1m/s(前 5m 不限速)", "", "", false, "5", "1m", "5m"),
+        ];
+        let mut row = div().flex().flex_row().flex_wrap().gap(px(4.0));
+        for (k, p) in PRESETS.iter().enumerate() {
+            let (name, tip_text, rate, burst, nodelay, conn, speed, after) = *p;
+            row = row.child(crate::pages::syspages::tip(
+                opt_chip(("web-sd-lpre", k), name, false).on_click(cx.listener(move |this, _, window, cx| {
+                    let Some(sd) = this.sdm() else { return };
+                    let mut set = |e: &Entity<InputState>, v: &str, cx: &mut Context<Home>| e.update(cx, |s, cx| s.set_value(v, window, cx));
+                    set(&sd.x.lim_rate, rate, cx);
+                    set(&sd.x.lim_burst, burst, cx);
+                    set(&sd.x.lim_conn, conn, cx);
+                    set(&sd.x.lim_speed, speed, cx);
+                    set(&sd.x.lim_after, after, cx);
+                    sd.x.a.limits.req_min = false;
+                    sd.x.a.limits.nodelay = nodelay;
+                    cx.notify();
+                })),
+                tip_text,
+            ));
+        }
+        labeled("预设", "点一下填好下面的值,之后可以再改;不影响「不受限制的 IP」", row).into_any_element()
+    }
+
     pub(super) fn sd_limits(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(sd) = self.sd() else { return div().into_any_element() };
         let x = &sd.x;
@@ -437,6 +470,7 @@ impl Home {
             .flex_col()
             .gap(px(14.0))
             .child(section("流量限制", "防刷、防爬、保护后端;只对本站生效,按客户端 IP 统计"))
+            .child(self.sd_limit_presets(cx))
             .child(rate)
             .child(block().child(section("并发连接", "限制每个客户端 IP 同时打开的连接数,超出的返回 429")).child(field("最大并发连接数", "留空表示不限制", &x.lim_conn)))
             .child(block().child(section("下载限速", "限制每个连接的传输速度")).child(field("限速", "如 512k、2m(每秒);留空表示不限速", &x.lim_speed)).child(field("前面不限速的流量", "传完这么多之后才开始限速,如 1m;留空从头限速", &x.lim_after)))

@@ -56,6 +56,8 @@ pub(super) struct SiteDrawer {
     warn: Option<String>,
     max_body: Entity<InputState>,
     timeout: Entity<InputState>,
+    connect_timeout: Entity<InputState>,
+    send_timeout: Entity<InputState>,
     locs: Vec<LocForm>,
     ups: Vec<UpForm>,
     spa: bool,
@@ -292,7 +294,9 @@ impl SiteDrawer {
             ciphers,
             warn,
             max_body: mk_in("如 100m,留空沿用全局设置", s.adv.max_body.as_deref().unwrap_or(""), window, cx),
-            timeout: mk_in("默认 300", &s.adv.read_timeout.map(|t| t.to_string()).unwrap_or_default(), window, cx),
+            timeout: mk_in("沿用全局", &s.adv.read_timeout.map(|t| t.to_string()).unwrap_or_default(), window, cx),
+            connect_timeout: mk_in("沿用全局", &s.adv.connect_timeout.map(|t| t.to_string()).unwrap_or_default(), window, cx),
+            send_timeout: mk_in("沿用全局", &s.adv.send_timeout.map(|t| t.to_string()).unwrap_or_default(), window, cx),
             locs,
             ups,
             spa,
@@ -354,7 +358,7 @@ impl SiteDrawer {
         };
         let tls_protocols = (self.tls != [false, false, true, true]).then(|| web::TLS_VERSIONS.iter().zip(self.tls).filter(|(_, on)| *on).map(|(v, _)| v.to_string()).collect::<Vec<_>>());
         let ciphers = if self.cipher_mode < 3 { Some(web::CIPHER_PRESETS[self.cipher_mode].1.to_string()) } else { Some(self.ciphers.read(cx).value().split_whitespace().collect::<String>()) }.filter(|v| !v.is_empty());
-        let adv = web::Advanced { max_body: Some(val(&self.max_body, cx)).filter(|v| !v.is_empty()), read_timeout: opt_num(&self.timeout, "读取超时", cx)?, tls_protocols, ciphers, no_http2: !self.h2, http3: self.h3, ocsp: self.ocsp, hsts_age: (self.hsts_age != 31536000).then_some(self.hsts_age), hsts_sub: self.hsts_sub, hsts_preload: self.hsts_pre, ..Default::default() };
+        let adv = web::Advanced { max_body: Some(val(&self.max_body, cx)).filter(|v| !v.is_empty()), read_timeout: opt_num(&self.timeout, "读取超时", cx)?, connect_timeout: opt_num(&self.connect_timeout, "连接超时", cx)?, send_timeout: opt_num(&self.send_timeout, "发送超时", cx)?, tls_protocols, ciphers, no_http2: !self.h2, http3: self.h3, ocsp: self.ocsp, hsts_age: (self.hsts_age != 31536000).then_some(self.hsts_age), hsts_sub: self.hsts_sub, hsts_preload: self.hsts_pre, ..Default::default() };
         let adv = self.x.fill(adv, self.kind == 1, cx)?;
         let spec = SiteSpec { name: self.name.clone(), kind, hsts: self.hsts && self.https(), listeners, ipv6: self.ipv6, adv };
         spec.check()?;
@@ -1454,7 +1458,9 @@ impl Home {
             .gap(px(14.0))
             .child(section("高级", "不填就用全局默认"))
             .child(field("上传大小上限", "如 100m、2g,0 表示不限;留空沿用全局设置", &sd.max_body))
-            .child(field("默认读取超时(秒)", "反向代理等后端响应的最长时间;每条路径可以单独设置,留空为 300", &sd.timeout))
+            .child(field("读取超时(秒)", "等后端响应的最长时间;每条路径可以单独设置。留空沿用全局默认(网站页「性能调整」)", &sd.timeout))
+            .child(field("连接后端超时(秒)", "与后端建立连接的超时;留空沿用全局默认", &sd.connect_timeout))
+            .child(field("发送超时(秒)", "向后端发送请求的超时;留空沿用全局默认", &sd.send_timeout))
             .child(toggle("web-sd-ipv6", "监听 IPv6", "每个端口同时写 listen [::]:端口", ipv6).on_click(cx.listener(|this, _, _, cx| {
                 if let Some(sd) = this.sdm() {
                     sd.ipv6 = !sd.ipv6;
