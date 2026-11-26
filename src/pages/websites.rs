@@ -49,6 +49,8 @@ pub(crate) enum Dlg {
     Logs,
     /// 站点管理抽屉(编辑已有站点),状态在 `WebUi.sd`
     Drawer,
+    /// 整体配置(nginx.conf)抽屉,编辑器在 `WebUi.conf_ed`
+    Conf,
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -160,6 +162,8 @@ pub(crate) struct WebUi {
     g_gzip: Option<bool>,
     /// 性能页的输入框(和 `web::global::ITEMS` 一一对应)
     perf: Vec<Entity<InputState>>,
+    /// 整体配置抽屉的编辑器
+    conf_ed: Option<Entity<gpui_kit::component::input::EditorState>>,
     i_warn: Option<Vec<String>>,
     // DNS 账号表单
     d_prov: usize,
@@ -849,6 +853,17 @@ impl Home {
         let tg = self.web_target();
         let res: Result<(&'static str, String), String> = match &dlg {
             Dlg::Drawer => return self.web_sd_save(cx),
+            Dlg::Conf => {
+                let text = self.web_ui().conf_ed.as_ref().map(|e| e.read(cx).value().to_string()).unwrap_or_default();
+                if self.web_target().adopted {
+                    Err("接管的 nginx 不在这里改全局配置".into())
+                } else if !text.contains("http") {
+                    Err("nginx.conf 里至少要有 http 块".into())
+                } else {
+                    let text = if text.ends_with('\n') { text } else { text + "\n" };
+                    Ok(("保存全局配置", web::global::write_script(&text)))
+                }
+            }
             Dlg::Site(_) => self.web_site_spec(cx).and_then(|(s, en)| web::site_save_script(&s, en, &tg).map(|sc| ("保存站点", sc))),
             Dlg::CertUpload => {
                 let (n, cert, key) = (self.web_val(0, cx), self.web_area_val(0, cx), self.web_area_val(1, cx));
@@ -1840,7 +1855,16 @@ impl Home {
         let engine = card(
             "OpenResty",
             format!("{} · {}", st.version, st.container.as_ref().map(|c| c.1.clone()).unwrap_or_default()),
-            Some(pill(state_text, state_color, state_color.opacity(0.14)).into_any_element()),
+            Some(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .children((!st.target.adopted && st.nginx_conf.is_some()).then(|| btn("web-conf-edit", IconName::FileText, "配置修改").on_click(cx.listener(|this, _, window, cx| this.web_conf_open(window, cx)))))
+                    .child(pill(state_text, state_color, state_color.opacity(0.14)))
+                    .into_any_element(),
+            ),
             div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(SharedString::from(format!("站点配置目录 {}", st.target.conf))),
         );
 
@@ -2054,9 +2078,12 @@ impl Home {
             v.extend(self.web_sd_overlay(cx));
         }
         if matches!(self.web_ui().dlg, Some(Dlg::Drawer)) {
+        } else if matches!(self.web_ui().dlg, Some(Dlg::Conf)) {
+            v.push(self.web_dlg_conf(cx));
         } else if let Some(d) = self.web_ui().dlg.clone() {
             let m = match d {
                 Dlg::Drawer => unreachable!(),
+                Dlg::Conf => unreachable!(),
                 Dlg::Site(edit) => self.web_dlg_site(edit.is_some(), cx),
                 Dlg::CertUpload => self.web_dlg_upload(cx),
                 Dlg::Issue => self.web_dlg_issue(cx),
@@ -2563,6 +2590,42 @@ impl Home {
         let err = w.err.clone().map(|e| (e, c::danger()));
         let foot = self.web_footer(err, "注册", self.web_val(0, cx).contains('@'), cx);
         self.web_modal("web-dlg-acme", DLG_W_DNS, [self.web_title("添加证书账号", "ACME 账号,申请证书时使用").into_any_element(), body.into_any_element(), foot.into_any_element()], cx)
+    }
+
+    /// 整体配置抽屉:直接编辑 nginx.conf,保存走「原地写入 → nginx -t → reload,失败还原」
+    fn web_dlg_conf(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let head = div()
+            .h(px(52.0))
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(16.0))
+            .border_b_1()
+            .border_color(c::border())
+            .child(icon(IconName::FileText, 16.0, c::secondary()))
+            .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::BOLD).child("配置修改 · nginx.conf"))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child("保存前会用 nginx -t 检查,不通过自动还原"))
+            .child(tip(icon_btn(("web-conf-x", 0), IconName::X, c::muted()).on_click(cx.listener(|this, _, _, cx| this.web_close(cx))), "关闭"));
+        let ed = self.web_ui().conf_ed.clone();
+        let body = div().flex_1().min_h_0().overflow_hidden().children(ed.map(|e| gpui_kit::component::input::Editor::new(&e).appearance(false).h_full()));
+        let err = self.web_ui().err.clone().map(|e| (e, c::danger()));
+        let foot = self.web_footer(err, "保存", true, cx);
+        crate::ui::drawer("web-conf", 860.0, |_, _, _| {}, [head.into_any_element(), body.into_any_element(), foot.into_any_element()]).into_any_element()
+    }
+
+    /// 打开整体配置抽屉:编辑器预填服务器上现在的 nginx.conf
+    fn web_conf_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.web_state().and_then(|s| s.nginx_conf.clone()) else { return };
+        let ed = cx.new(|cx| gpui_kit::component::input::EditorState::new(window, cx).language("bash").line_number(true));
+        ed.update(cx, |s, cx| s.set_value(text.as_str(), window, cx));
+        cx.observe(&ed, |_, _, cx| cx.notify()).detach();
+        let w = self.web_mut();
+        w.conf_ed = Some(ed);
+        w.err = None;
+        w.dlg = Some(Dlg::Conf);
+        cx.notify();
     }
 
     fn web_dlg_logs(&self, cx: &mut Context<Self>) -> Stateful<Div> {
