@@ -9,6 +9,8 @@ use crate::sysops::quote;
 
 pub const CONTAINER: &str = "otter-openresty";
 pub const ACME_IMAGE: &str = "neilpang/acme.sh";
+pub mod conf;
+
 /// 证书目录在容器里的挂载点
 pub const CERT_MOUNT: &str = "/etc/otter/certs";
 /// 续期 cron 文件(root 的系统任务,「计划任务」页能看到)
@@ -1619,6 +1621,10 @@ pub struct SiteEntry {
     pub spec: Option<SiteSpec>,
     /// 正文被手工改过
     pub modified: bool,
+    /// 表单数据读自正文(手改过且能解析);否则读自头部
+    pub from_conf: bool,
+    /// 手改过时,保存重新生成后会丢失的内容(Otter 不管理的指令、注释)
+    pub lost: Vec<String>,
     pub text: String,
 }
 
@@ -1876,7 +1882,21 @@ pub fn parse_state(out: &str) -> WebState {
                             continue;
                         }
                     }
-                    st.sites.push(SiteEntry { enabled: !file.ends_with(".off"), file, modified: parsed.as_ref().is_some_and(|p| p.1), spec: parsed.map(|p| p.0), text: content.trim_end_matches('\n').to_string() + "\n" });
+                    let modified = parsed.as_ref().is_some_and(|p| p.1);
+                    let (mut from_conf, mut lost) = (false, Vec::new());
+                    let mut spec = parsed.map(|p| p.0);
+                    // 手改过:以正文为准,把能读懂的改动读回表单,读不懂的列出来
+                    if modified && let Some(h) = &spec {
+                        if let Some(p) = conf::parse_conf(content, &h.name, Some(h)) {
+                            from_conf = true;
+                            lost = p.unknown;
+                            if p.comments > 0 {
+                                lost.push(format!("{} 行注释", p.comments));
+                            }
+                            spec = Some(p.spec);
+                        }
+                    }
+                    st.sites.push(SiteEntry { enabled: !file.ends_with(".off"), file, modified, from_conf, lost, spec, text: content.trim_end_matches('\n').to_string() + "\n" });
                 }
             }
             "CERTS" => {
@@ -3321,6 +3341,13 @@ mod tests {
         let s = st.sites.iter().find(|s| s.spec.is_some()).unwrap();
         assert_eq!(s.spec.as_ref().unwrap().name, "a.example.com");
         assert!(!s.modified && s.enabled);
+        // 手改过:以正文为准,能读懂的进表单,读不懂的列出
+        let edited = site.replace("proxy_read_timeout 300s;", "proxy_read_timeout 90s;\n        proxy_buffering off;");
+        let st2 = parse_state(&STATE.replace("__SITE__", edited.trim_end()));
+        let e = st2.sites.iter().find(|s| s.spec.is_some()).unwrap();
+        assert!(e.modified && e.from_conf);
+        assert_eq!(e.spec.as_ref().unwrap().adv.read_timeout, Some(90));
+        assert!(e.lost.iter().any(|l| l.contains("proxy_buffering off")), "{:?}", e.lost);
         let ext = st.sites.iter().find(|s| s.spec.is_none()).unwrap();
         assert_eq!(ext.title(), "legacy");
         assert_eq!(st.certs.len(), 2);

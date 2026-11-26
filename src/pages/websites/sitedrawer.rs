@@ -26,6 +26,9 @@ pub(super) struct SiteDrawer {
     enabled: bool,
     /// 打开时配置正文已被手工改过:保存会按表单重新生成,覆盖手工改动
     modified: bool,
+    /// 表单读自手改过的正文;`lost` 是保存后会丢失的内容(Otter 不管理的指令、注释)
+    from_conf: bool,
+    lost: Vec<String>,
     /// 外部配置的原文编辑框(有值时抽屉只有「配置原文」一个菜单)
     raw: Option<Entity<TextareaState>>,
     menu: Menu,
@@ -263,6 +266,8 @@ impl SiteDrawer {
             name: s.name.clone(),
             enabled,
             modified: false,
+            from_conf: false,
+            lost: Vec::new(),
             raw: None,
             menu: Menu::Domains,
             ed: None,
@@ -479,6 +484,8 @@ impl Home {
         });
         let mut sd = sd;
         sd.modified = e.modified;
+        sd.from_conf = e.from_conf;
+        sd.lost = e.lost.clone();
         if e.spec.is_none() {
             let text = e.text.clone();
             let area = cx.new(|cx| TextareaState::new(window, cx).rows(24));
@@ -592,7 +599,18 @@ impl Home {
             Menu::Raw => self.sd_raw(cx),
         };
         let body = div().flex_1().min_h_0().flex().flex_row().child(nav).child(div().id("web-sd-body").flex_1().min_w_0().h_full().overflow_y_scroll().p(px(20.0)).flex().flex_col().gap(px(14.0)).child(content));
-        let warn = self.sd().and_then(|sd| if sd.modified { Some("配置被手工改过:保存会按表单重新生成,手工改动会被覆盖".to_string()) } else { sd.warn.clone() }).map(|w| (w, c::warn()));
+        let warn = self
+            .sd()
+            .and_then(|sd| match (sd.modified, sd.from_conf) {
+                (true, true) if sd.lost.is_empty() => sd.warn.clone(),
+                (true, true) => {
+                    let shown: Vec<String> = sd.lost.iter().take(3).cloned().collect();
+                    Some(format!("配置里有 {} 项 Otter 不管理的内容,保存后会移除:{}{}", sd.lost.len(), shown.join(";"), if sd.lost.len() > 3 { " …" } else { "" }))
+                }
+                (true, false) => Some("配置被手工改过,且有 Otter 读不懂的结构:保存会按表单重新生成,手工改动会被覆盖".to_string()),
+                _ => sd.warn.clone(),
+            })
+            .map(|w| (w, c::warn()));
         let err = self.web_ui().err.clone().map(|e| (e, c::danger())).or(warn);
         let foot = self.web_footer(err, "保存", true, cx);
         let mut v = vec![crate::ui::drawer("web-sd", 860.0, |_, _, _| {}, [head.into_any_element(), body.into_any_element(), foot.into_any_element()]).into_any_element()];
