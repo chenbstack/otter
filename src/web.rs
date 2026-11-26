@@ -491,7 +491,23 @@ pub struct InstallSpec {
 
 impl Default for InstallSpec {
     fn default() -> Self {
-        InstallSpec { version: "alpine".into(), project: "openresty".into(), container: CONTAINER.into(), http: 80, https: 443, cpus: String::new(), memory: String::new() }
+        InstallSpec { version: "alpine".into(), project: CONTAINER.into(), container: CONTAINER.into(), http: 80, https: 443, cpus: String::new(), memory: String::new() }
+    }
+}
+
+/// 默认的堆栈名/容器名:`otter-openresty`;已被占用就在后面加 4 位随机数
+pub fn gen_install_name(taken: &[String]) -> String {
+    use rand::RngExt as _;
+    if !taken.iter().any(|n| n == CONTAINER) {
+        return CONTAINER.into();
+    }
+    let mut rng = rand::rng();
+    loop {
+        let suf: String = (0..4).map(|_| b"0123456789abcdef"[rng.random_range(0..16)] as char).collect();
+        let n = format!("{CONTAINER}-{suf}");
+        if !taken.contains(&n) {
+            return n;
+        }
     }
 }
 
@@ -2320,8 +2336,12 @@ mod tests {
     fn install_spec_validate_and_compose() {
         let ok = InstallSpec::default();
         assert!(ok.validate(&[], &[]).is_ok());
-        assert!(ok.validate(&["openresty".into()], &[]).unwrap_err().contains("堆栈"));
-        assert!(ok.validate(&["otter-openresty".into()], &[]).unwrap_err().contains("容器"));
+        let other = InstallSpec { container: "web-2".into(), ..ok.clone() };
+        assert!(other.validate(&["otter-openresty".into()], &[]).unwrap_err().contains("堆栈"));
+        assert!(InstallSpec { project: "web-2".into(), ..ok.clone() }.validate(&["otter-openresty".into()], &[]).unwrap_err().contains("容器"));
+        assert_eq!(gen_install_name(&[]), "otter-openresty");
+        let n = gen_install_name(&["otter-openresty".into()]);
+        assert!(n.starts_with("otter-openresty-") && n.len() == "otter-openresty-".len() + 4);
         assert!(ok.validate(&[], &[443]).unwrap_err().contains("443"));
         assert!(InstallSpec { https: 80, ..ok.clone() }.validate(&[], &[]).is_err());
         assert!(InstallSpec { cpus: "x".into(), ..ok.clone() }.validate(&[], &[]).is_err());

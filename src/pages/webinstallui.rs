@@ -59,7 +59,8 @@ impl Home {
             (w.ver_custom, w.ver_search, w.cpus, w.memory) = (Some(u.0), Some(u.1), Some(u.2), Some(u.3));
             (w.project, w.container, w.http, w.https) = (Some(n.0), Some(n.1), Some(n.2), Some(n.3));
         }
-        let d = InstallSpec::default();
+        let name = web::gen_install_name(&self.taken_names());
+        let d = InstallSpec { project: name.clone(), container: name, ..Default::default() };
         let (http, https) = (d.http.to_string(), d.https.to_string());
         let w = &mut self.dock.wbi;
         w.open = true;

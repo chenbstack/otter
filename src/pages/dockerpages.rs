@@ -283,7 +283,9 @@ impl Home {
         }
         // Docker 装好了:丢掉旧连接重新检测,直接进入 Docker 页面
         if let Some(t) = self.workspace.active.and_then(|a| self.workspace.tabs.get_mut(a)) {
-            if t.docker.as_ref().is_some_and(|d| d.install_view().phase == docker::InstallPhase::Done) {
+            // 连上之后 Docker 被卸载了:刷新读到「没有 docker」,旧快照还在。重新连接一次,走和首次连接相同的检测和安装流程
+            let gone = t.docker.as_ref().is_some_and(|d| d.snapshot().is_some() && d.problem() == Some(Problem::NoDocker));
+            if gone || t.docker.as_ref().is_some_and(|d| d.install_view().phase == docker::InstallPhase::Done) {
                 t.docker = None;
                 self.dock.seen = 0;
                 redraw = true;
@@ -356,7 +358,8 @@ impl Home {
                 if self.page == Page::Overview {
                     return (d.monitor().is_none() && d.monitor_error().is_none()).then(|| loading("正在读取系统信息…").into_any_element());
                 }
-                if d.snapshot().is_some() {
+                // 有旧数据时继续显示(偶发的读取失败不该清空页面);Docker 停了、没权限了则要告诉用户
+                if d.snapshot().is_some() && !matches!(d.problem(), Some(Problem::DaemonDown(_) | Problem::NoPermission(_))) {
                     return None;
                 }
                 match d.problem() {

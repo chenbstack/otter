@@ -91,9 +91,12 @@ pub fn valid_password(s: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 自动生成的名字:`postgres-a3f9`,避开已有的堆栈名和容器名
+/// 自动生成的名字:默认 `otter-postgres`;已被堆栈名或容器名占用就在后面加 4 位随机数,如 `otter-postgres-a3f9`
 pub fn gen_name(kind: DbKind, taken: &[String]) -> String {
-    let base = image(kind, "").trim_end_matches(':').to_string();
+    let base = format!("otter-{}", image(kind, "").trim_end_matches(':'));
+    if !taken.contains(&base) {
+        return base;
+    }
     let mut rng = rand::rng();
     loop {
         let suf: String = (0..4).map(|_| b"0123456789abcdef"[rng.random_range(0..16)] as char).collect();
@@ -339,7 +342,9 @@ mod tests {
     #[test]
     fn names_avoid_taken_and_validate() {
         let n = gen_name(DbKind::Postgres, &[]);
-        assert!(n.starts_with("postgres-") && crate::docker::valid_project(&n));
+        assert_eq!(n, "otter-postgres");
+        let n2 = gen_name(DbKind::Postgres, &[n.clone()]);
+        assert!(n2.starts_with("otter-postgres-") && n2.len() == "otter-postgres-".len() + 4 && n2 != n && crate::docker::valid_project(&n2));
         let taken = vec!["pg-main".to_string()];
         let mut s = spec(DbKind::Postgres, false);
         assert!(s.validate(&taken, &[]).unwrap_err().contains("同名的堆栈"));
