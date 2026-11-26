@@ -77,8 +77,8 @@ impl Home {
             d.data = Some(Ok(Backups {
                 dir: "/opt/otter/databases/backups/demo-db".into(),
                 files: vec![
-                    dbinst::BackupFile { name: "app_20261125-101500.dump".into(), db: "app".into(), size: 48_300_000, mtime: 1_795_600_000, pre: false },
-                    dbinst::BackupFile { name: "app_20261124-030000-pre.dump".into(), db: "app".into(), size: 47_100_000, mtime: 1_795_500_000, pre: true },
+                    dbinst::BackupFile { name: "app_20261125-101500.dump".into(), db: "app".into(), size: 48_300_000, mtime: 1_795_600_000, pre: false, auto: false },
+                    dbinst::BackupFile { name: "app_20261124-030000-pre.dump".into(), db: "app".into(), size: 47_100_000, mtime: 1_795_500_000, pre: true, auto: false },
                 ],
                 ..Default::default()
             }));
@@ -556,7 +556,8 @@ impl Home {
                         .gap(px(10.0))
                         .child(div().font_family(MONO).text_size(px(t::TYPE_CONTROL)).child(fmt_time(f.mtime)))
                         .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(dbinst::fmt_size(f.size)))
-                        .children(f.pre.then(|| div().px(px(6.0)).rounded(px(t::RADIUS_SM)).bg(c::field_hover()).text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child("恢复前")));
+                        .children(f.pre.then(|| div().px(px(6.0)).rounded(px(t::RADIUS_SM)).bg(c::field_hover()).text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child("恢复前")))
+                        .children(f.auto.then(|| div().px(px(6.0)).rounded(px(t::RADIUS_SM)).bg(c::field_hover()).text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child("定时")));
                     // 正在下载这一份:下面多一条进度条和百分比
                     let downloading = dl.as_ref().filter(|(n, _)| *n == f.name);
                     let left = div()

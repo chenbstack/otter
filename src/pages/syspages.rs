@@ -9,8 +9,6 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputState};
 
-use super::daemonpage::field;
-
 use super::super::*;
 use super::dockerpages::{DockAsk, head, icon_btn, icon_btn_busy, row, small, table_flow};
 use crate::docker::Action;
@@ -49,7 +47,7 @@ pub(crate) struct SysUi {
     procs: Option<Result<Vec<Proc>, String>>,
     services: Option<Result<Vec<Service>, String>>,
     pub(super) storage: Option<Result<Vec<Mount>, String>>,
-    cron: Option<Result<CronInfo, String>>,
+    pub(super) cron: Option<Result<CronInfo, String>>,
     /// 存储页的空间透镜(点开的挂载点和扫描结果)
     pub(super) lens: Option<LensStore>,
     /// 透镜扫描的编号,每次扫描加一
@@ -61,9 +59,11 @@ pub(crate) struct SysUi {
     sort: ProcSort,
     filter: SvcFilter,
     /// 计划任务的新增/编辑表单:None 是没打开,Some(None) 是新增,Some(Some(行号)) 是编辑 crontab 里的那一行
-    cron_form: Option<Option<usize>>,
+    pub(super) cron_form: Option<Option<usize>>,
     /// 计划、命令两个输入框
-    cron_inputs: Option<Vec<Entity<InputState>>>,
+    pub(super) cron_inputs: Option<Vec<Entity<InputState>>>,
+    /// 表单里输入框以外的状态(任务类型、运行时间、备份的实例和库)
+    pub(super) cf: super::cronform::CronUi,
     demo_filled: bool,
     /// 窗口当前是否在前台、是否失去过焦点(只有前台才自动读;重新获得焦点时读一次)
     active: bool,
@@ -71,7 +71,7 @@ pub(crate) struct SysUi {
     /// 已经发出「结束」的进程和发出的时间;过 1 秒还在,就把「结束」换成「强制结束」
     killed: HashMap<u32, Instant>,
     /// 刚点删除的计划任务所在行(crontab 行号),让转圈出现在这一行
-    cron_row: Option<usize>,
+    pub(super) cron_row: Option<usize>,
     /// 空间透镜里悬停的子目录下标(圆环高亮对应的一段)
     pub(super) lens_hover: Option<String>,
     /// 透镜里已经展开的块(完整路径)
@@ -234,7 +234,7 @@ impl Home {
         }
     }
 
-    fn sys_run(&mut self, job: Job, cx: &mut Context<Self>) {
+    pub(super) fn sys_run(&mut self, job: Job, cx: &mut Context<Self>) {
         self.dock_act(Action::Sys(job), cx);
     }
 
@@ -290,7 +290,13 @@ impl Home {
             }
             // 调试:截图时直接打开编辑表单
             if page == Page::Cron && self.dock.sys.cron_form.is_none() && self.dock.sys.cron_inputs.is_none() && std::env::var_os("OTTER_CRON_FORM").is_some() {
-                self.cron_open(Some(1), "0 3 * * *", "/usr/local/bin/backup.sh --full", window, cx);
+                match std::env::var("OTTER_CRON_FORM").as_deref() {
+                    Ok("new") => self.cron_open(None, "", "", window, cx),
+                    Ok("prune") => self.cron_open_file("/etc/cron.d/otter-docker-prune-a1b2c3", "0 4 * * 0", "/opt/otter/docker/bin/prune-a1b2c3.sh # otter:docker-prune id=a1b2c3 opts=dangling,containers days=7", window, cx),
+                    Ok("cert") => self.cron_open_file("/etc/cron.d/otter-websites", "17 3 * * *", "/opt/otter/websites/bin/renew.sh", window, cx),
+                    Ok("backup") => self.cron_open(Some(2), "30 2 * * *", "/opt/otter/databases/bin/backup-pg-main.sh # otter:db-backup dbs=shop,blog keep=7", window, cx),
+                    _ => self.cron_open(Some(1), "0 3 * * *", "/usr/local/bin/backup.sh --full", window, cx),
+                }
             }
             return;
         }
@@ -300,6 +306,7 @@ impl Home {
         };
         self.lens_pump();
         self.web_pump();
+        self.cron_pump();
         for (k, r) in got {
             self.sys_store(k, r, window, cx);
         }
@@ -641,144 +648,7 @@ impl Home {
         col.into_any_element()
     }
 
-    // ---- 计划任务 ----
-
-    /// 打开新增/编辑表单(`line` 是要改的那一行)
-    fn cron_open(&mut self, line: Option<usize>, sched: &str, cmd: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dock.sys.cron_inputs.is_none() {
-            let v = ["*/5 * * * *", "/usr/local/bin/backup.sh"]
-                .iter()
-                .map(|ph| {
-                    let e = cx.new(|cx| InputState::new(window, cx).placeholder(*ph));
-                    cx.observe(&e, |_, _, cx| cx.notify()).detach();
-                    e
-                })
-                .collect();
-            self.dock.sys.cron_inputs = Some(v);
-        }
-        if let Some(ins) = &self.dock.sys.cron_inputs {
-            ins[0].update(cx, |s, cx| s.set_value(sched, window, cx));
-            ins[1].update(cx, |s, cx| s.set_value(cmd, window, cx));
-        }
-        self.dock.sys.cron_form = Some(line);
-        if let Some(ins) = &self.dock.sys.cron_inputs {
-            let f = ins[0].focus_handle(cx);
-            window.focus(&f, cx);
-        }
-        cx.notify();
-    }
-
-    fn cron_notice(&mut self, msg: &'static str, cx: &mut Context<Self>) {
-        self.dock.notice = Some((msg.into(), Instant::now()));
-        cx.notify();
-    }
-
-    /// 保存表单:改写「我的 crontab」原文再整体写回(crontab 命令自己还会检查一遍)
-    fn cron_submit(&mut self, cx: &mut Context<Self>) {
-        let (Some(line), Some(ins)) = (self.dock.sys.cron_form, self.dock.sys.cron_inputs.clone()) else { return };
-        let sched = ins[0].read(cx).value().split_whitespace().collect::<Vec<_>>().join(" ");
-        let cmd = ins[1].read(cx).value().trim().to_string();
-        if !sysops::valid_schedule(&sched) {
-            return self.cron_notice("计划要写成 5 段(分 时 日 月 周),或 @daily、@reboot 这样的简写", cx);
-        }
-        if cmd.is_empty() || cmd.contains(['\n', '\r']) {
-            return self.cron_notice("命令不能为空,也不能换行", cx);
-        }
-        let Some(Ok(info)) = &self.dock.sys.cron else { return };
-        let text = sysops::crontab_replace(&info.user_text, line, Some(&format!("{sched} {cmd}")));
-        self.dock.sys.cron_form = None;
-        self.cron_write(if line.is_some() { "修改任务" } else { "添加任务" }, text, cx);
-    }
-
-    fn cron_write(&mut self, label: &str, text: String, cx: &mut Context<Self>) {
-        self.dock.sys.cron_row = None;
-        let j = Job { label: label.into(), target: "crontab".into(), script: "crontab -".into(), root: false, input: Some(text), reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)) };
-        self.sys_run(j, cx);
-    }
-
-    /// 新增/编辑计划任务的窗口(没打开时是 None)
-    pub(crate) fn cron_dialog(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
-        if self.page != Page::Cron {
-            return None;
-        }
-        let line = self.dock.sys.cron_form?;
-        let ins = self.dock.sys.cron_inputs.clone()?;
-        let sched = ins[0].read(cx).value().split_whitespace().collect::<Vec<_>>().join(" ");
-        let ok = sched.is_empty() || sysops::valid_schedule(&sched);
-        let meaning = if sched.is_empty() {
-            "例:*/5 * * * * 每 5 分钟;0 3 * * * 每天 03:00;@reboot 开机时".to_string()
-        } else if ok {
-            format!("含义:{}", sysops::describe(&sched))
-        } else {
-            "还不是合法的计划:要 5 段(分 时 日 月 周),或 @daily 这样的简写".to_string()
-        };
-        let can = !sched.is_empty() && ok && !ins[1].read(cx).value().trim().is_empty();
-        let editing = line.is_some();
-        let title = div()
-            .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .px(px(24.0))
-            .pt(px(24.0))
-            .pb(px(14.0))
-            .child(div().text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).child(if editing { "编辑计划任务" } else { "新增计划任务" }))
-            .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child("写进当前登录用户的 crontab,注释和其他任务保持不变"));
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap(px(14.0))
-            .px(px(24.0))
-            .pb(px(20.0))
-            .child(field("计划", "分 时 日 月 周,或 @daily、@reboot 这样的简写", &ins[0]))
-            .child(field("命令", "用登录用户的身份执行,路径写绝对路径更稳妥", &ins[1]));
-        let cancel = crate::node_form::ctl_btn("cron-cancel", None, "取消", 34.0).on_click(cx.listener(|this, _, _, cx| {
-            this.dock.sys.cron_form = None;
-            cx.notify();
-        }));
-        let submit = div()
-            .id("cron-ok")
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(34.0))
-            .px(px(16.0))
-            .rounded(px(t::RADIUS_MD))
-            .text_size(px(t::TYPE_CONTROL))
-            .font_weight(FontWeight::SEMIBOLD)
-            .when(can, |d| d.bg(c::accent()).text_color(c::on_accent()).cursor_pointer().hover(|s| s.opacity(0.88)))
-            .when(!can, |d| d.bg(c::field()).border_1().border_color(c::field_border()).text_color(c::ghost()))
-            .child("保存")
-            .on_click(cx.listener(|this, _, _, cx| this.cron_submit(cx)));
-        let footer = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .px(px(24.0))
-            .py(px(14.0))
-            .border_t_1()
-            .border_color(c::line())
-            .child(div().flex_1().min_w_0().text_size(px(t::TYPE_MICRO)).text_color(if ok { c::ghost() } else { c::warn() }).child(SharedString::from(meaning)))
-            .child(cancel)
-            .child(submit);
-        Some(crate::ui::modal(
-            "cron-dialog",
-            520.0,
-            cx.listener(|this, e: &KeyDownEvent, _, cx| match e.keystroke.key.as_str() {
-                "escape" => {
-                    this.dock.sys.cron_form = None;
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-                "enter" => {
-                    this.cron_submit(cx);
-                    cx.stop_propagation();
-                }
-                _ => {}
-            }),
-            [title.into_any_element(), body.into_any_element(), footer.into_any_element()],
-        ))
-    }
+    // ---- 计划任务(新增/编辑窗口见 `cronform.rs`) ----
 
     fn cron_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let info = match &self.dock.sys.cron {
@@ -833,11 +703,53 @@ impl Home {
                         })));
                     }
                 }
+                // root 装的任务(/etc/cron.d 里 Otter 生成的):定时备份、Docker 清理、网站证书续期,都能编辑、删除
+                let task = crate::dbinst::parse_sched(&j.cmd);
+                let ptask = crate::crontasks::parse_prune(&j.cmd);
+                let cert = crate::crontasks::is_cert_renew(&j.source, &j.cmd);
+                let managed = j.line.is_none() && (task.is_some() && j.source.starts_with(crate::dbinst::SCHED_CROND) || ptask.is_some() && j.source.starts_with(crate::crontasks::PRUNE_CROND) || cert);
+                if managed {
+                    let (file, sc, cm) = (j.source.clone(), j.schedule.clone(), j.cmd.clone());
+                    act = act.child(tip(icon_btn(("cj-edit", i), IconName::Pencil, c::secondary()), "编辑").on_click(cx.listener(move |this, _, window, cx| this.cron_open_file(&file, &sc, &cm, window, cx))));
+                    let file = j.source.clone();
+                    let (script, title, name, body) = if let Some(tk) = &task {
+                        (Some(tk.script.clone()), "删除定时备份", tk.ctr.clone(), "删除这个定时备份任务和它的脚本,之后不会再自动备份;已有的备份文件保留")
+                    } else if let Some(tk) = &ptask {
+                        (Some(tk.script.clone()), "删除 Docker 清理", "Docker 清理".to_string(), "删除这个清理任务和它的脚本,之后不会再自动清理")
+                    } else {
+                        (None, "删除证书续期", "证书续期".to_string(), "删除后已签发的证书不再自动续期,到期前要手动续期;网站里再申请证书时会重新装上")
+                    };
+                    act = act.child(tip(icon_btn(("cj-del", i), IconName::Trash, c::danger()), "删除").on_click(cx.listener(move |this, _, _, cx| {
+                        let rm = match &script {
+                            Some(sc) if sc.starts_with(crate::crontasks::BIN) || sc.starts_with(crate::srvdata::DB) => {
+                                if sc.contains(['\'', '\n']) || file.contains(['\'', '\n']) {
+                                    return;
+                                }
+                                format!("rm -f '{file}' '{sc}'")
+                            }
+                            Some(_) => return,
+                            None => crate::web::cron_remove_script(),
+                        };
+                        let j = Job { label: "删除任务".into(), target: "crontab".into(), script: rm, root: true, input: None, reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)) };
+                        this.ask(DockAsk { title, tile: IconName::CalendarClock, name: name.clone(), detail: "/etc/cron.d", body, label: "删除任务", action: Action::Sys(j), list: Vec::new() }, cx);
+                    })));
+                }
+                let tag = |label: &'static str, bg: Rgba, fg: Rgba| div().flex_shrink_0().px(px(6.0)).rounded(px(t::RADIUS_SM)).bg(bg).text_size(px(t::TYPE_CAPTION)).text_color(fg).child(label);
+                let two = |tg: Div, name: String, sub: String| div().flex_1().min_w_0().flex().flex_col().child(div().flex().flex_row().items_center().gap(px(8.0)).child(tg).child(div().min_w_0().truncate().text_size(px(t::TYPE_CONTROL)).child(SharedString::from(name)))).child(div().truncate().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(SharedString::from(sub)));
+                let cmd_cell = if let Some(tk) = &task {
+                    two(tag("备份数据库", c::accent_soft(), c::accent()), tk.ctr.clone(), format!("{} · 保留 {} 份", tk.dbs.join("、"), tk.keep))
+                } else if let Some(tk) = &ptask {
+                    two(tag("Docker 清理", c::warn_soft(), c::warn()), tk.opts.describe(), "日志 /opt/otter/docker/logs/prune.log".into())
+                } else if cert {
+                    two(tag("证书续期", c::idle_soft(), c::secondary()), "检查网站证书,快到期的自动续期".into(), format!("日志 {}", crate::crontasks::renew_log()))
+                } else {
+                    div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CONTROL)).font_family(MONO).child(j.cmd.clone())
+                };
                 row(("cj", i))
                     .child(div().w(px(170.0)).flex_shrink_0().truncate().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(j.source.clone()))
                     .child(div().w(px(190.0)).flex_shrink_0().flex().flex_col().child(div().text_size(px(t::TYPE_CONTROL)).child(sysops::describe(&j.schedule))).child(div().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(j.schedule.clone())))
                     .child(cell(72.0, j.user.clone()))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CONTROL)).font_family(MONO).child(j.cmd.clone()))
+                    .child(cmd_cell)
                     .child(act)
             })
             .collect();
@@ -910,10 +822,16 @@ const DEMO_CRON: &str = "\
 MAILTO=ops@example.com\n\
 */5 * * * * /usr/local/bin/health-check.sh\n\
 0 3 * * * /usr/local/bin/backup.sh --full\n\
+30 2 * * * /opt/otter/databases/bin/backup-pg-main.sh # otter:db-backup dbs=shop,blog keep=7\n\
 @reboot /opt/app/start.sh\n\
 @@FILE /etc/crontab\n\
 17 * * * * root cd / && run-parts --report /etc/cron.hourly\n\
 25 6 * * * root test -x /usr/sbin/anacron || run-parts --report /etc/cron.daily\n\
+@@FILE /etc/cron.d/otter-docker-prune-a1b2c3\n\
+0 4 * * 0 root /opt/otter/docker/bin/prune-a1b2c3.sh # otter:docker-prune id=a1b2c3 opts=dangling,containers days=7\n\
+@@FILE /etc/cron.d/otter-websites\n\
+# otter:cert-renew 由 Otter 管理\n\
+17 3 * * * root /opt/otter/websites/bin/renew.sh\n\
 @@FILE /etc/cron.d/certbot\n\
 0 */12 * * * root certbot -q renew\n\
 @@TIMERS\n\

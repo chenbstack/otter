@@ -517,6 +517,129 @@ pub fn describe(schedule: &str) -> String {
     schedule.to_string()
 }
 
+// ---- 人性化的运行时间 ----
+
+/// 计划任务的运行频率(表单里的「每天 03:00」「每隔 30 分钟」);和 cron 表达式互相转换
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FreqKind {
+    Minutes,
+    Hours,
+    Daily,
+    Weekly,
+    Monthly,
+    Reboot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Freq {
+    pub kind: FreqKind,
+    /// 每隔几分钟/几小时
+    pub every: u32,
+    pub hour: u32,
+    pub minute: u32,
+    /// 周几:第 0 位是周日,第 1 位是周一……(和 cron 的 0-6 一致)
+    pub weekdays: u8,
+    /// 每月几号
+    pub day: u32,
+}
+
+impl Default for Freq {
+    fn default() -> Self {
+        Freq { kind: FreqKind::Daily, every: 30, hour: 3, minute: 0, weekdays: 0b0000010, day: 1 }
+    }
+}
+
+impl Freq {
+    /// 转成 cron 表达式;取值不合法(周几一个都没选、时间越界)返回 None
+    pub fn to_cron(&self) -> Option<String> {
+        let (h, m) = (self.hour, self.minute);
+        if h > 23 || m > 59 {
+            return None;
+        }
+        Some(match self.kind {
+            FreqKind::Reboot => "@reboot".to_string(),
+            FreqKind::Minutes if (1..=59).contains(&self.every) => if self.every == 1 { "* * * * *".into() } else { format!("*/{} * * * *", self.every) },
+            FreqKind::Hours if (1..=23).contains(&self.every) => if self.every == 1 { format!("{m} * * * *") } else { format!("{m} */{} * * *", self.every) },
+            FreqKind::Daily => format!("{m} {h} * * *"),
+            FreqKind::Weekly if self.weekdays & 0x7f != 0 => {
+                let days: Vec<String> = (0..7).filter(|d| self.weekdays & (1 << d) != 0).map(|d| d.to_string()).collect();
+                format!("{m} {h} * * {}", days.join(","))
+            }
+            FreqKind::Monthly if (1..=31).contains(&self.day) => format!("{m} {h} {} * *", self.day),
+            _ => return None,
+        })
+    }
+
+    /// 从 cron 表达式反解;复杂的表达式(范围、多个小时等)返回 None,由「高级」处理
+    pub fn from_cron(s: &str) -> Option<Freq> {
+        let d = Freq::default();
+        match s.trim() {
+            "@reboot" => return Some(Freq { kind: FreqKind::Reboot, ..d }),
+            "@hourly" => return Some(Freq { kind: FreqKind::Hours, every: 1, minute: 0, ..d }),
+            "@daily" | "@midnight" => return Some(Freq { kind: FreqKind::Daily, hour: 0, minute: 0, ..d }),
+            "@weekly" => return Some(Freq { kind: FreqKind::Weekly, hour: 0, minute: 0, weekdays: 1, ..d }),
+            "@monthly" => return Some(Freq { kind: FreqKind::Monthly, hour: 0, minute: 0, day: 1, ..d }),
+            _ => {}
+        }
+        let f: Vec<&str> = s.split_whitespace().collect();
+        if f.len() != 5 {
+            return None;
+        }
+        let (m, h, dom, mon, dow) = (f[0], f[1], f[2], f[3], f[4]);
+        let num = |x: &str| x.parse::<u32>().ok();
+        let step = |x: &str| x.strip_prefix("*/").and_then(num);
+        if mon != "*" {
+            return None;
+        }
+        if [m, h, dom, dow].iter().all(|x| *x == "*") {
+            return Some(Freq { kind: FreqKind::Minutes, every: 1, ..d });
+        }
+        if let (Some(n), true) = (step(m), [h, dom, dow].iter().all(|x| *x == "*")) {
+            return (1..=59).contains(&n).then_some(Freq { kind: FreqKind::Minutes, every: n, ..d });
+        }
+        let mm = num(m).filter(|v| *v <= 59)?;
+        if h == "*" && dom == "*" && dow == "*" {
+            return Some(Freq { kind: FreqKind::Hours, every: 1, minute: mm, ..d });
+        }
+        if let (Some(n), true) = (step(h), dom == "*" && dow == "*") {
+            return (1..=23).contains(&n).then_some(Freq { kind: FreqKind::Hours, every: n, minute: mm, ..d });
+        }
+        let hh = num(h).filter(|v| *v <= 23)?;
+        if dom == "*" && dow == "*" {
+            return Some(Freq { kind: FreqKind::Daily, hour: hh, minute: mm, ..d });
+        }
+        if dom == "*" {
+            let mut mask = 0u8;
+            for part in dow.split(',') {
+                let (a, b) = match part.split_once('-') {
+                    Some((a, b)) => (num(a)?, num(b)?),
+                    None => (num(part)?, num(part)?),
+                };
+                if a > 7 || b > 7 || a > b {
+                    return None;
+                }
+                for v in a..=b {
+                    mask |= 1 << (v % 7);
+                }
+            }
+            return Some(Freq { kind: FreqKind::Weekly, hour: hh, minute: mm, weekdays: mask, ..d });
+        }
+        if dow == "*" {
+            let day = num(dom).filter(|v| (1..=31).contains(v))?;
+            return Some(Freq { kind: FreqKind::Monthly, hour: hh, minute: mm, day, ..d });
+        }
+        None
+    }
+}
+
+/// 表单里的 `HH:MM`(也接受 `H:MM`、`HH：MM`)
+pub fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
+    let s = s.trim().replace('：', ":");
+    let (h, m) = s.split_once(':')?;
+    let (h, m) = (h.trim().parse::<u32>().ok()?, m.trim().parse::<u32>().ok()?);
+    (h <= 23 && m <= 59).then_some((h, m))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,4 +776,29 @@ mod tests {
         assert!(matches!(parse_remove(""), Removed::Failed(_)));
     }
 
+    #[test]
+    fn freq_round_trips() {
+        let f = |s: &str| Freq::from_cron(s);
+        assert_eq!(f("*/5 * * * *").unwrap().to_cron().unwrap(), "*/5 * * * *");
+        assert_eq!(f("0 */6 * * *").unwrap().to_cron().unwrap(), "0 */6 * * *");
+        assert_eq!(f("30 3 * * *").map(|x| (x.kind, x.hour, x.minute)), Some((FreqKind::Daily, 3, 30)));
+        assert_eq!(f("0 4 * * 1,3,5").unwrap().to_cron().unwrap(), "0 4 * * 1,3,5");
+        assert_eq!(f("0 4 * * 1-5").unwrap().to_cron().unwrap(), "0 4 * * 1,2,3,4,5");
+        assert_eq!(f("0 4 * * 7").unwrap().to_cron().unwrap(), "0 4 * * 0");
+        assert_eq!(f("15 2 10 * *").unwrap().to_cron().unwrap(), "15 2 10 * *");
+        assert_eq!(f("@reboot").unwrap().to_cron().unwrap(), "@reboot");
+        assert_eq!(f("@daily").unwrap().to_cron().unwrap(), "0 0 * * *");
+        // 复杂的留给「高级」
+        assert!(f("0 1,13 * * *").is_none());
+        assert!(f("0 3 * 6 *").is_none());
+        assert!(f("*/90 * * * *").is_none());
+        // 取值不合法
+        let w = Freq { kind: FreqKind::Weekly, weekdays: 0, ..Freq::default() };
+        assert!(w.to_cron().is_none());
+        assert!(Freq { hour: 24, ..Freq::default() }.to_cron().is_none());
+        assert_eq!(parse_hhmm("3:05"), Some((3, 5)));
+        assert_eq!(parse_hhmm("03：30"), Some((3, 30)));
+        assert!(parse_hhmm("25:00").is_none());
+        assert!(parse_hhmm("abc").is_none());
+    }
 }

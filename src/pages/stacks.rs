@@ -93,7 +93,7 @@ impl Home {
                     .child("节点详情"),
             );
         // 侧边栏:概览,把容器/堆栈/镜像/存储卷合在一起的「容器」(里面用页签切换),以及服务器的运维页
-        for (i, p) in [Page::Overview, Page::Containers, Page::Database, Page::Processes, Page::Services, Page::Storage, Page::Cron, Page::Websites, Page::Store].into_iter().enumerate() {
+        for (i, p) in [Page::Overview, Page::Containers, Page::Websites, Page::Database, Page::Processes, Page::Services, Page::Storage, Page::Cron, Page::Store].into_iter().enumerate() {
             let active = if p == Page::Containers { self.page.is_docker() } else { self.page == p };
             let count = menu_count(node, &self.dock.snap, p);
             col = col.child(

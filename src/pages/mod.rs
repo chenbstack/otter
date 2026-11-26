@@ -12,6 +12,7 @@ pub mod monitorpage;
 pub mod daemonpage;
 pub mod registrypage;
 pub mod syspages;
+pub mod cronform;
 pub mod ctpanel;
 pub mod composeedit;
 pub mod spacelens;

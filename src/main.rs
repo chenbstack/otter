@@ -21,6 +21,7 @@ mod docker_install;
 mod srvdata;
 mod web;
 mod dbinst;
+mod crontasks;
 mod dbsecret;
 mod dbinstall;
 mod dbparams;

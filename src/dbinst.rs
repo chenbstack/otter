@@ -851,6 +851,8 @@ pub struct BackupFile {
     pub mtime: u64,
     /// 恢复前自动做的那份
     pub pre: bool,
+    /// 定时备份产生的(文件名里带任务编号)
+    pub auto: bool,
 }
 
 /// 备份列表脚本的解析结果(已按库过滤)
@@ -971,6 +973,127 @@ impl DbKind {
     }
 }
 
+// ---- 定时备份 ---------------------------------------------------------------------
+//
+// 「计划任务」里的「备份数据库」类型:服务器上放一个 `backup-<容器>.sh`(Otter 生成,App 不在也能跑),
+// cron 行里用行尾注释 `# otter:db-backup ctr=<容器> id=<编号> dbs=a,b keep=7` 记录选了哪些库、保留几份,列表和编辑据此回填。
+// 备份文件和手动备份同目录;定时备份的文件名多一个任务编号,超过保留份数时只删这个任务自己的最旧备份,手动备份不动。
+
+/// cron 行尾的标记
+pub const SCHED_MARK: &str = "# otter:db-backup";
+/// root 身份装的任务放在这里(`/etc/cron.d/otter-db-backup-<容器>-<编号>`,容器名里的点换成横线,因为 cron.d 会忽略带点的文件名)
+pub const SCHED_CROND: &str = "/etc/cron.d/otter-db-backup-";
+
+/// 一个定时备份任务(从 cron 行的命令部分解析出来)。同一个实例可以有多个任务,靠编号区分;
+/// 任务产生的备份文件名带编号(`<库>_<时间>-<编号>.<扩展名>`),保留份数只清理自己的文件,手动备份不受影响
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchedTask {
+    pub ctr: String,
+    /// 任务编号;旧版本建的任务没有编号(空串),脚本名 `backup-<容器>.sh`,备份文件和手动备份同名
+    pub id: String,
+    pub dbs: Vec<String>,
+    pub keep: u32,
+    /// 脚本路径(删除时一并清理)
+    pub script: String,
+}
+
+/// 任务编号:字母数字 4-12 位
+pub fn valid_task_id(s: &str) -> bool {
+    (4..=12).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// 脚本文件名(不含目录)
+pub fn sched_script_name(ctr: &str, id: &str) -> String {
+    if id.is_empty() { format!("backup-{ctr}.sh") } else { format!("backup-{ctr}-{id}.sh") }
+}
+
+/// cron 行里的命令部分:`<脚本路径> # otter:db-backup ctr=<容器> id=<编号> dbs=a,b keep=7`
+pub fn sched_cmd(bin: &str, ctr: &str, id: &str, dbs: &[String], keep: u32) -> String {
+    format!("{bin}/{} {SCHED_MARK} ctr={ctr} id={id} dbs={} keep={keep}", sched_script_name(ctr, id), dbs.join(","))
+}
+
+pub fn parse_sched(cmd: &str) -> Option<SchedTask> {
+    let (path, rest) = cmd.split_once(SCHED_MARK)?;
+    let script = path.trim().to_string();
+    let file = script.rsplit('/').next()?.strip_prefix("backup-")?.strip_suffix(".sh")?;
+    let (mut ctr, mut id) = (file.to_string(), String::new());
+    let (mut dbs, mut keep) = (Vec::new(), 7);
+    for tok in rest.split_whitespace() {
+        if let Some(v) = tok.strip_prefix("ctr=") {
+            ctr = v.to_string();
+        } else if let Some(v) = tok.strip_prefix("id=") {
+            id = v.to_string();
+        } else if let Some(v) = tok.strip_prefix("dbs=") {
+            dbs = v.split(',').filter(|d| valid_ident(d)).map(str::to_string).collect();
+        } else if let Some(v) = tok.strip_prefix("keep=") {
+            keep = v.parse().unwrap_or(7);
+        }
+    }
+    if !valid_container(&ctr) || (!id.is_empty() && !valid_task_id(&id)) {
+        return None;
+    }
+    Some(SchedTask { ctr, id, dbs, keep, script })
+}
+
+impl DbKind {
+    /// 定时备份脚本的内容:依次备份 `dbs`,成功后只留最新的 `keep` 份;日志写在备份目录的 `.schedule.log`。
+    /// 脚本里的 `@@SU@@` 由安装脚本替换成登录用户名(root 身份运行时用来把备份文件交还给登录用户)
+    pub fn sched_script(self, ctr: &str, id: &str, dbs: &[String], keep: u32) -> Result<String, String> {
+        let ext = self.backup_ext().ok_or("Redis 不支持备份")?;
+        if !valid_container(ctr) || !valid_task_id(id) || dbs.is_empty() || !dbs.iter().all(|d| valid_ident(d)) {
+            return Err("容器名或库名里有不支持的字符,请到终端里处理".into());
+        }
+        if !(1..=365).contains(&keep) {
+            return Err("保留份数要在 1 到 365 之间".into());
+        }
+        let mut s = String::from("#!/bin/sh\n# Otter 定时备份:由 Otter 生成,请在 Otter 的「计划任务」里修改,手改会被覆盖\nPATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin; export PATH\n[ -n \"@@SU@@\" ] && SUDO_USER=\"@@SU@@\"\n");
+        s.push_str(concat!(
+            "if docker info >/dev/null 2>&1; then docker() { command docker \"$@\"; }; ",
+            "elif sudo -n docker info >/dev/null 2>&1; then docker() { sudo -n docker \"$@\"; }; ",
+            "else echo \"当前用户没有 docker 权限\" >&2; exit 1; fi\n"
+        ));
+        s.push_str(&Self::backup_prelude(ctr));
+        s.push_str("LOGF=\"$D/.schedule.log\"; rc=0; log() { printf '%s %s\\n' \"$(date '+%F %T')\" \"$1\" >>\"$LOGF\"; }\n");
+        s.push_str("a=$(df -Pk \"$D\" | awk 'NR==2{print $4}'); [ \"${a:-0}\" -ge 102400 ] || { log \"磁盘剩余空间不足 100MB,本次未备份\"; exit 1; }\ncd \"$D\" || exit 1\n");
+        let stamp = "[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]";
+        // 文件名带任务编号:保留份数只数/删自己的,手动备份(没有编号)不受影响
+        for db in dbs {
+            s.push_str(&self.dump_fn(ctr, db));
+            s.push_str(&format!(
+                "\nF=\"{db}_$(date +%Y%m%d-%H%M%S)-{id}.{ext}\"; if dump_to \"$F\"; then log \"{db} 备份完成 $F\"; ls -1t {db}_{stamp}-{id}.{ext} 2>/dev/null | tail -n +{n} | while read -r x; do rm -f \"$x\"; done; else rc=1; log \"{db} 备份失败:$(tail -n1 \"$F.fail\" 2>/dev/null | tr '\\t' ' ')\"; fi\n",
+                n = keep + 1
+            ));
+        }
+        s.push_str("[ -f \"$LOGF\" ] && tail -n 200 \"$LOGF\" >\"$LOGF.t\" && mv \"$LOGF.t\" \"$LOGF\"; chown \"$U\" \"$LOGF\" 2>/dev/null\nexit $rc\n");
+        Ok(s)
+    }
+}
+
+/// 装定时备份(root 身份):脚本写进 `/opt/otter/databases/bin/`,
+/// 计划写进 `/etc/cron.d/otter-db-backup-<容器>`。`line` 是不含用户列的 cron 行,里面的 `@@BIN@@` 会被换掉
+pub fn sched_install_root(ctr: &str, id: &str, body: &str, sched: &str, cmd: &str) -> Result<String, String> {
+    if !valid_container(ctr) || !valid_task_id(id) || body.contains("OTTER_EOF") || !crate::sysops::valid_schedule(sched) || cmd.contains(['\n', '\r']) {
+        return Err("容器名或计划里有不支持的字符".into());
+    }
+    Ok(format!(
+        r#"B={bin}; mkdir -p "$B" || exit 1; sed "s#@@SU@@#${{SUDO_USER:-}}#g" >"$B/{name}" <<'OTTER_EOF'
+{body}OTTER_EOF
+chmod 700 "$B/{name}" || exit 1; sed "s#@@BIN@@#$B#g" >"{file}" <<'OTTER_EOF'
+{sched} root {cmd}
+OTTER_EOF
+chmod 644 "{file}"
+"#,
+        bin = format!("{}/bin", crate::srvdata::DB),
+        name = sched_script_name(ctr, id),
+        file = sched_crond_file(ctr, id)
+    ))
+}
+
+/// root 任务的 cron.d 文件路径
+pub fn sched_crond_file(ctr: &str, id: &str) -> String {
+    format!("{SCHED_CROND}{}-{id}", ctr.replace('.', "-"))
+}
+
 /// 备份列表脚本(登录用户身份即可):`H` 主目录、`F` 完成的备份、`P` 进行中、`E` 失败、`R` 恢复状态
 pub fn backup_list_script(ctr: &str) -> Result<String, String> {
     if !valid_container(ctr) {
@@ -1029,10 +1152,10 @@ pub fn parse_backups(out: &str, db: &str) -> Backups {
     let mut b = Backups::default();
     let mine = |name: &str| name.strip_prefix(db).is_some_and(|r| r.starts_with('_'));
     // 文件名 = <库名>_<时间戳>[-pre].<扩展名>;库名里可以有下划线,所以从右边切
-    let owner = |name: &str| -> Option<(String, bool)> {
+    let owner = |name: &str| -> Option<(String, bool, bool)> {
         let stem = name.split('.').next()?;
         let (d, ts) = stem.rsplit_once('_')?;
-        Some((d.to_string(), ts.ends_with("-pre")))
+        Some((d.to_string(), ts.ends_with("-pre"), ts.matches('-').count() >= 2 && !ts.ends_with("-pre")))
     };
     for l in out.lines() {
         let f: Vec<&str> = l.trim_end_matches('\r').split('\t').collect();
@@ -1040,12 +1163,12 @@ pub fn parse_backups(out: &str, db: &str) -> Backups {
             ["H", h] => b.dir = h.to_string(),
             ["L", n, kb] => b.legacy = Some((n.parse().unwrap_or(0), kb.parse().unwrap_or(0))),
             ["F", name, size, mtime] if mine(name) => {
-                if let Some((d, pre)) = owner(name).filter(|(d, _)| d == db) {
-                    b.files.push(BackupFile { name: name.to_string(), db: d, size: size.parse().unwrap_or(0), mtime: mtime.parse().unwrap_or(0), pre });
+                if let Some((d, pre, auto)) = owner(name).filter(|(d, _, _)| d == db) {
+                    b.files.push(BackupFile { name: name.to_string(), db: d, size: size.parse().unwrap_or(0), mtime: mtime.parse().unwrap_or(0), pre, auto });
                 }
             }
-            ["P", name, size] if mine(name) && owner(name).is_some_and(|(d, _)| d == db) => b.running.push((name.to_string(), size.parse().unwrap_or(0))),
-            ["E", name, msg] if mine(name) && owner(name).is_some_and(|(d, _)| d == db) => b.failed.push((name.to_string(), msg.to_string())),
+            ["P", name, size] if mine(name) && owner(name).is_some_and(|(d, _, _)| d == db) => b.running.push((name.to_string(), size.parse().unwrap_or(0))),
+            ["E", name, msg] if mine(name) && owner(name).is_some_and(|(d, _, _)| d == db) => b.failed.push((name.to_string(), msg.to_string())),
             ["R", d, state] if *d == db => b.restore = Some(state.to_string()),
             _ => {}
         }
@@ -1385,4 +1508,41 @@ mod tests {
         // 库名里带下划线时不会和前缀相同的库混在一起
         assert_eq!(parse_backups(out, "shop_old").files.len(), 1);
     }
+    #[test]
+    fn sched_tasks() {
+        let dbs = vec!["shop".to_string(), "blog_2".to_string()];
+        let cmd = sched_cmd("/opt/otter/databases/bin", "pg-main", "ab12cd", &dbs, 7);
+        let t = parse_sched(&cmd).unwrap();
+        assert_eq!((t.ctr.as_str(), t.id.as_str(), t.dbs.clone(), t.keep), ("pg-main", "ab12cd", dbs.clone(), 7));
+        assert_eq!(t.script, "/opt/otter/databases/bin/backup-pg-main-ab12cd.sh");
+        // 旧格式:没有编号,容器名取自脚本名
+        let old = parse_sched("/x/backup-pg-main.sh # otter:db-backup dbs=a keep=3").unwrap();
+        assert_eq!((old.ctr.as_str(), old.id.as_str(), old.keep), ("pg-main", "", 3));
+        assert!(parse_sched("/usr/local/bin/backup.sh").is_none());
+        assert!(parse_sched("/x/other.sh # otter:db-backup dbs=a keep=1").is_none());
+        assert!(parse_sched("/x/backup-a.sh # otter:db-backup ctr=a id=x/ keep=1").is_none());
+        assert!(DbKind::Redis.sched_script("r", "ab12cd", &dbs, 7).is_err());
+        assert!(DbKind::Postgres.sched_script("pg", "ab12cd", &[], 7).is_err());
+        assert!(DbKind::Postgres.sched_script("pg", "ab12cd", &["a b".into()], 7).is_err());
+        assert!(DbKind::Postgres.sched_script("pg", "ab12cd", &dbs, 0).is_err());
+        assert_eq!(sched_crond_file("my.db", "ab12cd"), "/etc/cron.d/otter-db-backup-my-db-ab12cd");
+    }
+
+    #[test]
+    fn sched_scripts_are_valid_sh() {
+        let dbs = vec!["shop".to_string(), "blog_2".to_string()];
+        for k in [DbKind::Postgres, DbKind::Mysql] {
+            let body = k.sched_script("db-1", "ab12cd", &dbs, 7).unwrap();
+            assert!(body.contains("tail -n +8"));
+            let tmp = std::env::temp_dir().join(format!("otter-sched-{k:?}.sh"));
+            let root = sched_install_root("db-1", "ab12cd", &body, "0 3 * * *", &sched_cmd("@@BIN@@", "db-1", "ab12cd", &dbs, 7)).unwrap();
+            for (name, text) in [("body", body.clone()), ("root", root)] {
+                std::fs::write(&tmp, text).unwrap();
+                let o = std::process::Command::new("sh").arg("-n").arg(&tmp).output().unwrap();
+                assert!(o.status.success(), "{name}: {}", String::from_utf8_lossy(&o.stderr));
+            }
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
 }
