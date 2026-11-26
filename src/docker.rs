@@ -594,7 +594,7 @@ enum Cmd {
     /// 在服务器上跑一段无需 root 的只读脚本(如查镜像 tag),结果存进 `Shared.db[tag]`
     Shell { tag: String, script: String },
     /// 数据库备份/恢复:在服务器上以 root(docker 要 sudo 时)或登录用户跑一段脚本,长任务由脚本自己脱离运行,这里只等它「启动」;结果存进 `Shared.db[tag]`
-    HostSh { tag: String, script: String, secs: u64 },
+    HostSh { tag: String, script: String, secs: u64, input: Option<zeroize::Zeroizing<String>> },
     /// 把服务器上的一个文件下载到本地(整个读进内存,上限 `FETCH_MAX`);结果是本地路径
     Fetch { tag: String, remote: String, local: std::path::PathBuf },
     /// 容器里的文件操作:界面是 SFTP 那套文件管理,命令在这里换成 docker exec / docker cp
@@ -850,7 +850,12 @@ impl Docker {
 
     /// 备份/恢复脚本(见 `Cmd::HostSh`)
     pub fn host_run(&self, tag: &str, script: String, secs: u64) {
-        let _ = self.cmd.send(Cmd::HostSh { tag: tag.to_string(), script, secs });
+        let _ = self.cmd.send(Cmd::HostSh { tag: tag.to_string(), script, secs, input: None });
+    }
+
+    /// 同 `host_run`,另带 stdin(密码之类不进命令行的内容)
+    pub fn host_run_in(&self, tag: &str, script: String, input: String, secs: u64) {
+        let _ = self.cmd.send(Cmd::HostSh { tag: tag.to_string(), script, secs, input: Some(zeroize::Zeroizing::new(input)) });
     }
 
     /// 下载进度 (已下载, 总大小);没有在下载返回 None
@@ -2175,11 +2180,12 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
                         });
                         continue;
                     }
-                    Cmd::HostSh { tag, script, secs } => {
+                    Cmd::HostSh { tag, script, secs, input } => {
                         let (r, sh2) = (runner.clone(), sh.clone());
                         tokio::spawn(async move {
                             let t = Duration::from_secs(secs);
-                            let res = if matches!(r.sudo, Sudo::No) { sys_exec(&r, &script, false, None, t).await } else { r.root(&script, None, t).await };
+                            let inp = input.as_ref().map(|i| i.as_str());
+                            let res = if matches!(r.sudo, Sudo::No) { sys_exec(&r, &script, false, inp, t).await } else { r.root(&script, inp, t).await };
                             let res = match res {
                                 Ok(o) if o.code == 0 => Ok(o.stdout),
                                 Ok(o) => Err(last_line(&o)),

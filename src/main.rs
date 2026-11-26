@@ -21,6 +21,7 @@ mod docker_install;
 mod srvdata;
 mod web;
 mod dbinst;
+mod dbsecret;
 mod dbinstall;
 #[allow(dead_code)]
 mod appstore;

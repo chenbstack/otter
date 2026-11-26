@@ -6,6 +6,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, Textar
 use gpui_kit::component::Sizable as _;
 use super::dockerpages::{head, loading, row, small, state_color, table_flow};
 use crate::dbinst::{self, DbInstance, DbKind, DbRow, RedisInfo, UserRow};
+use crate::dbsecret;
 
 type Loaded<T> = Option<Result<T, String>>;
 
@@ -52,6 +53,20 @@ pub(crate) struct DbMgr {
     tries: u32,
     /// 已发出还没收到结果的请求 tag
     pub(super) inflight: Vec<String>,
+    /// 服务器上已保存密码的用户键(`用户` 或 `用户@主机`,见 `dbsecret`);读到之前为 None
+    saved: Option<std::collections::HashSet<String>>,
+    /// 正在写的键(写成功后记进 `saved`)
+    save_key: Option<String>,
+    /// 创建/重置成功后要写到服务器的 (键, 文件内容, 只在文件已存在时写)
+    save_req: Option<(String, zeroize::Zeroizing<String>, bool)>,
+    /// 删用户成功后要删掉保存的文件(键)
+    del_key: Option<String>,
+    /// 数据库操作成功后接着要做的事,由 `dbm_poll` 末尾执行
+    follow: Option<Follow>,
+    /// 创建/重置完成弹窗里,保存密码这一步的结果
+    done_save: DoneSave,
+    /// 正在看的已保存密码 (用户, 主机, 读回结果)
+    secret: Option<(String, String, Option<Result<zeroize::Zeroizing<String>, String>>)>,
     /// 当前页的数据要重读(旧数据继续显示,读回来再替换)
     stale: bool,
     /// 最近一次读回库/用户/信息的时间,自动重读以它为准
@@ -71,6 +86,8 @@ struct DbForm {
     desc: Entity<TextareaState>,
     superuser: bool,
     show_pw: bool,
+    /// 把这个库的用户密码保存到服务器(默认开)
+    save_pw: bool,
 }
 
 /// 新建用户弹窗里的输入
@@ -83,6 +100,8 @@ struct UserForm {
     grants: Vec<dbinst::Grant>,
     add_open: bool,
     show_pw: bool,
+    /// 把密码保存到服务器(默认开;编辑时不用)
+    save_pw: bool,
     /// 编辑已有用户:(用户名, 主机);新建时为 None
     edit: Option<(String, String)>,
     /// 编辑时读回来的现有授权(读到之前为 None,保存时拿它和 `grants` 比出差异)
@@ -92,7 +111,7 @@ struct UserForm {
 /// 凭据卡片的内容(见 `dbm_cred_card`)
 struct CredCard {
     title: &'static str,
-    desc: Option<&'static str>,
+    desc: Option<String>,
     db: Option<String>,
     user: String,
     pw: Option<String>,
@@ -114,6 +133,25 @@ enum CredStatus {
 enum CredClose {
     Conn,
     Done,
+    Secret,
+}
+
+/// 数据库操作成功后接着做的事
+#[derive(Clone, Copy, PartialEq)]
+enum Follow {
+    Save,
+    Delete,
+}
+
+/// 完成弹窗里「保存密码到服务器」这一步的状态
+#[derive(Default, Clone, PartialEq)]
+enum DoneSave {
+    /// 没打开保存
+    #[default]
+    No,
+    Saving,
+    Saved,
+    Failed(String),
 }
 
 /// 新结果替换旧的;新结果是错误而旧的是好数据时,保留旧的
@@ -154,6 +192,15 @@ impl Home {
                 self.dock.dbm.inflight.push(tag);
             }
         }
+        // 服务器上已保存密码的用户(Redis 没有用户);重读时一起重读
+        let m = &self.dock.dbm;
+        let stag = format!("dbm:saved:{}", m.cur);
+        if inst.kind != DbKind::Redis && (m.saved.is_none() || m.stale) && !m.inflight.contains(&stag) && inst.container.running() {
+            if let (Ok(script), Some(d)) = (dbsecret::list_script(&inst.container.name), self.dbm_docker()) {
+                d.host_run(&stag, script, 30);
+                self.dock.dbm.inflight.push(stag);
+            }
+        }
         let m = &self.dock.dbm;
         let tag = format!("dbm:{what}:{}", m.cur);
         let have = have && !m.stale;
@@ -165,6 +212,40 @@ impl Home {
         if let Some(d) = self.dbm_docker() {
             d.db_run(&tag, inst.kind.exec_args(&inst.container.name), Some(sql.to_string()));
             self.dock.dbm.inflight.push(tag);
+        }
+    }
+
+    /// 数据库操作成功后接着做:把密码写到服务器 / 删掉保存的文件
+    fn dbm_follow(&mut self) {
+        let Some(f) = self.dock.dbm.follow.take() else { return };
+        let Some(inst) = self.dbm_inst() else { return };
+        let cont = inst.container.name.clone();
+        match f {
+            Follow::Save => {
+                let Some((key, content, only_if_exists)) = self.dock.dbm.save_req.take() else { return };
+                let Ok(script) = dbsecret::save_script(&cont, &key, only_if_exists) else { return };
+                let tag = format!("dbm:savepw:{cont}");
+                if let Some(d) = self.dbm_docker() {
+                    d.host_run_in(&tag, script, content.to_string(), 30);
+                    let m = &mut self.dock.dbm;
+                    m.inflight.push(tag);
+                    m.save_key = Some(key);
+                    m.done_save = DoneSave::Saving;
+                }
+            }
+            Follow::Delete => {
+                let Some(key) = self.dock.dbm.del_key.take() else { return };
+                let Ok(script) = dbsecret::delete_script(&cont, &key) else { return };
+                let tag = format!("dbm:delpw:{cont}");
+                if let Some(d) = self.dbm_docker() {
+                    d.host_run(&tag, script, 30);
+                    let m = &mut self.dock.dbm;
+                    m.inflight.push(tag);
+                    if let Some(set) = m.saved.as_mut() {
+                        set.remove(&key);
+                    }
+                }
+            }
         }
     }
 
@@ -187,6 +268,32 @@ impl Home {
             }
             if tag.starts_with("dbm:addr:") {
                 m.conn_addrs = Some(r.unwrap_or_default());
+                continue;
+            }
+            if tag.starts_with("dbm:saved:") {
+                m.saved = Some(r.unwrap_or_default().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect());
+                continue;
+            }
+            if tag.starts_with("dbm:savepw:") {
+                let key = m.save_key.take();
+                m.done_save = match r {
+                    Ok(_) => {
+                        if let Some(k) = key {
+                            m.saved.get_or_insert_with(Default::default).insert(k);
+                        }
+                        DoneSave::Saved
+                    }
+                    Err(e) => DoneSave::Failed(e),
+                };
+                continue;
+            }
+            if tag.starts_with("dbm:readpw:") {
+                if let Some(sec) = m.secret.as_mut() {
+                    sec.2 = Some(r.and_then(|t| dbsecret::parse(&t).map(|(_, _, pw)| zeroize::Zeroizing::new(pw)).ok_or_else(|| "文件内容读不懂".to_string())));
+                }
+                continue;
+            }
+            if tag.starts_with("dbm:delpw:") {
                 continue;
             }
             if tag.starts_with("dbm:cred:") {
@@ -242,8 +349,14 @@ impl Home {
             if tag.starts_with("dbm:dropuser:") {
                 m.busy = false;
                 match r {
-                    Ok(_) => m.users = None,
-                    Err(e) => m.reset_err = Some(e),
+                    Ok(_) => {
+                        m.users = None;
+                        m.follow = m.del_key.is_some().then_some(Follow::Delete);
+                    }
+                    Err(e) => {
+                        m.del_key = None;
+                        m.reset_err = Some(e);
+                    }
                 }
                 continue;
             }
@@ -256,8 +369,12 @@ impl Home {
                         m.users = None;
                         m.done = m.pending.take();
                         m.done_kind = 2;
+                        m.follow = m.save_req.is_some().then_some(Follow::Save);
                     }
-                    Err(e) => m.form_err = Some(e),
+                    Err(e) => {
+                        m.save_req = None;
+                        m.form_err = Some(e);
+                    }
                 }
                 continue;
             }
@@ -267,9 +384,11 @@ impl Home {
                     Ok(_) => {
                         m.done = m.pending.take();
                         m.done_kind = 1;
+                        m.follow = m.save_req.is_some().then_some(Follow::Save);
                     }
                     Err(e) => {
                         m.pending = None;
+                        m.save_req = None;
                         m.reset_err = Some(e);
                     }
                 }
@@ -285,8 +404,12 @@ impl Home {
                         m.users = None;
                         m.done = m.pending.take();
                         m.done_kind = 0;
+                        m.follow = m.save_req.is_some().then_some(Follow::Save);
                     }
-                    Err(e) => m.form_err = Some(e),
+                    Err(e) => {
+                        m.save_req = None;
+                        m.form_err = Some(e);
+                    }
                 }
                 continue;
             }
@@ -298,6 +421,7 @@ impl Home {
                 _ => keep_old(&mut m.redis, r.and_then(|o| dbinst::redis_check(&o).map(|_| dbinst::parse_redis(&o)))),
             }
         }
+        self.dbm_follow();
     }
 
     pub(crate) fn dbm_page(&mut self, list: Vec<DbInstance>, cx: &mut Context<Self>) -> AnyElement {
@@ -516,7 +640,7 @@ impl Home {
         let fh = name.focus_handle(cx);
         window.focus(&fh, cx);
         let m = &mut self.dock.dbm;
-        m.form = Some(DbForm { name, user, password, desc, superuser: true, show_pw: false });
+        m.form = Some(DbForm { name, user, password, desc, superuser: true, show_pw: false, save_pw: true });
         m.busy = false;
         m.form_err = None;
         cx.notify();
@@ -546,10 +670,30 @@ impl Home {
                 return;
             }
         };
+        // 「保存密码到服务器」:这个库的所有者用户的密码(PostgreSQL 用户没有主机,MySQL 是 用户@%)
+        let host_key = if inst.kind == DbKind::Postgres { "" } else { "%" };
+        let req = if f.save_pw {
+            match dbsecret::key(&user, host_key) {
+                Some(k) => Some((k, zeroize::Zeroizing::new(dbsecret::content(&user, host_key, &pw)), false)),
+                None => {
+                    self.dock.dbm.form_err = Some("用户名里有不能用于保存的字符(只支持字母、数字和 _ . % -),请换个用户名,或关掉「保存密码」".into());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        self.dock.dbm.done_save = DoneSave::No;
         if self.demo {
-            self.dock.dbm.form = None;
-            self.dock.dbm.done = Some((name, user, pw));
-            self.dock.dbm.done_kind = 0;
+            let m = &mut self.dock.dbm;
+            m.form = None;
+            m.done = Some((name, user, pw));
+            m.done_kind = 0;
+            if let Some((k, _, _)) = req {
+                m.saved.get_or_insert_with(Default::default).insert(k);
+                m.done_save = DoneSave::Saved;
+            }
             cx.notify();
             return;
         }
@@ -561,6 +705,7 @@ impl Home {
             m.busy = true;
             m.form_err = None;
             m.pending = Some((name, user, pw));
+            m.save_req = req;
         }
         cx.notify();
     }
@@ -578,9 +723,14 @@ impl Home {
                 return;
             }
         };
+        // 这个用户保存过密码:新密码同步覆盖服务器上的那份
+        let host_key = if inst.kind == DbKind::Postgres { String::new() } else { host.clone() };
+        let req = dbsecret::key(&user, &host_key).filter(|k| self.dock.dbm.saved.as_ref().is_some_and(|s| s.contains(k))).map(|k| (k, zeroize::Zeroizing::new(dbsecret::content(&user, &host_key, &pw)), true));
+        self.dock.dbm.done_save = DoneSave::No;
         if self.demo {
             self.dock.dbm.done = Some((String::new(), user, pw));
             self.dock.dbm.done_kind = 1;
+            self.dock.dbm.done_save = if req.is_some() { DoneSave::Saved } else { DoneSave::No };
             cx.notify();
             return;
         }
@@ -592,6 +742,7 @@ impl Home {
             m.busy = true;
             m.reset_err = None;
             m.pending = Some((String::new(), user, pw));
+            m.save_req = req;
         }
         cx.notify();
     }
@@ -693,7 +844,7 @@ impl Home {
         let fh = name.focus_handle(cx);
         window.focus(&fh, cx);
         let m = &mut self.dock.dbm;
-        m.uform = Some(UserForm { name, host, password, grants: Vec::new(), add_open: false, show_pw: false, edit: None, orig: None });
+        m.uform = Some(UserForm { name, host, password, grants: Vec::new(), add_open: false, show_pw: false, save_pw: true, edit: None, orig: None });
         m.busy = false;
         m.form_err = None;
         cx.notify();
@@ -794,6 +945,19 @@ impl Home {
         let name = f.name.read(cx).value().trim().to_string();
         let host = if inst.kind == DbKind::Postgres { String::new() } else { f.host.read(cx).value().trim().to_string() };
         let pw = f.password.read(cx).value().to_string();
+        let req = if f.save_pw {
+            match dbsecret::key(&name, &host) {
+                Some(k) => Some((k, zeroize::Zeroizing::new(dbsecret::content(&name, &host, &pw)), false)),
+                None => {
+                    self.dock.dbm.form_err = Some("用户名或主机里有不能用于保存的字符(只支持字母、数字和 _ . % -),请改一下,或关掉「保存密码」".into());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        self.dock.dbm.done_save = DoneSave::No;
         let sql = match inst.kind.create_user_with_grants_sql(&name, &host, &pw, &f.grants) {
             Ok(q) => q,
             Err(e) => {
@@ -807,6 +971,10 @@ impl Home {
             m.uform = None;
             m.done = Some((f.grants.iter().map(|g| g.db.as_str()).collect::<Vec<_>>().join(", "), name, pw));
             m.done_kind = 2;
+            if let Some((k, _, _)) = req {
+                m.saved.get_or_insert_with(Default::default).insert(k);
+                m.done_save = DoneSave::Saved;
+            }
             cx.notify();
             return;
         }
@@ -818,6 +986,7 @@ impl Home {
             m.busy = true;
             m.form_err = None;
             m.pending = Some((f.grants.iter().map(|g| g.db.as_str()).collect::<Vec<_>>().join(", "), name, pw));
+            m.save_req = req;
         }
         cx.notify();
     }
@@ -834,9 +1003,14 @@ impl Home {
                 return;
             }
         };
+        let host_key = if inst.kind == DbKind::Postgres { String::new() } else { host.clone() };
+        let del = dbsecret::key(&user, &host_key).filter(|k| self.dock.dbm.saved.as_ref().is_some_and(|s| s.contains(k)));
         if self.demo {
             if let Some(Ok(v)) = &mut self.dock.dbm.users {
                 v.retain(|u| !(u.name == user && u.host == host));
+            }
+            if let (Some(k), Some(s)) = (&del, self.dock.dbm.saved.as_mut()) {
+                s.remove(k);
             }
             cx.notify();
             return;
@@ -848,6 +1022,7 @@ impl Home {
             m.inflight.push(tag);
             m.busy = true;
             m.reset_err = None;
+            m.del_key = del;
         }
         cx.notify();
     }
@@ -1120,6 +1295,18 @@ impl Home {
                         v.push(col("允许连接的主机(% 表示任意)", input(&f.host)).into_any_element());
                     }
                     v.push(col("密码", pw_inner).into_any_element());
+                    v.push(
+                        Self::dbm_save_card(
+                            f.save_pw,
+                            Self::pill_switch("dbm-uf-save", f.save_pw).on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(f) = this.dock.dbm.uform.as_mut() {
+                                    f.save_pw = !f.save_pw;
+                                }
+                                cx.notify();
+                            })),
+                        )
+                        .into_any_element(),
+                    );
                     v
                 }
             })
@@ -1130,7 +1317,7 @@ impl Home {
                     .flex_row()
                     .items_center()
                     .gap(px(10.0))
-                    .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CAPTION)).text_color(if err.is_some() { c::danger() } else { c::ghost() }).child(err.unwrap_or_else(|| if f.edit.is_some() { "只改有变化的库的权限".into() } else { "密码只在创建成功后显示一次".into() })))
+                    .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CAPTION)).text_color(if err.is_some() { c::danger() } else { c::ghost() }).child(err.unwrap_or_else(|| if f.edit.is_some() { "只改有变化的库的权限".into() } else { if f.save_pw { "创建后会显示一次密码,也已保存到服务器".into() } else { "密码只在创建成功后显示一次".into() } })))
                     .child(button("dbm-uf-cancel", IconName::X, "取消").on_click(cx.listener(|this, _, _, cx| this.dbm_close_uform(cx))))
                     .child(ok),
             );
@@ -1247,6 +1434,24 @@ impl Home {
         cx.notify();
     }
 
+    /// 查看服务器上已保存的用户密码(现读,只放内存)
+    fn dbm_secret_open(&mut self, user: String, host: String, cx: &mut Context<Self>) {
+        let Some(inst) = self.dbm_inst() else { return };
+        let Some(key) = dbsecret::key(&user, &host) else { return };
+        if self.demo {
+            self.dock.dbm.secret = Some((user, host, Some(Ok(zeroize::Zeroizing::new("Xk3-demo-password-9aQ".into())))));
+        } else {
+            self.dock.dbm.secret = Some((user, host, None));
+            let cont = inst.container.name.clone();
+            if let (Ok(script), Some(d)) = (dbsecret::read_script(&cont, &key), self.dbm_docker()) {
+                let tag = format!("dbm:readpw:{cont}");
+                d.host_run(&tag, script, 30);
+                self.dock.dbm.inflight.push(tag);
+            }
+        }
+        cx.notify();
+    }
+
     /// 「连接信息」:现读的管理员账号和密码
     fn dbm_conn_dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.dock.dbm.conn_open {
@@ -1257,7 +1462,7 @@ impl Home {
             Some(Err(e)) => (CredStatus::Error(e.clone()), String::new(), None),
             Some(Ok((u, p))) => (CredStatus::Ready, u.clone(), (!p.is_empty()).then(|| p.to_string())),
         };
-        let card = CredCard { title: "连接信息", desc: Some("管理员账号取自容器的环境变量,只在这里显示,关闭后不保留。"), db: None, user, pw, status, one_time: false, close: CredClose::Conn, pw_missing: "容器环境变量里没有" };
+        let card = CredCard { title: "连接信息", desc: Some("管理员账号取自容器的环境变量,只在这里显示,关闭后不保留。".into()), db: None, user, pw, status, one_time: false, close: CredClose::Conn, pw_missing: "容器环境变量里没有" };
         self.dbm_cred_card(card, cx)
     }
 
@@ -1277,7 +1482,11 @@ impl Home {
                     m.conn_open = false;
                     m.conn = None;
                 }
-                CredClose::Done => m.done = None,
+                CredClose::Done => {
+                    m.done = None;
+                    m.done_save = DoneSave::No;
+                }
+                CredClose::Secret => m.secret = None,
             }
             m.conn_show = false;
             m.conn_menu = false;
@@ -1369,6 +1578,9 @@ impl Home {
             fields = fields.child(row("dbm-cred-db", "数据库", db.clone(), Some(db), None));
         }
         fields = fields.child(div().relative().child(row("dbm-cred-host", "主机", host.clone(), Some(host.clone()), uri_btn)).children(menu));
+        if host != "127.0.0.1" {
+            fields = fields.child(row("dbm-cred-local", "本机地址", "127.0.0.1".into(), Some("127.0.0.1".into()), None));
+        }
         fields = fields.child(row("dbm-cred-port", "端口", port.clone(), Some(port), None));
         match &status {
             CredStatus::Loading => fields = fields.child(div().py(px(10.0)).child(loading("正在读取账号…"))),
@@ -1419,8 +1631,39 @@ impl Home {
         v.extend(self.dbm_udrop_dialog(cx));
         v.extend(self.dbm_user_dialog(window, cx));
         v.extend(self.dbm_conn_dialog(cx));
+        v.extend(self.dbm_secret_dialog(cx));
         v.extend(self.dbm_bk_overlays(cx));
         v
+    }
+
+    /// 「保存密码到服务器」开关卡片(新建数据库、新建用户共用)
+    fn dbm_save_card(on: bool, switch: impl IntoElement) -> Div {
+        div()
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .p(px(12.0))
+            .rounded(px(t::RADIUS_MD))
+            .border_1()
+            .border_color(c::field_border())
+            .bg(c::field())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(div().text_size(px(t::TYPE_CONTROL)).child("保存密码到服务器"))
+                    .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(if on {
+                        "存到服务器的 /opt/otter/databases/secrets/(只有 root 能读),以后可以在列表里查看和复制"
+                    } else {
+                        "不保存:密码只在创建后显示这一次,数据库里只存哈希,以后拿不到,只能重置密码"
+                    })),
+            )
+            .child(switch)
     }
 
     fn dbm_drawer(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1502,6 +1745,15 @@ impl Home {
             .child(col("数据库名称", input(&f.name)))
             .child(col("用户名", input(&f.user)))
             .child(col("密码", pw_inner))
+            .child(Self::dbm_save_card(
+                f.save_pw,
+                Self::pill_switch("dbm-form-save", f.save_pw).on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(f) = this.dock.dbm.form.as_mut() {
+                        f.save_pw = !f.save_pw;
+                    }
+                    cx.notify();
+                })),
+            ))
             .child(su_card)
             .children(pg.then(|| {
                 let focused = f.desc.focus_handle(cx).is_focused(window);
@@ -1549,7 +1801,7 @@ impl Home {
             .py(px(12.0))
             .border_t_1()
             .border_color(c::border())
-            .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CAPTION)).text_color(if err.is_some() { c::danger() } else { c::ghost() }).child(err.unwrap_or_else(|| "密码只在创建成功后显示一次".into())))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CAPTION)).text_color(if err.is_some() { c::danger() } else { c::ghost() }).child(err.unwrap_or_else(|| if f.save_pw { "创建后会显示一次密码,也已保存到服务器".into() } else { "密码只在创建成功后显示一次".into() })))
             .child(ok);
         Some(
             crate::ui::drawer("dbm-drawer", 380.0, cx.listener(|this, _, _, cx| this.dbm_close_form(cx)), [head.into_any_element(), body.into_any_element(), foot.into_any_element()])
@@ -1567,13 +1819,21 @@ impl Home {
     fn dbm_done_dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (db, user, pw) = self.dock.dbm.done.clone()?;
         let kind = self.dock.dbm.done_kind;
+        let one_time = "密码只在这里显示这一次,数据库里也只存哈希,请现在复制。忘了只能重置密码。";
+        let desc = match (&self.dock.dbm.done_save, kind) {
+            (DoneSave::No, 1) => "原密码已立即失效,使用旧密码的应用需要改成新密码。新密码只在这里显示这一次,Otter 不会保存。".to_string(),
+            (DoneSave::No, 2) => format!("用户已创建。{one_time}"),
+            (DoneSave::No, _) => one_time.to_string(),
+            (DoneSave::Saving, _) => "正在把密码保存到服务器…".to_string(),
+            (DoneSave::Saved, 1) => "原密码已立即失效,使用旧密码的应用需要改成新密码。服务器上保存的密码已同步更新。".to_string(),
+            (DoneSave::Saved, 2) => "用户已创建,密码已保存到服务器(只有 root 能读),以后可以在「用户」页点眼睛图标查看和复制。".to_string(),
+            (DoneSave::Saved, _) => "密码已保存到服务器(只有 root 能读),以后可以在「用户」页(PostgreSQL 也可以在库所属用户这一行)点眼睛图标查看和复制。".to_string(),
+            (DoneSave::Failed(e), 1) => format!("原密码已立即失效。服务器上保存的密码没能更新:{e}。新密码只在这里显示这一次,请现在复制。"),
+            (DoneSave::Failed(e), _) => format!("已创建,但密码没能保存到服务器:{e}。{one_time}"),
+        };
         let card = CredCard {
             title: ["数据库已创建", "密码已重置", "用户已创建"][kind.min(2) as usize],
-            desc: Some(match kind {
-                1 => "原密码已立即失效,使用旧密码的应用需要改成新密码。新密码只在这里显示这一次,Otter 不会保存。",
-                2 => "用户已创建。密码只在这里显示这一次,Otter 不会保存,数据库里也只存哈希,请现在复制。忘了只能重置密码。",
-                _ => "密码只在这里显示这一次,Otter 不会保存,数据库里也只存哈希,请现在复制。忘了只能重置密码。",
-            }),
+            desc: Some(desc),
             db: Some(db),
             user,
             pw: Some(pw),
@@ -1582,6 +1842,19 @@ impl Home {
             close: CredClose::Done,
             pw_missing: "",
         };
+        self.dbm_cred_card(card, cx)
+    }
+
+    /// 看服务器上保存的密码:读回来的文件内容只放内存,关闭即丢
+    fn dbm_secret_dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (user, host, got) = self.dock.dbm.secret.clone()?;
+        let (status, pw) = match got {
+            None => (CredStatus::Loading, None),
+            Some(Err(e)) => (CredStatus::Error(e), None),
+            Some(Ok(p)) => (CredStatus::Ready, Some(p.to_string())),
+        };
+        let who = if host.is_empty() { user } else { format!("{user}@{host}") };
+        let card = CredCard { title: "已保存的密码", desc: Some("取自服务器上保存的文件(只有 root 能读),只在这里显示,关闭后不保留。".into()), db: None, user: who, pw, status, one_time: false, close: CredClose::Secret, pw_missing: "文件里没有密码" };
         self.dbm_cred_card(card, cx)
     }
 
@@ -1621,8 +1894,9 @@ impl Home {
         if !pg {
             header = header.child(head("表数").w(px(60.0)));
         }
-        header = header.child(head("连接").w(px(60.0))).child(head("大小").w(px(90.0))).child(head(if pg { "描述" } else { "" }).flex_1().min_w_0()).child(head("操作").w(px(110.0)).text_right());
+        header = header.child(head("连接").w(px(60.0))).child(head("大小").w(px(90.0))).child(head(if pg { "描述" } else { "" }).flex_1().min_w_0()).child(head("操作").w(px(140.0)).text_right());
         let admin = self.dock.dbm.cred.clone();
+        let saved = self.dock.dbm.saved.clone().unwrap_or_default();
         let body = rows
             .iter()
             .enumerate()
@@ -1645,16 +1919,19 @@ impl Home {
                 let owner = d.extra.clone();
                 let can_reset = pg && !owner.is_empty() && admin.as_deref() != Some(owner.as_str());
                 let name = d.name.clone();
+                let has_pw = pg && dbsecret::key(&owner, "").is_some_and(|k| saved.contains(&k));
+                let owner2 = owner.clone();
                 use super::dockerpages::icon_btn_c;
                 use super::syspages::tip;
                 r.child(
                     div()
-                        .w(px(110.0))
+                        .w(px(140.0))
                         .flex()
                         .flex_row()
                         .justify_end()
                         .items_center()
                         .gap(px(2.0))
+                        .children(has_pw.then(|| tip(icon_btn_c(("dbm-db-secret", i), IconName::Eye, c::muted()), "查看已保存的密码").on_click(cx.listener(move |this, _, _, cx| this.dbm_secret_open(owner2.clone(), String::new(), cx)))))
                         .child(tip(icon_btn_c(("dbm-db-bk", i), IconName::DatabaseBackup, c::muted()), "备份与恢复").on_click(cx.listener({
                             let n = name.clone();
                             move |this, _, _, cx| this.dbm_bk_open(n.clone(), cx)
@@ -1681,7 +1958,8 @@ impl Home {
         }
         let Some(Ok(rows)) = &self.dock.dbm.users else { return div().into_any_element() };
         let mysql = kind != DbKind::Postgres;
-        let header = div().child(head("用户").flex_1().min_w_0()).child(head(if mysql { "主机" } else { "权限" }).w(px(240.0))).child(head("操作").w(px(110.0)).text_right());
+        let header = div().child(head("用户").flex_1().min_w_0()).child(head(if mysql { "主机" } else { "权限" }).w(px(240.0))).child(head("操作").w(px(140.0)).text_right());
+        let saved = self.dock.dbm.saved.clone().unwrap_or_default();
         let body = rows
             .iter()
             .enumerate()
@@ -1692,13 +1970,18 @@ impl Home {
                     .child({
                         let (n, h) = (u.name.clone(), u.host.clone());
                         let (n2, h2, n3, h3) = (u.name.clone(), u.host.clone(), u.name.clone(), u.host.clone());
+                        let has_pw = !u.system && dbsecret::key(&u.name, &u.host).is_some_and(|k| saved.contains(&k));
+                        let (n4, h4) = (u.name.clone(), u.host.clone());
                         div()
-                            .w(px(110.0))
+                            .w(px(140.0))
                             .flex()
                             .flex_row()
                             .justify_end()
                             .items_center()
                             .children(u.system.then(|| tag("系统")))
+                            .children(has_pw.then(|| {
+                                super::syspages::tip(super::dockerpages::icon_btn_c(("dbm-usecret", i), IconName::Eye, c::muted()), "查看已保存的密码").on_click(cx.listener(move |this, _, _, cx| this.dbm_secret_open(n4.clone(), h4.clone(), cx)))
+                            }))
                             .children((!u.system).then(|| {
                                 super::syspages::tip(super::dockerpages::icon_btn_c(("dbm-uedit", i), IconName::Pencil, c::muted()), "编辑权限").on_click(cx.listener(move |this, _, window, cx| this.dbm_open_edit(n3.clone(), h3.clone(), window, cx)))
                             }))
