@@ -985,6 +985,8 @@ impl Home {
                         "balance" => Some(sitedrawer::Menu::Balance),
                         "https" => Some(sitedrawer::Menu::Https),
                         "adv" => Some(sitedrawer::Menu::Advanced),
+                        "limits" => Some(sitedrawer::Menu::Limits),
+                        "content" => Some(sitedrawer::Menu::Content),
                         _ => None,
                     };
                     if let (Some(menu), Some(sd)) = (menu, self.web_mut().sd.as_deref_mut()) {

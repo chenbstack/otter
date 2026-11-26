@@ -5,6 +5,8 @@
 
 use super::*;
 
+mod extra;
+
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Menu {
     Domains,
@@ -13,6 +15,7 @@ pub(super) enum Menu {
     Content,
     Https,
     Advanced,
+    Limits,
     /// 没有 Otter 头部的外部配置:只能改原文
     Raw,
 }
@@ -55,6 +58,8 @@ pub(super) struct SiteDrawer {
     to: Entity<InputState>,
     to_https: bool,
     code: u16,
+    /// 后加的高级项(压缩/访问控制/响应头/…/流量限制)
+    x: extra::Extra,
     /// 正在编辑的列表项(编辑窗口)
     ed: Option<SdEdit>,
 }
@@ -64,12 +69,17 @@ pub(super) enum EdKind {
     Listener,
     Loc,
     Up,
+    Header,
+    ErrPage,
+    Rewrite,
+    User,
 }
 
 enum Draft {
     L(LForm),
     Loc(LocForm),
     Up(UpForm),
+    Kv(extra::KvForm),
 }
 
 /// 编辑窗口的草稿:点「确定」才写回列表(`slot` 为 None 是新增)
@@ -282,6 +292,7 @@ impl SiteDrawer {
             to: mk_in("example.com", &to, window, cx),
             to_https,
             code,
+            x: extra::Extra::new(&s.adv, window, cx),
         }
     }
 
@@ -335,7 +346,8 @@ impl SiteDrawer {
         };
         let tls_protocols = (self.tls != [false, false, true, true]).then(|| web::TLS_VERSIONS.iter().zip(self.tls).filter(|(_, on)| *on).map(|(v, _)| v.to_string()).collect::<Vec<_>>());
         let ciphers = if self.cipher_mode < 3 { Some(web::CIPHER_PRESETS[self.cipher_mode].1.to_string()) } else { Some(self.ciphers.read(cx).value().split_whitespace().collect::<String>()) }.filter(|v| !v.is_empty());
-        let adv = web::Advanced { max_body: Some(val(&self.max_body, cx)).filter(|v| !v.is_empty()), read_timeout: opt_num(&self.timeout, "读取超时", cx)?, tls_protocols, ciphers, no_http2: !self.h2, http3: self.h3, ocsp: self.ocsp, hsts_age: (self.hsts_age != 31536000).then_some(self.hsts_age), hsts_sub: self.hsts_sub, hsts_preload: self.hsts_pre };
+        let adv = web::Advanced { max_body: Some(val(&self.max_body, cx)).filter(|v| !v.is_empty()), read_timeout: opt_num(&self.timeout, "读取超时", cx)?, tls_protocols, ciphers, no_http2: !self.h2, http3: self.h3, ocsp: self.ocsp, hsts_age: (self.hsts_age != 31536000).then_some(self.hsts_age), hsts_sub: self.hsts_sub, hsts_preload: self.hsts_pre, ..Default::default() };
+        let adv = self.x.fill(adv, self.kind == 1, cx)?;
         let spec = SiteSpec { name: self.name.clone(), kind, hsts: self.hsts && self.https(), listeners, ipv6: self.ipv6, adv };
         spec.check()?;
         Ok(spec)
@@ -364,6 +376,7 @@ impl SiteDrawer {
             _ => v.push((Menu::Content, IconName::Route, "跳转")),
         }
         v.push((Menu::Https, IconName::Lock, "HTTPS"));
+        v.push((Menu::Limits, IconName::Gauge, "流量限制"));
         v.push((Menu::Advanced, IconName::SlidersHorizontal, "高级"));
         v
     }
@@ -379,7 +392,11 @@ fn menu_for_error(e: &str) -> Option<Menu> {
         Some(Menu::Https)
     } else if e.contains("域名") || e.contains("监听") || e.contains("端口") || e.contains("重复") {
         Some(Menu::Domains)
-    } else if e.contains("上传") || e.contains("超时") {
+    } else if e.contains("请求速率") || e.contains("并发连接") || e.contains("限速") || e.contains("不限制的 IP") {
+        Some(Menu::Limits)
+    } else if e.contains("缓存") || e.contains("防盗链") || e.contains("首页") {
+        Some(Menu::Content)
+    } else if e.contains("上传") || e.contains("超时") || e.contains("压缩") || e.contains("IP") || e.contains("认证") || e.contains("响应头") || e.contains("日志") || e.contains("错误页") || e.contains("重写") || e.contains("代理") {
         Some(Menu::Advanced)
     } else {
         None
@@ -571,6 +588,7 @@ impl Home {
             Menu::Content => self.sd_content(cx),
             Menu::Https => self.sd_https(cx),
             Menu::Advanced => self.sd_advanced(cx),
+            Menu::Limits => self.sd_limits(cx),
             Menu::Raw => self.sd_raw(cx),
         };
         let body = div().flex_1().min_h_0().flex().flex_row().child(nav).child(div().id("web-sd-body").flex_1().min_w_0().h_full().overflow_y_scroll().p(px(20.0)).flex().flex_col().gap(px(14.0)).child(content));
@@ -602,6 +620,7 @@ impl Home {
             }
             (EdKind::Up, Some(i)) => sd.ups.get(i).map(|u| Draft::Up(dup_up(u, window, cx))),
             (EdKind::Up, None) => Some(Draft::Up(new_up(&format!("group{}", sd.ups.len() + 1), window, cx))),
+            (EdKind::Header | EdKind::ErrPage | EdKind::Rewrite | EdKind::User, _) => extra::open_draft(sd, kind, slot, window, cx),
             _ => None,
         };
         if let (Some(draft), Some(sd)) = (draft, self.sdm()) {
@@ -643,6 +662,7 @@ impl Home {
                     Ok(())
                 }
             }
+            (_, Draft::Kv(f)) => extra::commit(sd, ed.kind, ed.slot, f, cx),
             _ => Ok(()),
         };
         if let Err(e) = check {
@@ -683,6 +703,7 @@ impl Home {
                 }
                 None => sd.ups.push(f),
             },
+            Draft::Kv(_) => {}
         }
         cx.notify();
     }
@@ -735,6 +756,7 @@ impl Home {
             EdKind::Listener => (if new { "添加监听" } else { "编辑监听" }, "一组域名 + HTTP 端口,可同时开启 HTTPS"),
             EdKind::Loc => (if new { "添加路径" } else { "编辑路径" }, "按路径把请求转发到后端;最长的路径优先匹配"),
             EdKind::Up => (if new { "添加后端组" } else { "编辑后端组" }, "把一组后端定义成 upstream,多条路径可以共用"),
+            k => extra::dialog_title(k, new),
         };
         let mut body = div().flex().flex_col().gap(px(14.0));
         match &ed.draft {
@@ -899,6 +921,7 @@ impl Home {
                     .child(labeled("成员", "权重越大分到的请求越多;备用成员只在其它成员都不可用时才用", div().flex().flex_col().gap(px(4.0)).child(srvs).child(add)))
                     .child(labeled("被动健康检查", "留空为默认(1 次失败、摘除 10 秒)", health));
             }
+            Draft::Kv(f) => body = extra::dialog_body(ed.kind, f, cx),
         }
         let err = ed.err.clone();
         let cancel = crate::node_form::ctl_btn("web-sd-ed-cancel", None, "取消", 34.0).on_click(cx.listener(|this, _, _, cx| {
@@ -1136,6 +1159,8 @@ impl Home {
     fn sd_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(sd) = self.sd() else { return div().into_any_element() };
         if sd.kind == 1 {
+            let more = self.sd_static_more(cx);
+            let Some(sd) = self.sd() else { return div().into_any_element() };
             return div()
                 .flex()
                 .flex_col()
@@ -1154,6 +1179,7 @@ impl Home {
                     }
                     cx.notify();
                 })))
+                .children(more)
                 .into_any_element();
         }
         let https = sd.to_https;
@@ -1397,6 +1423,7 @@ impl Home {
     // ---------------------------------------------------------------- 高级
 
     fn sd_advanced(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let more = self.sd_advanced_more(cx);
         let Some(sd) = self.sd() else { return div().into_any_element() };
         let ipv6 = sd.ipv6;
         div()
@@ -1412,6 +1439,7 @@ impl Home {
                 }
                 cx.notify();
             })))
+            .children(more)
             .into_any_element()
     }
 }

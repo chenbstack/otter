@@ -329,6 +329,119 @@ pub struct Advanced {
     pub hsts_age: Option<u32>,
     pub hsts_sub: bool,
     pub hsts_preload: bool,
+    /// 压缩:None 沿用全局(Otter 装的 nginx.conf 里是开);级别 1–9;类型(空格分隔的 MIME)
+    pub gzip: Option<bool>,
+    pub gzip_level: Option<u8>,
+    pub gzip_types: Option<String>,
+    /// IP 访问控制:0 不限制 1 白名单(只允许列表) 2 黑名单(拒绝列表);列表是 IP 或 CIDR
+    pub ip_mode: u8,
+    pub ip_list: Vec<String>,
+    /// 基本认证(用户名 + 密码)
+    pub auth: Option<BasicAuth>,
+    /// 自定义响应头(名, 值)
+    pub headers: Vec<(String, String)>,
+    /// 关闭访问日志
+    pub log_off: bool,
+    /// 错误日志级别;None 用 warn
+    pub error_level: Option<String>,
+    /// 自定义错误页:(状态码, 站内路径或完整 URL)
+    pub err_pages: Vec<(u16, String)>,
+    /// 可信代理(IP/CIDR)和取真实 IP 的请求头;列表为空就不启用
+    pub real_ip: Vec<String>,
+    pub real_ip_header: Option<String>,
+    pub rewrites: Vec<Rewrite>,
+    /// 静态站点的默认首页文件(空格分隔);None 用 `index.html index.htm`
+    pub index_files: Option<String>,
+    /// 静态资源缓存:扩展名(空格分隔)和时长(`30d`、`12h`、`max`)
+    pub cache_exts: Option<String>,
+    pub cache_time: Option<String>,
+    /// 防盗链(静态站点):保护的扩展名、允许的来源域名、是否允许没有 Referer 的请求
+    pub hotlink_exts: Option<String>,
+    pub hotlink_allow: Vec<String>,
+    pub hotlink_none: bool,
+    pub limits: Limits,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct BasicAuth {
+    pub realm: String,
+    pub users: Vec<AuthUser>,
+}
+
+/// `pass` 只在新增用户或改密码时有值,不写进配置头;没有值就沿用服务器上 htpasswd 里的旧密码
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct AuthUser {
+    pub name: String,
+    pub pass: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Rewrite {
+    pub regex: String,
+    pub to: String,
+    /// `last` `break` `redirect`(302) `permanent`(301)
+    pub flag: String,
+}
+
+/// 流量限制:每个客户端 IP 的请求速率、并发连接、下载限速;`exempt` 里的 IP 不受限
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Limits {
+    pub req_rate: Option<u32>,
+    /// 速率单位是每分钟(否则每秒)
+    pub req_min: bool,
+    pub burst: u32,
+    pub nodelay: bool,
+    pub conn: Option<u32>,
+    /// 单连接限速,如 `512k`、`2m`
+    pub speed: Option<String>,
+    /// 传输这么多之后才开始限速
+    pub speed_after: Option<String>,
+    pub exempt: Vec<String>,
+}
+
+impl Limits {
+    pub fn active(&self) -> bool {
+        self.req_rate.is_some() || self.conn.is_some() || self.speed.is_some()
+    }
+}
+
+pub const REWRITE_FLAGS: [(&str, &str); 4] = [("last", "继续匹配"), ("break", "就地处理"), ("redirect", "302 跳转"), ("permanent", "301 跳转")];
+pub const REAL_IP_HEADERS: [&str; 3] = ["X-Forwarded-For", "X-Real-IP", "CF-Connecting-IP"];
+
+pub fn valid_ip_item(v: &str) -> bool {
+    let (ip, pre) = match v.split_once('/') {
+        Some((a, b)) => (a, Some(b)),
+        None => (v, None),
+    };
+    let Ok(addr) = ip.parse::<std::net::IpAddr>() else { return false };
+    pre.is_none_or(|p| p.parse::<u8>().is_ok_and(|n| n <= if addr.is_ipv4() { 32 } else { 128 }))
+}
+
+fn word_list_ok(v: &str, ok: impl Fn(&str) -> bool) -> bool {
+    let w: Vec<&str> = v.split_whitespace().collect();
+    !w.is_empty() && w.len() <= 30 && w.iter().all(|x| ok(x))
+}
+
+fn plain_ok(v: &str) -> bool {
+    !v.is_empty() && v.len() <= 500 && !v.chars().any(|c| c.is_control() || matches!(c, '"' | '$' | '`')) && !v.ends_with('\\')
+}
+
+/// 重写规则的正则和目标允许 `$`(`$1`),其余同 `plain_ok`
+fn re_ok(v: &str) -> bool {
+    !v.is_empty() && v.len() <= 300 && !v.chars().any(|c| c.is_control() || matches!(c, '"' | '`')) && !v.ends_with('\\')
+}
+
+fn target_ok(v: &str) -> bool {
+    v.len() <= 300 && !v.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '$' | ';' | '{' | '}' | '\\')) && (v.starts_with('/') || valid_url(v))
+}
+
+fn limit_size_ok(v: &str) -> bool {
+    let d = v.trim_end_matches(['k', 'K', 'm', 'M']);
+    !d.is_empty() && d.len() >= v.len().saturating_sub(1) && d.len() <= 7 && d.chars().all(|c| c.is_ascii_digit()) && d.parse::<u64>().is_ok_and(|n| n > 0)
+}
+
+pub fn valid_user(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 32 && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | '-'))
 }
 
 pub const TLS_VERSIONS: [&str; 4] = ["TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3"];
@@ -431,11 +544,140 @@ impl SiteSpec {
         if self.adv.ciphers.as_deref().is_some_and(|c| !valid_ciphers(c)) {
             return Err("HTTPS 加密套件只能写字母、数字和 : ! + - _ @ = .".into());
         }
+        self.check_extras()?;
         match &self.kind {
             SiteKind::Proxy { locations, upstreams } => check_proxy(locations, upstreams),
             SiteKind::Redirect { to, code } if !valid_url(to) || !matches!(code, 301 | 302 | 307 | 308) => Err("跳转地址要以 http:// 或 https:// 开头".into()),
             _ => Ok(()),
         }
+    }
+}
+
+impl SiteSpec {
+    fn check_extras(&self) -> Result<(), String> {
+        let a = &self.adv;
+        let ips = |what: &str, v: &[String]| -> Result<(), String> {
+            if v.len() > 200 {
+                return Err(format!("{what}最多 200 条"));
+            }
+            match v.iter().find(|x| !valid_ip_item(x)) {
+                Some(x) => Err(format!("{what}里的「{x}」不是 IP 或 CIDR(如 10.0.0.0/8)")),
+                None => Ok(()),
+            }
+        };
+        if a.gzip_level.is_some_and(|l| !(1..=9).contains(&l)) {
+            return Err("压缩级别要在 1–9 之间".into());
+        }
+        if let Some(t) = &a.gzip_types
+            && !word_list_ok(t, |x| x.contains('/') && x.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '+' | '-' | '*')))
+        {
+            return Err("压缩类型要写成 MIME,用空格分隔,如 text/css application/json".into());
+        }
+        ips("IP 访问控制", &a.ip_list)?;
+        if a.ip_mode > 2 || (a.ip_mode != 0 && a.ip_list.is_empty()) {
+            return Err("IP 访问控制至少要填一条".into());
+        }
+        if let Some(au) = &a.auth {
+            if !plain_ok(&au.realm) || au.realm.len() > 64 {
+                return Err("认证提示语不能为空,且不能含引号、$、反引号".into());
+            }
+            if au.users.is_empty() {
+                return Err("基本认证至少要有一个用户".into());
+            }
+            for (i, u) in au.users.iter().enumerate() {
+                if !valid_user(&u.name) {
+                    return Err(format!("认证用户名「{}」只能用字母、数字和 . _ @ -(最长 32)", u.name));
+                }
+                if au.users[..i].iter().any(|x| x.name == u.name) {
+                    return Err(format!("认证用户 {} 重复了", u.name));
+                }
+                if u.pass.as_ref().is_some_and(|p| p.len() < 6 || p.len() > 128 || p.chars().any(|c| c.is_control())) {
+                    return Err(format!("用户 {} 的密码要 6–128 个字符,不能有控制字符", u.name));
+                }
+            }
+        }
+        if a.headers.len() > 30 {
+            return Err("自定义响应头最多 30 条".into());
+        }
+        for (n, v) in &a.headers {
+            if n.is_empty() || n.len() > 64 || !n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                return Err(format!("响应头名「{n}」只能用字母、数字和 -"));
+            }
+            if !plain_ok(v) {
+                return Err(format!("响应头 {n} 的值不能为空,也不能含引号、$、反引号和换行"));
+            }
+        }
+        if a.error_level.as_deref().is_some_and(|l| !matches!(l, "info" | "warn" | "error" | "crit")) {
+            return Err("错误日志级别只能是 info、warn、error、crit".into());
+        }
+        for (i, (c, t)) in a.err_pages.iter().enumerate() {
+            if !(400..=599).contains(c) {
+                return Err("错误页的状态码要在 400–599 之间".into());
+            }
+            if a.err_pages[..i].iter().any(|(x, _)| x == c) {
+                return Err(format!("状态码 {c} 的错误页重复了"));
+            }
+            if !target_ok(t) {
+                return Err(format!("状态码 {c} 的错误页要写站内路径(以 / 开头)或 http(s):// 地址,不能含空格和引号"));
+            }
+        }
+        ips("可信代理", &a.real_ip)?;
+        if let Some(h) = &a.real_ip_header
+            && (h.is_empty() || h.len() > 64 || !h.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        {
+            return Err("真实 IP 请求头名不合法".into());
+        }
+        if a.rewrites.len() > 30 {
+            return Err("重写规则最多 30 条".into());
+        }
+        for r in &a.rewrites {
+            if !re_ok(&r.regex) || !re_ok(&r.to) || !REWRITE_FLAGS.iter().any(|(f, _)| *f == r.flag) {
+                return Err(format!("重写规则「{}」不合法:正则和目标不能为空,不能含引号、换行,标记只能是 last/break/redirect/permanent", r.regex));
+            }
+        }
+        let word = |x: &str| x.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+        if let Some(v) = &a.index_files
+            && !word_list_ok(v, word)
+        {
+            return Err("默认首页文件用空格分隔,只能写文件名".into());
+        }
+        let ext = |x: &str| x.chars().all(|c| c.is_ascii_alphanumeric());
+        if let Some(v) = &a.cache_exts
+            && !word_list_ok(v, ext)
+        {
+            return Err("缓存的扩展名用空格分隔,只能是字母数字(不带点)".into());
+        }
+        if let Some(t) = &a.cache_time
+            && !(t == "max" || (t.len() >= 2 && t.len() <= 7 && t[..t.len() - 1].chars().all(|c| c.is_ascii_digit()) && t.ends_with(['s', 'm', 'h', 'd', 'w', 'M', 'y'])))
+        {
+            return Err("缓存时长写成 30d、12h、1y,或 max".into());
+        }
+        if a.cache_exts.is_some() != a.cache_time.is_some() {
+            return Err("静态资源缓存要同时填扩展名和时长".into());
+        }
+        if let Some(v) = &a.hotlink_exts {
+            if !word_list_ok(v, ext) {
+                return Err("防盗链的扩展名用空格分隔,只能是字母数字(不带点)".into());
+            }
+            if a.hotlink_allow.iter().any(|d| !valid_domain(d)) || a.hotlink_allow.len() > 50 {
+                return Err("防盗链的允许来源要填域名(可用 *. 开头),最多 50 个".into());
+            }
+        }
+        if (a.cache_exts.is_some() || a.hotlink_exts.is_some() || a.index_files.is_some()) && !matches!(self.kind, SiteKind::Static { .. }) {
+            return Err("静态资源缓存、防盗链和默认首页只用于静态站点".into());
+        }
+        let l = &a.limits;
+        if l.req_rate.is_some_and(|r| r == 0 || r > 100000) || l.burst > 10000 {
+            return Err("请求速率要在 1–100000 之间,突发不超过 10000".into());
+        }
+        if l.conn.is_some_and(|c| c == 0 || c > 10000) {
+            return Err("并发连接数要在 1–10000 之间".into());
+        }
+        if l.speed.as_deref().is_some_and(|v| !limit_size_ok(v)) || l.speed_after.as_deref().is_some_and(|v| !limit_size_ok(v)) {
+            return Err("限速要写成 512k、2m 这样".into());
+        }
+        ips("不限制的 IP", &l.exempt)?;
+        Ok(())
     }
 }
 
@@ -622,12 +864,153 @@ fn header_line(s: &SiteSpec) -> String {
     if s.adv.hsts_preload {
         h += " hsts_pre=1";
     }
+    h += &extras_header(&s.adv);
     h
 }
 
-fn acme_loc(t: &Target) -> String {
+fn enc_list(v: &[String]) -> String {
+    v.iter().map(|x| fesc(x)).collect::<Vec<_>>().join(",")
+}
+
+fn dec_list(v: &str) -> Vec<String> {
+    v.split(',').filter(|x| !x.is_empty()).map(funesc).collect()
+}
+
+/// 后加的高级项:没设置的不写
+fn extras_header(a: &Advanced) -> String {
+    let mut h = String::new();
+    let mut kv = |k: &str, v: &str| h += &format!(" {k}={}", esc(v));
+    if let Some(g) = a.gzip {
+        kv("gz", if g { "1" } else { "0" });
+    }
+    if let Some(v) = a.gzip_level {
+        kv("gzl", &v.to_string());
+    }
+    if let Some(v) = &a.gzip_types {
+        kv("gzt", v);
+    }
+    if a.ip_mode != 0 {
+        kv("ipm", &a.ip_mode.to_string());
+        kv("ipl", &enc_list(&a.ip_list));
+    }
+    if let Some(au) = &a.auth {
+        kv("ar", &au.realm);
+        kv("au", &enc_list(&au.users.iter().map(|u| u.name.clone()).collect::<Vec<_>>()));
+    }
+    if !a.headers.is_empty() {
+        kv("hdr", &a.headers.iter().map(|(n, v)| format!("{}|{}", fesc(n), fesc(v))).collect::<Vec<_>>().join(";"));
+    }
+    if a.log_off {
+        kv("logoff", "1");
+    }
+    if let Some(v) = &a.error_level {
+        kv("errlog", v);
+    }
+    if !a.err_pages.is_empty() {
+        kv("errp", &a.err_pages.iter().map(|(c, t)| format!("{c}|{}", fesc(t))).collect::<Vec<_>>().join(";"));
+    }
+    if !a.real_ip.is_empty() {
+        kv("rip", &enc_list(&a.real_ip));
+        if let Some(v) = &a.real_ip_header {
+            kv("riph", v);
+        }
+    }
+    if !a.rewrites.is_empty() {
+        kv("rw", &a.rewrites.iter().map(|r| format!("{}|{}|{}", fesc(&r.regex), fesc(&r.to), r.flag)).collect::<Vec<_>>().join(";"));
+    }
+    if let Some(v) = &a.index_files {
+        kv("idx", v);
+    }
+    if let (Some(e), Some(t)) = (&a.cache_exts, &a.cache_time) {
+        kv("cexts", e);
+        kv("ctime", t);
+    }
+    if let Some(e) = &a.hotlink_exts {
+        kv("hexts", e);
+        kv("hallow", &enc_list(&a.hotlink_allow));
+        if a.hotlink_none {
+            kv("hnone", "1");
+        }
+    }
+    let l = &a.limits;
+    if let Some(r) = l.req_rate {
+        kv("lrq", &format!("{r}{}", if l.req_min { "m" } else { "s" }));
+        kv("lrb", &l.burst.to_string());
+        if l.nodelay {
+            kv("lrn", "1");
+        }
+    }
+    if let Some(c) = l.conn {
+        kv("lcn", &c.to_string());
+    }
+    if let Some(v) = &l.speed {
+        kv("lsp", v);
+        if let Some(a) = &l.speed_after {
+            kv("lspa", a);
+        }
+    }
+    if !l.exempt.is_empty() {
+        kv("lex", &enc_list(&l.exempt));
+    }
+    h
+}
+
+fn extras_parse(g: &dyn Fn(&str) -> String, flag: &dyn Fn(&str) -> bool, adv: &mut Advanced) {
+    let some = |k: &str| Some(g(k)).filter(|v| !v.is_empty());
+    adv.gzip = match g("gz").as_str() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    };
+    adv.gzip_level = g("gzl").parse().ok();
+    adv.gzip_types = some("gzt");
+    adv.ip_mode = g("ipm").parse().unwrap_or(0);
+    adv.ip_list = dec_list(&g("ipl"));
+    if some("ar").is_some() || some("au").is_some() {
+        adv.auth = Some(BasicAuth { realm: g("ar"), users: dec_list(&g("au")).into_iter().map(|name| AuthUser { name, pass: None }).collect() });
+    }
+    adv.headers = g("hdr").split(';').filter_map(|x| x.split_once('|')).map(|(n, v)| (funesc(n), funesc(v))).collect();
+    adv.log_off = flag("logoff");
+    adv.error_level = some("errlog");
+    adv.err_pages = g("errp").split(';').filter_map(|x| x.split_once('|')).filter_map(|(c, t)| Some((c.parse().ok()?, funesc(t)))).collect();
+    adv.real_ip = dec_list(&g("rip"));
+    adv.real_ip_header = some("riph");
+    adv.rewrites = g("rw")
+        .split(';')
+        .filter_map(|x| {
+            let f: Vec<&str> = x.split('|').collect();
+            let [re, to, fl] = f[..] else { return None };
+            Some(Rewrite { regex: funesc(re), to: funesc(to), flag: fl.to_string() })
+        })
+        .collect();
+    adv.index_files = some("idx");
+    adv.cache_exts = some("cexts");
+    adv.cache_time = some("ctime");
+    adv.hotlink_exts = some("hexts");
+    adv.hotlink_allow = dec_list(&g("hallow"));
+    adv.hotlink_none = flag("hnone");
+    let rq = g("lrq");
+    let l = &mut adv.limits;
+    if let Some(n) = rq.strip_suffix(['s', 'm']).and_then(|n| n.parse().ok()) {
+        l.req_rate = Some(n);
+        l.req_min = rq.ends_with('m');
+        l.burst = g("lrb").parse().unwrap_or(0);
+        l.nodelay = flag("lrn");
+    }
+    l.conn = g("lcn").parse().ok();
+    l.speed = some("lsp");
+    l.speed_after = some("lspa");
+    l.exempt = dec_list(&g("lex"));
+}
+
+/// Otter 自己装的 OpenResty 里 conf.d 在容器内的位置(htpasswd 放在那里)
+pub const CONF_MOUNT: &str = "/etc/nginx/conf.d";
+pub const DEFAULT_GZIP_TYPES: &str = "text/plain text/css application/json application/javascript text/xml application/xml image/svg+xml";
+
+/// `open`:站点有访问控制时,验证目录要放行(否则签发证书会被拦)
+fn acme_loc(t: &Target, open: bool) -> String {
     match t.acme_mount() {
-        Some(m) => format!("    location ^~ /.well-known/acme-challenge/ {{\n        root {m};\n        default_type text/plain;\n    }}\n"),
+        Some(m) => format!("    location ^~ /.well-known/acme-challenge/ {{\n        root {m};\n        default_type text/plain;\n{}    }}\n", if open { "        auth_basic off;\n        allow all;\n" } else { "" }),
         None => String::new(),
     }
 }
@@ -696,15 +1079,137 @@ fn locations(s: &SiteSpec, t: &Target) -> String {
         SiteKind::Proxy { locations, .. } => locations.iter().map(|l| proxy_location(s, l, t)).collect::<String>(),
         SiteKind::Static { spa, index } => {
             let fallback = if *spa { "/index.html" } else { "=404" };
-            format!("    root {}/{};\n    index index.html index.htm;\n    location / {{\n        try_files $uri $uri/ {fallback};\n{}    }}\n", t.sites_mount(), s.name, if *index { "        autoindex on;\n" } else { "" })
+            format!("    root {}/{};\n    index {};\n    location / {{\n        try_files $uri $uri/ {fallback};\n{}    }}\n{}", t.sites_mount(), s.name, s.adv.index_files.as_deref().unwrap_or("index.html index.htm"), if *index { "        autoindex on;\n" } else { "" }, static_asset_locations(s))
         }
         SiteKind::Redirect { to, code } => format!("    location / {{\n        return {code} {}$request_uri;\n    }}\n", to.trim_end_matches('/')),
     }
 }
 
+/// 配置里用的名字后缀:站点名的哈希,避免 zone/变量在不同站点间重名
+fn zone_id(s: &SiteSpec) -> String {
+    format!("otter_{}", &fnv(&s.name)[..8])
+}
+
+/// 流量限制要用的 zone 和变量,写在站点文件里 server 之前(站点文件在 http 块里)
+fn limit_blocks(s: &SiteSpec) -> String {
+    let l = &s.adv.limits;
+    if l.req_rate.is_none() && l.conn.is_none() {
+        return String::new();
+    }
+    let z = zone_id(s);
+    let mut out = String::new();
+    let key = if l.exempt.is_empty() {
+        "$binary_remote_addr".to_string()
+    } else {
+        out += &format!("geo ${z}_lim {{\n    default 1;\n{}}}\nmap ${z}_lim ${z}_key {{\n    1 $binary_remote_addr;\n    0 \"\";\n}}\n", l.exempt.iter().map(|x| format!("    {x} 0;\n")).collect::<String>());
+        format!("${z}_key")
+    };
+    if let Some(r) = l.req_rate {
+        out += &format!("limit_req_zone {key} zone={z}_req:10m rate={r}r/{};\n", if l.req_min { "m" } else { "s" });
+    }
+    if l.conn.is_some() {
+        out += &format!("limit_conn_zone {key} zone={z}_conn:10m;\n");
+    }
+    out + "\n"
+}
+
+/// 站点级的各项高级指令(写在 server 块里、location 之前)
+fn extras_server(s: &SiteSpec, tg: &Target) -> String {
+    let a = &s.adv;
+    let mut t = String::new();
+    if !a.real_ip.is_empty() {
+        for ip in &a.real_ip {
+            t += &format!("    set_real_ip_from {ip};\n");
+        }
+        t += &format!("    real_ip_header {};\n    real_ip_recursive on;\n", a.real_ip_header.as_deref().unwrap_or("X-Forwarded-For"));
+    }
+    match a.ip_mode {
+        1 => {
+            for ip in &a.ip_list {
+                t += &format!("    allow {ip};\n");
+            }
+            t += "    deny all;\n";
+        }
+        2 => {
+            for ip in &a.ip_list {
+                t += &format!("    deny {ip};\n");
+            }
+        }
+        _ => {}
+    }
+    if let Some(au) = &a.auth {
+        t += &format!("    auth_basic \"{}\";\n    auth_basic_user_file {}/{}.htpasswd;\n", au.realm, CONF_MOUNT, s.name);
+    }
+    let _ = tg;
+    match a.gzip {
+        Some(true) => {
+            t += "    gzip on;\n    gzip_vary on;\n    gzip_proxied any;\n";
+            if let Some(l) = a.gzip_level {
+                t += &format!("    gzip_comp_level {l};\n");
+            }
+            t += &format!("    gzip_types {};\n", a.gzip_types.as_deref().unwrap_or(DEFAULT_GZIP_TYPES));
+        }
+        Some(false) => t += "    gzip off;\n",
+        None => {}
+    }
+    for (n, v) in &a.headers {
+        t += &format!("    add_header {n} \"{v}\" always;\n");
+    }
+    for (c, p) in &a.err_pages {
+        t += &format!("    error_page {c} {p};\n");
+    }
+    let l = &a.limits;
+    let z = zone_id(s);
+    if let Some(r) = l.req_rate {
+        let _ = r;
+        t += &format!("    limit_req zone={z}_req{}{};\n    limit_req_status 429;\n", if l.burst > 0 { format!(" burst={}", l.burst) } else { String::new() }, if l.nodelay { " nodelay" } else { "" });
+    }
+    if let Some(c) = l.conn {
+        t += &format!("    limit_conn {z}_conn {c};\n    limit_conn_status 429;\n");
+    }
+    if let Some(v) = &l.speed {
+        if let Some(af) = &l.speed_after {
+            t += &format!("    limit_rate_after {af};\n");
+        }
+        t += &format!("    limit_rate {v};\n");
+    }
+    for r in &a.rewrites {
+        t += &format!("    rewrite \"{}\" \"{}\" {};\n", r.regex, r.to, r.flag);
+    }
+    t
+}
+
+/// 静态站点的缓存和防盗链:按扩展名的正则 location
+fn static_asset_locations(s: &SiteSpec) -> String {
+    let a = &s.adv;
+    let re = |v: &str| format!("\\.({})$", v.split_whitespace().collect::<Vec<_>>().join("|"));
+    let mut t = String::new();
+    if let Some(e) = &a.hotlink_exts {
+        t += &format!("    location ~* {} {{\n", re(e));
+        let mut refs = String::new();
+        if a.hotlink_none {
+            refs += "none blocked ";
+        }
+        refs += "server_names";
+        for d in &a.hotlink_allow {
+            refs += &format!(" {d}");
+        }
+        t += &format!("        valid_referers {refs};\n        if ($invalid_referer) {{\n            return 403;\n        }}\n");
+        if let Some(c) = &a.cache_time {
+            t += &format!("        expires {c};\n");
+        }
+        t += "        try_files $uri =404;\n    }\n";
+    }
+    if let (Some(e), Some(c)) = (&a.cache_exts, &a.cache_time) {
+        t += &format!("    location ~* {} {{\n        expires {c};\n        try_files $uri =404;\n    }}\n", re(e));
+    }
+    t
+}
+
 fn body(s: &SiteSpec, tg: &Target) -> String {
     let fmt = if tg.adopted { "" } else { " main" };
-    let logs = format!("    access_log /var/log/nginx/{n}.access.log{fmt};\n    error_log /var/log/nginx/{n}.error.log warn;\n", n = s.name);
+    let access = if s.adv.log_off { "    access_log off;\n".to_string() } else { format!("    access_log /var/log/nginx/{n}.access.log{fmt};\n", n = s.name) };
+    let logs = format!("{access}    error_log /var/log/nginx/{n}.error.log {lv};\n", n = s.name, lv = s.adv.error_level.as_deref().unwrap_or("warn"));
     // 有 443 的 SSL 监听时,「强制 HTTPS」才有地方可跳
     let https_port = s.listeners.iter().find(|l| l.ssl()).map(|l| l.port);
     let has_443 = https_port.is_some();
@@ -746,7 +1251,7 @@ fn body(s: &SiteSpec, tg: &Target) -> String {
             t += &format!("    client_max_body_size {b};\n");
         }
         if l.port == tg.ports.0 && !l.ssl() {
-            t += &acme_loc(tg);
+            t += &acme_loc(tg, s.adv.auth.is_some() || s.adv.ip_mode != 0);
         }
         if l.ssl() && s.hsts {
             t += &format!("    add_header Strict-Transport-Security \"{hsts_v}\" always;\n");
@@ -754,12 +1259,13 @@ fn body(s: &SiteSpec, tg: &Target) -> String {
         if !l.ssl() && l.force_https && has_443 {
             t += &format!("    location / {{\n        return 301 https://$host{https_at}$request_uri;\n    }}\n");
         } else {
+            t += &extras_server(s, tg);
             t += &locations(s, tg);
         }
         t += "}\n";
         out.push(t);
     }
-    upstream_blocks(s) + &out.join("\n")
+    limit_blocks(s) + &upstream_blocks(s) + &out.join("\n")
 }
 
 /// 生成站点配置文件全文
@@ -815,7 +1321,7 @@ pub fn parse_site(text: &str) -> Option<(SiteSpec, bool)> {
         }
         v
     };
-    let adv = Advanced {
+    let mut adv = Advanced {
         max_body: Some(g("body")).filter(|v| !v.is_empty()),
         read_timeout: g("timeout").parse().ok(),
         tls_protocols: Some(g("tlsv")).filter(|v| !v.is_empty()).map(|v| v.split(',').map(str::to_string).collect()),
@@ -826,7 +1332,9 @@ pub fn parse_site(text: &str) -> Option<(SiteSpec, bool)> {
         hsts_age: g("hsts_age").parse().ok(),
         hsts_sub: flag("hsts_sub"),
         hsts_preload: flag("hsts_pre"),
+        ..Default::default()
     };
+    extras_parse(&g, &flag, &mut adv);
     let spec = SiteSpec { name: g("name"), kind, listeners, ipv6: flag("ipv6"), hsts: flag("hsts"), adv };
     let rest = text.get(consumed.min(text.len())..).unwrap_or("");
     let modified = hash.is_none_or(|h| fnv(rest) != h);
@@ -842,7 +1350,7 @@ pub fn nginx_conf() -> String {
 /// 默认站点:没匹配到域名的请求(包括直接用 IP 访问)一律断开;证书验证用的路径仍然放行
 pub fn default_conf(http: u16, https: u16) -> String {
     let t = Target::own();
-    format!("# managed by otter (layout 1)\n# otter:default\nserver {{\n    listen {http} default_server;\n    server_name _;\n{}    location / {{\n        return 444;\n    }}\n}}\n\nserver {{\n    listen {https} ssl default_server;\n    server_name _;\n    ssl_reject_handshake on;\n}}\n", acme_loc(&t))
+    format!("# managed by otter (layout 1)\n# otter:default\nserver {{\n    listen {http} default_server;\n    server_name _;\n{}    location / {{\n        return 444;\n    }}\n}}\n\nserver {{\n    listen {https} ssl default_server;\n    server_name _;\n    ssl_reject_handshake on;\n}}\n", acme_loc(&t, false))
 }
 
 /// 安装 OpenResty 的表单(安装抽屉填的东西)
@@ -1675,6 +2183,22 @@ fn site_file(name: &str, enabled: bool) -> String {
     if enabled { format!("{name}.conf") } else { format!("{name}.conf.off") }
 }
 
+/// 基本认证的密码文件 `<站点>.htpasswd`:新密码在服务器上用 `openssl passwd -apr1` 生成,没改的用户沿用旧行;没有基本认证就删掉文件
+fn htpasswd_actions(spec: &SiteSpec) -> String {
+    let f = format!("{}.htpasswd", spec.name);
+    let Some(au) = &spec.adv.auth else { return format!("bk {q}; rm -f \"$C/\"{q}\n", q = quote(&f)) };
+    let new = format!("$C/{f}.new");
+    let mut s = format!("bk {q}; : > \"{new}\"\n", q = quote(&f));
+    for u in &au.users {
+        match &u.pass {
+            Some(p) => s += &format!("h=$(printf %s {} | openssl passwd -apr1 -stdin) || fail \"生成 {n} 的密码失败(服务器上要有 openssl)\"; printf '%s:%s\\n' {} \"$h\" >> \"{new}\"\n", quote(p), quote(&u.name), n = u.name),
+            None => s += &format!("l=$(grep -m1 {} \"$S/{f}\" 2>/dev/null) || fail \"用户 {n} 在服务器上没有密码,请重新设置\"; printf '%s\\n' \"$l\" >> \"{new}\"\n", quote(&format!("^{}:", u.name)), n = u.name),
+        }
+    }
+    s += &format!("chmod 644 \"{new}\" && mv \"{new}\" \"$C/{f}\"\n");
+    s
+}
+
 /// 保存站点(新建或覆盖):写配置文件,静态站点顺手建目录和占位首页
 pub fn site_save_script(spec: &SiteSpec, enabled: bool, t: &Target) -> Result<String, String> {
     spec.check()?;
@@ -1684,9 +2208,14 @@ pub fn site_save_script(spec: &SiteSpec, enabled: bool, t: &Target) -> Result<St
     if !spec.certs().is_empty() && t.certs.is_none() {
         return Err("这个 OpenResty 没有挂载证书目录,配不了 HTTPS".into());
     }
+    if spec.adv.auth.is_some() && t.adopted {
+        return Err("接管的 nginx 暂不支持基本认证(密码文件要放在 Otter 装的 OpenResty 的配置目录里)".into());
+    }
     let file = site_file(&spec.name, enabled);
     let other = site_file(&spec.name, !enabled);
-    let mut a = format!("bk {f}; bk {o}; rm -f \"$C/{o}\"; {w}\n", f = quote(&file), o = quote(&other), w = write_file_cmd(&format!("$C/{file}"), &render_site(spec, t), "644").replace(&format!("'$C/{file}'"), &format!("\"$C/{file}\"")));
+    let mut a = String::new();
+    a += &htpasswd_actions(spec);
+    a += &format!("bk {f}; bk {o}; rm -f \"$C/{o}\"; {w}\n", f = quote(&file), o = quote(&other), w = write_file_cmd(&format!("$C/{file}"), &render_site(spec, t), "644").replace(&format!("'$C/{file}'"), &format!("\"$C/{file}\"")));
     if matches!(spec.kind, SiteKind::Static { .. }) {
         let d = format!("$SITES/{}", spec.name);
         a += &format!("mkdir -p \"{d}\"; [ -e \"{d}/index.html\" ] || printf '<!doctype html><meta charset=utf-8><title>{n}</title><h1>{n}</h1>' > \"{d}/index.html\"\n", n = spec.name);
@@ -1712,7 +2241,8 @@ pub fn site_delete_script(file: &str) -> Result<String, String> {
     if !valid_conf_file(file) {
         return Err("配置文件名不合法".into());
     }
-    Ok(tx_script(&format!("bk {f}; rm -f \"$C/\"{f}\n", f = quote(file))))
+    let base = file.trim_end_matches(".off").trim_end_matches(".conf");
+    Ok(tx_script(&format!("bk {f}; rm -f \"$C/\"{f}; rm -f \"$C/\"{h}\n", f = quote(file), h = quote(&format!("{base}.htpasswd")))))
 }
 
 pub fn site_toggle_script(file: &str, enable: bool) -> Result<String, String> {
@@ -2421,6 +2951,138 @@ mod tests {
         SiteSpec { kind: SiteKind::Proxy { locations, upstreams }, ..multi_loc_spec() }
     }
 
+    fn full_adv() -> Advanced {
+        Advanced {
+            gzip: Some(true),
+            gzip_level: Some(5),
+            gzip_types: Some("text/css application/json".into()),
+            ip_mode: 2,
+            ip_list: vec!["10.0.0.0/8".into(), "2001:db8::/32".into()],
+            auth: Some(BasicAuth { realm: "Private area".into(), users: vec![AuthUser { name: "bob".into(), pass: Some("s3cret!pw".into()) }, AuthUser { name: "amy".into(), pass: None }] }),
+            headers: vec![("X-Frame-Options".into(), "SAMEORIGIN".into()), ("Content-Security-Policy".into(), "default-src 'self'; img-src *".into())],
+            log_off: false,
+            error_level: Some("error".into()),
+            err_pages: vec![(404, "/404.html".into()), (502, "https://example.com/down".into())],
+            real_ip: vec!["172.16.0.0/12".into()],
+            real_ip_header: Some("X-Real-IP".into()),
+            rewrites: vec![Rewrite { regex: "^/old/(.*)$".into(), to: "/new/$1".into(), flag: "permanent".into() }],
+            limits: Limits { req_rate: Some(10), req_min: false, burst: 20, nodelay: true, conn: Some(30), speed: Some("512k".into()), speed_after: Some("1m".into()), exempt: vec!["192.168.0.0/16".into()] },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn extras_render_and_roundtrip() {
+        let mut spec = proxy("ex");
+        spec.adv = full_adv();
+        spec.check().unwrap();
+        let t = render_site(&spec, &Target::own());
+        let (back, modified) = parse_site(&t).unwrap();
+        assert!(!modified);
+        // 密码不进配置头;其余原样读回
+        assert!(!t.contains("s3cret"));
+        let mut want = spec.clone();
+        want.adv.auth.as_mut().unwrap().users[0].pass = None;
+        assert_eq!(back, want);
+        for need in ["gzip on;", "gzip_comp_level 5;", "deny 10.0.0.0/8;", "auth_basic \"Private area\";", "auth_basic_user_file /etc/nginx/conf.d/ex.htpasswd;", "add_header X-Frame-Options \"SAMEORIGIN\" always;", "error_page 404 /404.html;", "set_real_ip_from 172.16.0.0/12;", "real_ip_header X-Real-IP;", "rewrite \"^/old/(.*)$\" \"/new/$1\" permanent;", "limit_req zone=", "burst=20 nodelay;", "limit_conn_status 429;", "limit_rate_after 1m;", "limit_rate 512k;", "geo $otter_", "limit_req_zone $otter_", "error_log /var/log/nginx/ex.error.log error;"] {
+            assert!(t.contains(need), "缺少 {need}\n{t}");
+        }
+        assert!(t.contains("auth_basic off;"), "验证目录要放行");
+        let plain = render_site(&proxy("p"), &Target::own());
+        for no in ["gzip", "auth_basic", "limit_", "set_real_ip", "rewrite", "error_page", "geo "] {
+            assert!(!plain.contains(no), "{no}");
+        }
+        spec.adv.log_off = true;
+        assert!(render_site(&spec, &Target::own()).contains("access_log off;"));
+    }
+
+    #[test]
+    fn static_extras_render_and_checks() {
+        let mut spec = simple("st", "a.com", SiteKind::Static { spa: false, index: false }, None);
+        spec.adv = Advanced { index_files: Some("home.html index.html".into()), cache_exts: Some("js css png".into()), cache_time: Some("30d".into()), hotlink_exts: Some("jpg png".into()), hotlink_allow: vec!["*.good.com".into()], hotlink_none: true, ..Default::default() };
+        spec.check().unwrap();
+        let t = render_site(&spec, &Target::own());
+        assert!(t.contains("index home.html index.html;"));
+        assert!(t.contains("location ~* \\.(js|css|png)$ {\n        expires 30d;"));
+        assert!(t.contains("valid_referers none blocked server_names *.good.com;"));
+        assert_eq!(parse_site(&t).unwrap().0, spec);
+        // 代理站点不能用静态项
+        let mut p = proxy("px");
+        p.adv.cache_exts = Some("js".into());
+        p.adv.cache_time = Some("1d".into());
+        assert!(p.check().is_err());
+        spec.adv.cache_time = None;
+        assert!(spec.check().is_err());
+    }
+
+    #[test]
+    fn extras_validation() {
+        let bad = |f: &dyn Fn(&mut Advanced)| {
+            let mut s = proxy("v");
+            f(&mut s.adv);
+            assert!(s.check().is_err());
+        };
+        bad(&|a| a.gzip_level = Some(10));
+        bad(&|a| a.gzip_types = Some("css".into()));
+        bad(&|a| {
+            a.ip_mode = 1;
+            a.ip_list = vec!["999.1.1.1".into()];
+        });
+        bad(&|a| {
+            a.ip_mode = 2;
+        });
+        bad(&|a| a.auth = Some(BasicAuth { realm: "x".into(), users: vec![] }));
+        bad(&|a| a.auth = Some(BasicAuth { realm: "x".into(), users: vec![AuthUser { name: "a b".into(), pass: Some("123456".into()) }] }));
+        bad(&|a| a.auth = Some(BasicAuth { realm: "x".into(), users: vec![AuthUser { name: "a".into(), pass: Some("123".into()) }] }));
+        bad(&|a| a.headers = vec![("X Bad".into(), "v".into())]);
+        bad(&|a| a.headers = vec![("X-A".into(), "a\"b".into())]);
+        bad(&|a| a.headers = vec![("X-A".into(), "a$b".into())]);
+        bad(&|a| a.err_pages = vec![(200, "/x".into())]);
+        bad(&|a| a.err_pages = vec![(404, "x.html".into())]);
+        bad(&|a| a.err_pages = vec![(404, "/a".into()), (404, "/b".into())]);
+        bad(&|a| a.rewrites = vec![Rewrite { regex: "a\"b".into(), to: "/x".into(), flag: "last".into() }]);
+        bad(&|a| a.rewrites = vec![Rewrite { regex: "^/a".into(), to: "/x".into(), flag: "nope".into() }]);
+        bad(&|a| a.limits.req_rate = Some(0));
+        bad(&|a| a.limits.speed = Some("fast".into()));
+        bad(&|a| a.limits.exempt = vec!["x".into()]);
+        bad(&|a| a.error_level = Some("debug".into()));
+        assert!(valid_ip_item("1.2.3.4") && valid_ip_item("10.0.0.0/8") && valid_ip_item("::1") && !valid_ip_item("1.2.3.4/33") && !valid_ip_item("a"));
+        // 接管的 nginx 不支持基本认证
+        let mut s = proxy("ad");
+        s.adv.auth = Some(BasicAuth { realm: "x".into(), users: vec![AuthUser { name: "a".into(), pass: Some("123456".into()) }] });
+        let mut t = Target::own();
+        t.adopted = true;
+        assert!(site_save_script(&s, true, &t).is_err());
+        let sc = site_save_script(&s, true, &Target::own()).unwrap();
+        assert!(sc.contains("openssl passwd -apr1") && sc.contains("htpasswd"));
+        s.adv.auth = None;
+        assert!(site_save_script(&s, true, &Target::own()).unwrap().contains("rm -f \"$C/\"'ad.htpasswd'"));
+        assert!(site_delete_script("ad.conf").unwrap().contains("ad.htpasswd"));
+    }
+
+    /// 取出保存脚本里 htpasswd 的那几行,在假的事务环境里真跑一遍(需要本机有 openssl)
+    #[test]
+    #[ignore]
+    fn htpasswd_actions_work() {
+        let mut spec = proxy("hp");
+        spec.adv.auth = Some(BasicAuth { realm: "x".into(), users: vec![AuthUser { name: "bob".into(), pass: Some("s3cret!pw".into()) }, AuthUser { name: "amy".into(), pass: None }] });
+        let dir = std::env::temp_dir().join(format!("otter-hp-{}", std::process::id()));
+        let (c, s) = (dir.join("c"), dir.join("s"));
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::create_dir_all(&s).unwrap();
+        std::fs::write(s.join("hp.htpasswd"), "amy:$apr1$old$hash\nzed:$apr1$z$z\n").unwrap();
+        let script = format!("C={c}; S={s}; W={w}\nmkdir -p $W\nbk() {{ :; }}\nfail() {{ echo \"FAIL $*\"; exit 3; }}\n{a}", c = c.display(), s = s.display(), w = dir.join("w").display(), a = htpasswd_actions(&spec));
+        let out = std::process::Command::new("bash").arg("-c").arg(&script).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+        let f = std::fs::read_to_string(c.join("hp.htpasswd")).unwrap();
+        assert!(f.starts_with("bob:$apr1$") && f.contains("amy:$apr1$old$hash\n") && !f.contains("zed"), "{f}");
+        // 没有旧密码的沿用用户要报错
+        std::fs::remove_file(s.join("hp.htpasswd")).unwrap();
+        let out = std::process::Command::new("bash").arg("-c").arg(&script).output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains("FAIL"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn tls_options_render_and_roundtrip() {
         let mut sp = SiteSpec { listeners: vec![ls(&["a.com".to_string()], 80, None, true), ls(&["a.com".to_string()], 443, Some("a.com"), false)], ..multi_loc_spec() };
@@ -2550,6 +3212,18 @@ mod tests {
         let b = vec!["b.com".to_string(), "www.b.com".to_string()];
         let spec = SiteSpec { name: "multi".into(), kind: SiteKind::proxy("https://127.0.0.1:9000", true, true), listeners: vec![ls(&a, 80, None, true), ls(&a, 443, Some("a.com"), false), ls(&b, 8080, None, false), ls(&b, 8443, Some("b.com"), false)], ipv6: true, hsts: true, adv: Advanced::default() };
         std::fs::write(path, render_site(&spec, &Target::own())).unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_extras_sites() {
+        let Ok(dir) = std::env::var("OTTER_DUMP_DIR") else { return };
+        let mut a = proxy("exp");
+        a.adv = full_adv();
+        std::fs::write(format!("{dir}/exp.conf"), render_site(&a, &Target::own())).unwrap();
+        let mut b = simple("exs", "s.com", SiteKind::Static { spa: true, index: true }, None);
+        b.adv = Advanced { index_files: Some("home.html index.html".into()), cache_exts: Some("js css png".into()), cache_time: Some("30d".into()), hotlink_exts: Some("jpg png".into()), hotlink_allow: vec!["*.good.com".into()], hotlink_none: true, gzip: Some(false), ..Default::default() };
+        std::fs::write(format!("{dir}/exs.conf"), render_site(&b, &Target::own())).unwrap();
     }
 
     #[test]
