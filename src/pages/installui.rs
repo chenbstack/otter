@@ -531,6 +531,8 @@ impl Home {
         let Some(j) = self.dock.api.job.as_ref() else { return };
         let ok = j.done == Some(0);
         let (kind, name) = (j.kind.clone(), j.container.clone());
+        // 装/升/卸之后旧的升级检查结果作废,回到商店页重新检查
+        self.store_forget_check(&name);
         if let Some(d) = self.api_docker() {
             d.refresh();
             d.host_run(T_CTL, appstore::job_clear_script(), 30);

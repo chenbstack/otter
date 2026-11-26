@@ -23,6 +23,9 @@ pub(crate) struct Upgrade {
     /// 「可升级」检查给出的目标版本(预填用)和「同一个 tag 重新拉取」(浮动标签有新镜像)
     suggest: Option<String>,
     repull: bool,
+    /// 目标版本下拉是否展开;选了「自定义版本号…」后显示输入框
+    open: bool,
+    custom: bool,
 }
 
 /// 一个已装实例的升级检查进度(见 `appupdate`)
@@ -30,6 +33,8 @@ pub(crate) struct Upgrade {
 pub(crate) struct Upd {
     status: Option<Status>,
     asked: bool,
+    /// 检查时实例用的 tag;实例的 tag 变了(升级过)结果就作废
+    tag: String,
     fetching: bool,
     tags: Option<Option<Vec<String>>>,
     local: Option<String>,
@@ -168,6 +173,10 @@ impl Home {
             let Some(app) = cat.apps.iter().find(|a| Some(&a.id) == ct.app.as_ref()).cloned() else { continue };
             let tag = ct.image.rsplit_once(':').map(|x| x.1.to_string()).unwrap_or_else(|| "latest".into());
             let name = ct.name.clone();
+            if self.dock.api.st.upd.get(&name).is_some_and(|u| u.tag != tag) {
+                self.dock.api.st.upd.remove(&name);
+            }
+            self.dock.api.st.upd.entry(name.clone()).or_default().tag.clone_from(&tag);
             if self.dock.api.st.upd.get(&name).is_some_and(|u| u.status.is_some()) {
                 continue;
             }
@@ -255,6 +264,11 @@ impl Home {
         }
     }
 
+    /// 某个实例的升级检查结果作废(装/升/卸之后)
+    pub(crate) fn store_forget_check(&mut self, container: &str) {
+        self.dock.api.st.upd.remove(container);
+    }
+
     pub(crate) fn store_refresh(&mut self, cx: &mut Context<Self>) {
         self.dock.api.st.remote = 1;
         cx.spawn(async move |this, cx| {
@@ -288,7 +302,7 @@ impl Home {
             Some(Status::NewImage) => (None, true),
             _ => (None, false),
         };
-        self.dock.api.st.up = Some(Upgrade { app, container: container.into(), project: project.into(), dir, rec: None, err: None, ver, filled: false, suggest, repull });
+        self.dock.api.st.up = Some(Upgrade { app, container: container.into(), project: project.into(), dir, rec: None, err: None, ver, filled: false, suggest, repull, open: false, custom: false });
         cx.notify();
     }
 
@@ -515,7 +529,7 @@ impl Home {
             .child(div().flex_1().min_w(px(180.0)).child(ver_cell))
             .child(div().w(px(84.0)).flex_shrink_0().flex().flex_row().items_center().gap(px(6.0)).child(div().size(px(6.0)).rounded_full().bg(st_color)).child(div().text_size(px(t::TYPE_CAPTION)).text_color(st_color).child(st_text)))
             .child(div().w(px(140.0)).flex_shrink_0().child(mono(port, c::ghost())))
-            .child(div().flex().flex_row().items_center().gap(px(6.0)).child(up_btn).child(un_btn))
+            .child(div().w(px(170.0)).flex_shrink_0().flex().flex_row().items_center().justify_end().gap(px(6.0)).child(up_btn).child(un_btn))
     }
 
     fn store_card(&self, a: &AppDef, ai: usize, cat: &appstore::Catalog, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -700,6 +714,56 @@ impl Home {
                 (Some((rec, old)), _) => {
                     let target = u.ver.read(cx).value().trim().to_string();
                     let diff: Vec<(char, String)> = appstore::render(&u.app, &rec.values_for(&u.app, &target)).map(|p| appstore::diff_lines(old, &p.compose).into_iter().filter(|(k, _)| *k != ' ').collect()).unwrap_or_default();
+                    let empty = diff.is_empty();
+                    let list = self.dock.api.tags_of(&u.app.id);
+                    let mut items: Vec<crate::ui::MenuItem> = match &list {
+                        Some(l) => l.iter().map(|v| crate::ui::MenuItem::new(v.clone())).collect(),
+                        None => vec![crate::ui::MenuItem::new("正在获取版本列表…")],
+                    };
+                    let n = list.as_ref().map_or(0, |l| l.len());
+                    if list.is_some() {
+                        items.push(crate::ui::MenuItem::new("自定义版本号…"));
+                    }
+                    let sel = if u.custom { n } else { list.as_ref().and_then(|l| l.iter().position(|v| *v == target)).unwrap_or(n) };
+                    let (e1, e2, e3, ver_in) = (cx.entity(), cx.entity(), cx.entity(), u.ver.clone());
+                    let ver_select = crate::ui::select_sized(
+                        34.0,
+                        "st-up-ver",
+                        IconName::Tag,
+                        items,
+                        sel,
+                        u.open && list.is_some(),
+                        move |_, cx| {
+                            e1.update(cx, |h, cx| {
+                                if let Some(u) = h.dock.api.st.up.as_mut() {
+                                    u.open = !u.open;
+                                }
+                                cx.notify();
+                            })
+                        },
+                        move |i, window, cx| {
+                            let l = e2.read(cx).dock.api.tags_of(&e2.read(cx).dock.api.st.up.as_ref().map(|u| u.app.id.clone()).unwrap_or_default()).unwrap_or_default();
+                            e2.update(cx, |h, cx| {
+                                if let Some(u) = h.dock.api.st.up.as_mut() {
+                                    u.open = false;
+                                    u.custom = i >= l.len();
+                                    if let Some(v) = l.get(i) {
+                                        ver_in.update(cx, |s, cx| s.set_value(v, window, cx));
+                                    }
+                                }
+                                cx.notify();
+                            })
+                        },
+                        move |_, cx| {
+                            e3.update(cx, |h, cx| {
+                                if let Some(u) = h.dock.api.st.up.as_mut() {
+                                    u.open = false;
+                                }
+                                cx.notify();
+                            })
+                        },
+                        list.is_none().then(|| crate::ui::dot_spinner(("st-up-ver-load", 0), c::muted()).into_any_element()),
+                    );
                     let lines = diff.into_iter().map(|(k, l)| div().whitespace_nowrap().text_color(if k == '+' { c::online() } else { c::danger() }).child(SharedString::from(format!("{k} {l}"))));
                     (
                         rec.version.clone(),
@@ -707,8 +771,13 @@ impl Home {
                             .flex()
                             .flex_col()
                             .gap(px(10.0))
-                            .child(field_col("目标版本", None, div().flex_1().min_w_0().child(Input::new(&u.ver).appearance(false).with_size(px(12.0 / 0.875))).into_any_element(), true, false))
-                            .child(div().p(px(10.0)).rounded(px(t::RADIUS_MD)).border_1().border_color(c::field_border()).bg(c::field()).font_family(MONO).text_size(px(t::TYPE_CAPTION)).children(lines))
+                            .child(div().flex().flex_col().gap(px(6.0)).child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child("目标版本")).child(div().h(px(34.0)).child(ver_select)))
+                            .children(u.custom.then(|| field_col("自定义版本号", None, div().flex_1().min_w_0().child(Input::new(&u.ver).appearance(false).with_size(px(12.0 / 0.875))).into_any_element(), true, false)))
+                            .child(if empty {
+                                div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(if target == rec.version { "和当前版本相同,配置没有变化" } else { "配置没有变化" }).into_any_element()
+                            } else {
+                                div().p(px(10.0)).rounded(px(t::RADIUS_MD)).border_1().border_color(c::field_border()).bg(c::field()).font_family(MONO).text_size(px(t::TYPE_CAPTION)).children(lines).into_any_element()
+                            })
                             .into_any_element(),
                     )
                 }
