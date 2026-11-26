@@ -208,3 +208,70 @@ section>.slot,section>.stage3d{opacity:1!important;transform:none!important}
 @media(prefers-reduced-motion:reduce){.hs figure.on .vp img,.hs-bars i.on::after{animation:none}}
 
 .hs-nav button{display:flex;align-items:center;justify-content:center;padding:0;line-height:0}
+
+/* 科技感:扫描光带、编号标签、光标高光、HUD */
+body{counter-reset:fx}
+.feat .tx small{counter-increment:fx;font-family:"SF Mono",Menlo,Consolas,monospace;font-weight:600;letter-spacing:.12em;font-size:12px;display:inline-flex;align-items:center;gap:10px;padding:4px 10px;border:1px solid rgba(167,139,250,.35);border-radius:6px;background:rgba(167,139,250,.08)}
+.feat .tx small::before{content:"0" counter(fx);color:#7c7a96}
+.feat .tx small::after{content:"";width:6px;height:6px;border-radius:50%;background:#4ade80;box-shadow:0 0 8px #4ade80;animation:blink 1.6s steps(1) infinite}
+.feat.wide .tx small{margin-inline:auto}
+.gs::after{content:"";position:absolute;left:0;right:0;top:-22%;height:22%;pointer-events:none;border-radius:14px;background:linear-gradient(180deg,rgba(167,139,250,0),rgba(167,139,250,.28) 80%,rgba(196,181,253,.9) 99%,rgba(167,139,250,0));opacity:0}
+.gs.sink::after{animation:scan 1.3s cubic-bezier(.4,0,.2,1) .25s both}
+@keyframes scan{0%{top:-22%;opacity:0}15%{opacity:1}85%{opacity:1}100%{top:100%;opacity:0}}
+.gs::before{content:"";position:absolute;inset:0;pointer-events:none;border-radius:14px;opacity:0;transition:opacity .4s;background:radial-gradient(420px circle at var(--gx,50%) var(--gy,50%),rgba(196,181,253,.18),transparent 60%);mix-blend-mode:screen;z-index:3}
+.gs.fl::before{opacity:1}
+#hud{position:fixed;left:22px;bottom:18px;z-index:5;font:11px/1.7 "SF Mono",Menlo,Consolas,monospace;color:#7c7a96;letter-spacing:.08em;pointer-events:none;text-transform:uppercase}
+#hud b{color:#a78bfa;font-weight:600}
+#hud i{display:inline-block;width:6px;height:6px;border-radius:50%;background:#4ade80;box-shadow:0 0 8px #4ade80;margin-right:8px;vertical-align:1px}
+@media(max-width:860px){#hud{display:none}}
+@media(prefers-reduced-motion:reduce){.gs.sink::after{animation:none}}
+
+/* 4 背景数据流 / 5 实时小组件 / 6 收紧视觉 */
+#bgdata{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;font:10px/1.9 "SF Mono",Menlo,Consolas,monospace;color:#a78bfa;opacity:.07;-webkit-mask-image:linear-gradient(90deg,#000,transparent 14%,transparent 86%,#000);mask-image:linear-gradient(90deg,#000,transparent 14%,transparent 86%,#000)}
+#bgdata div{position:absolute;top:0;white-space:pre;animation:bgd 60s linear infinite}
+#bgdata .l{left:14px}#bgdata .r{right:14px;text-align:right;animation-duration:75s;animation-direction:reverse}
+@keyframes bgd{from{transform:translateY(0)}to{transform:translateY(-50%)}}
+@media(max-width:860px){#bgdata{display:none}}
+.lvw{display:inline-flex;align-items:center;gap:14px;margin-top:18px;padding:10px 14px;border:1px solid rgba(167,139,250,.3);border-radius:8px;background:rgba(10,9,18,.6);font:12px "SF Mono",Menlo,monospace;color:#b9b2d6;letter-spacing:.06em}
+.lvw b{color:#fff;font-size:20px;font-weight:600;min-width:3.2ch}
+.lvw em{font-style:normal;color:#4ade80}
+.lvw canvas{width:120px;height:32px}
+#hud canvas{display:block;width:96px;height:22px;margin-top:4px;opacity:.9}
+.crn{position:absolute;inset:-12px;pointer-events:none;opacity:0;transition:opacity .5s;--k:rgba(167,139,250,.8);
+background:linear-gradient(var(--k),var(--k)) 0 0/16px 1px,linear-gradient(var(--k),var(--k)) 0 0/1px 16px,linear-gradient(var(--k),var(--k)) 100% 0/16px 1px,linear-gradient(var(--k),var(--k)) 100% 0/1px 16px,linear-gradient(var(--k),var(--k)) 0 100%/16px 1px,linear-gradient(var(--k),var(--k)) 0 100%/1px 16px,linear-gradient(var(--k),var(--k)) 100% 100%/16px 1px,linear-gradient(var(--k),var(--k)) 100% 100%/1px 16px;background-repeat:no-repeat}
+.gs.fl .crn{opacity:1}
+.chips span{border-radius:8px!important;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px!important;letter-spacing:.04em;background:transparent!important;border:1px solid rgba(167,139,250,.28)!important}
+.feat h3{letter-spacing:-.035em}
+.feat .tx p{font-size:15.5px;color:#9a97b5}
+
+/* 宽屏画廊:左图右文 */
+.feat.wide{grid-template-columns:1fr;justify-items:stretch;text-align:left;max-width:1280px}
+.feat.wide .hs{--cw:auto;width:100%;margin:0;order:1;display:grid;grid-template-columns:minmax(0,1.75fr) minmax(0,1fr);gap:40px;align-items:center}
+.feat.wide .hs-track{position:relative;padding:24px;margin:-24px;gap:24px;scroll-padding:0 24px;min-width:0}
+.feat.wide .hs figure{flex:0 0 100%;transform:none;opacity:1}
+.feat.wide .hs figure figcaption{display:none}
+.feat.wide .hs .vp{border-radius:14px}
+.hs-side{min-width:0}
+.hs-side .tx{text-align:left}
+.feat.wide .hs-side p{margin-inline:0}
+.feat.wide .hs-side .chips{justify-content:flex-start}
+.feat.wide .hs-side .tx small{margin-inline:0}
+.feat.wide .hs-side h3{margin:14px 0 14px}
+.hs-cap{margin-top:22px;padding:16px 18px;border:1px solid rgba(167,139,250,.28);border-left:2px solid #a78bfa;border-radius:8px;background:rgba(10,9,18,.55);min-height:92px;display:flex;flex-direction:column;gap:6px;animation:capin .5s}
+.hs-cap b{font-size:17px;color:#fff;font-weight:600}
+.hs-cap span{font-size:14px;line-height:1.65;color:#b9b2d6}
+@keyframes capin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.hs-side .hs-nav{justify-content:flex-start;margin-top:16px}
+@media(max-width:860px){.feat.wide .hs{grid-template-columns:1fr}}
+.feat.wide .hs-side h3{font-size:clamp(26px,2.8vw,40px)}
+
+.feat.wide{max-width:none;width:100%;padding-inline:clamp(20px,4vw,72px);box-sizing:border-box}
+.feat.wide .hs{grid-template-columns:minmax(0,2fr) minmax(300px,1fr);gap:clamp(28px,3.5vw,64px)}
+.feat.wide .hs .vp{box-shadow:0 14px 30px -14px rgba(120,80,255,.5),0 0 0 1px rgba(167,139,250,.35)}
+
+.hs .vp img{transform-origin:50% 50%}
+@keyframes hsz{0%,12%{transform:scale(1) translate(0,0)}55%,100%{transform:scale(1.5) translate(clamp(-16.6%,calc(50% - var(--fx)),16.6%),clamp(-16.6%,calc(50% - var(--fy)),16.6%))}}
+
+@keyframes hsz{0%,12%{transform:scale(1) translate(0,0)}55%,100%{transform:scale(1.18) translate(clamp(-7.6%,calc(50% - var(--fx)),7.6%),clamp(-7.6%,calc(50% - var(--fy)),7.6%))}}
+
+.hs figure.on .vp img{animation:none!important}

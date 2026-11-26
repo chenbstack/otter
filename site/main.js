@@ -88,7 +88,7 @@ new IntersectionObserver(([e])=>{if(e.isIntersecting&&!h.classList.contains('in'
 
 $$('.hs').forEach(h=>{const t=h.querySelector('.hs-track'),fs=[...t.querySelectorAll('figure')],bars=h.querySelector('.hs-bars');
 bars.innerHTML=fs.map(()=>'<i></i>').join('');const bs=[...bars.children];let cur=-1,tm,lock=0,vis=0;
-const go=(i,sc)=>{cur=i;fs.forEach((f,k)=>{f.classList.remove('on');bs[k].classList.remove('on');bs[k].classList.toggle('done',k<i)});void h.offsetWidth;fs[i].classList.add('on');bs[i].classList.add('on');
+const go=(i,sc)=>{cur=i;fs.forEach((f,k)=>{f.classList.remove('on');bs[k].classList.remove('on');bs[k].classList.toggle('done',k<i)});void h.offsetWidth;fs[i].classList.add('on');{const cap=h.querySelector('.hs-cap'),fc=fs[i].querySelector('figcaption'),en=document.documentElement.lang==='en';if(cap&&fc){const b=fc.querySelector('b'),sp=fc.querySelector('span');cap.style.animation='none';void cap.offsetWidth;cap.style.animation='';cap.querySelector('b').textContent=en?b.dataset.en:b.textContent;cap.querySelector('span').textContent=en?sp.dataset.en:sp.textContent}}bs[i].classList.add('on');
 if(sc){lock=Date.now()+900;t.scrollTo({left:fs[i].offsetLeft-(t.clientWidth-fs[i].offsetWidth)/2,behavior:'smooth'})}
 clearTimeout(tm);tick(5500)};
 const tick=ms=>{tm=setTimeout(()=>{if(vis&&!h.classList.contains('paused'))go((cur+1)%fs.length,1);else tick(500)},ms)};
@@ -97,3 +97,26 @@ h.querySelector('.hs-p').addEventListener('click',()=>go((cur+fs.length-1)%fs.le
 h.addEventListener('pointerenter',()=>h.classList.add('paused'));h.addEventListener('pointerleave',()=>h.classList.remove('paused'));
 t.addEventListener('scroll',()=>{if(Date.now()<lock)return;const c=t.scrollLeft+t.clientWidth/2;let b=0,bd=1e9;fs.forEach((f,k)=>{const d=Math.abs(f.offsetLeft+f.offsetWidth/2-c);if(d<bd){bd=d;b=k}});if(b!==cur)go(b,0)},{passive:true});
 new IntersectionObserver(([e])=>{const was=vis;vis=e.isIntersecting;if(vis&&!was)go(0,1)},{threshold:.5}).observe(h)});
+
+/* HUD 滚动百分比 + 舞台光标高光 */
+(()=>{const hp=$('#hp'),gs=$('#gs');const up=()=>{const p=Math.round(scrollY/Math.max(1,document.documentElement.scrollHeight-innerHeight)*100);hp.textContent=String(p).padStart(3,'0')};
+addEventListener('scroll',up,{passive:true});up();
+addEventListener('mousemove',e=>{const r=gs.getBoundingClientRect();gs.style.setProperty('--gx',e.clientX-r.left+'px');gs.style.setProperty('--gy',e.clientY-r.top+'px')},{passive:true})})();
+/* 标题解码动画:首次进入视口时字符随机跳动后逐个定格 */
+(()=>{if(RM)return;const P='01<>/_#$%&*+=?';
+function texts(el){const w=document.createTreeWalker(el,NodeFilter.SHOW_TEXT),a=[];let n;while(n=w.nextNode())if(n.nodeValue.trim())a.push(n);return a}
+function dec(el){const ns=texts(el).map(n=>({n,t:n.nodeValue}));const tot=ns.reduce((s,o)=>s+o.t.length,0);const t0=performance.now(),D=900;
+(function f(t){const p=Math.min(1,(t-t0)/D),k=Math.floor(p*tot*1.0);let i=0;ns.forEach(o=>{let s='';for(const ch of o.t){s+=(i<k||/\s/.test(ch))?ch:P[Math.random()*P.length|0];i++}o.n.nodeValue=s});if(p<1)requestAnimationFrame(f);else ns.forEach(o=>o.n.nodeValue=o.t)})(t0)}
+const io2=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){io2.unobserve(e.target);dec(e.target)}}),{threshold:.6});
+$$('.feat h3,#stats h2').forEach(h=>io2.observe(h))})();
+
+/* 背景数据流 + 实时曲线 + 舞台角标 */
+(()=>{const rnd=n=>Array.from({length:n},()=>(Math.random()*0xffffffff>>>0).toString(16).padStart(8,'0')).join(' ');
+const lg=['ssh-ed25519 handshake ok','docker ps -a  24 containers','pg_dump app > backup.sql','certbot renew --quiet','sftp put release.tar.gz','systemctl status nginx','crontab -l','du -sh /var/lib/docker'];
+const L=$('#bgdata .l'),R=$('#bgdata .r');const col=(k)=>{let t='';for(let i=0;i<70;i++)t+=(k?rnd(3):lg[i%lg.length].padEnd(30,' ')+rnd(1))+'\n';return t+t};L.textContent=col(0);R.textContent=col(1);
+$('#gs').insertAdjacentHTML('beforeend','<div class="crn"></div>');
+if(RM)return;
+const hc=$('#hc'),lc=$('#lc'),lt=$('#lcpu');const hx=hc.getContext('2d'),lx=lc.getContext('2d');let _s=.4;const A=Array.from({length:48},()=>(_s=Math.min(.9,Math.max(.15,_s+(Math.random()-.5)*.3))));let _t=.35;const B=Array.from({length:60},()=>(_t=Math.min(.85,Math.max(.15,_t+(Math.random()-.5)*.2))));
+function draw(x,cv,d,col,fill){const w=cv.width,h=cv.height;x.clearRect(0,0,w,h);x.beginPath();d.forEach((v,i)=>{const X=i/(d.length-1)*w,Y=h-2-v*(h-4);i?x.lineTo(X,Y):x.moveTo(X,Y)});x.strokeStyle=col;x.lineWidth=2;x.stroke();if(fill){x.lineTo(w,h);x.lineTo(0,h);x.closePath();x.fillStyle=fill;x.fill()}}
+let cpu=.32;setInterval(()=>{A.push(Math.min(.95,Math.max(.1,A[A.length-1]+(Math.random()-.5)*.3)));A.shift();draw(hx,hc,A,'#a78bfa');
+cpu=Math.min(.9,Math.max(.12,cpu+(Math.random()-.5)*.14));B.push(cpu);B.shift();draw(lx,lc,B,'#4ade80','rgba(74,222,128,.15)');lt.textContent=Math.round(cpu*100)+'%'},400)})();
