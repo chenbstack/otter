@@ -100,6 +100,15 @@ pub(crate) fn head(label: &'static str) -> Div {
     div().text_size(px(t::TYPE_CAPTION)).font_weight(FontWeight::SEMIBOLD).text_color(c::ghost()).child(label)
 }
 
+/// 表格最后一行的下圆角跟外框一致(框内半径 = 外圆角 - 边框 1)。GPUI 的 `overflow_hidden` 只做矩形裁剪,
+/// 不处理的话最后一行悬浮时的底色会伸出圆角
+fn round_last(mut rows: Vec<Stateful<Div>>) -> Vec<Stateful<Div>> {
+    if let Some(last) = rows.pop() {
+        rows.push(last.rounded_b(px(t::RADIUS_LG - 1.0)));
+    }
+    rows
+}
+
 /// 表格容器:表头 + 可滚动的行
 pub(crate) fn table(id: &'static str, header: Div, rows: Vec<Stateful<Div>>) -> Div {
     div()
@@ -112,7 +121,7 @@ pub(crate) fn table(id: &'static str, header: Div, rows: Vec<Stateful<Div>>) -> 
         .border_color(c::dialog_border())
         .overflow_hidden()
         .child(header.h(px(34.0)).flex_shrink_0().flex().flex_row().items_center().gap(px(12.0)).px(px(16.0)).border_b_1().border_color(c::border()))
-        .child(div().id(id).flex_1().min_h_0().overflow_y_scroll().children(rows))
+        .child(div().id(id).flex_1().min_h_0().overflow_y_scroll().children(round_last(rows)))
 }
 
 /// 整页一起滚动时的表格:自己不滚,有多少行就多高(外层页面负责滚动)
@@ -126,7 +135,7 @@ pub(crate) fn table_flow(header: Div, rows: Vec<Stateful<Div>>) -> Div {
         .border_color(c::dialog_border())
         .overflow_hidden()
         .child(header.h(px(34.0)).flex_shrink_0().flex().flex_row().items_center().gap(px(12.0)).px(px(16.0)).border_b_1().border_color(c::border()))
-        .children(rows)
+        .children(round_last(rows))
 }
 
 pub(crate) fn row(id: (&'static str, usize)) -> Stateful<Div> {
