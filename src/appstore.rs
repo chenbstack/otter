@@ -942,14 +942,22 @@ fn profile_pre(a: &App, plan: &Plan) -> String {
 }
 
 /// 安装任务脚本(经 `job_start_script` 脱离运行)
-pub fn install_script(a: &App, plan: &Plan, rec: &Record) -> String {
+/// `purge`:目录里有上次的残留时,连同数据卷一起清掉再装(用户在界面上确认过)
+pub fn install_script(a: &App, plan: &Plan, rec: &Record, purge: bool) -> String {
     let d = quote(&plan.dir);
     let n = quote(&plan.container);
     let mut s = format!("set -e\nD={d}; N={n}\n{COMPOSE_UP}\necho \"==> 检查\"\n");
     s += &port_checks(&plan.ports);
     s += &format!("if docker ps -a --format '{{{{.Names}}}}' | grep -qx \"$N\"; then echo \"容器名 $N 已被占用\"; exit 1; fi\n");
-    s += &format!("if [ -e \"$D/{COMPOSE_FILE}\" ]; then echo \"堆栈目录 $D 里已经有 {COMPOSE_FILE}\"; exit 1; fi\n");
+    // 目录里已有 compose.yml:多半是上次没装完的残留。还有容器或留着数据卷(沿用旧数据和旧密码)就拒绝,否则把残留目录挪开继续
+    s += &format!("P={}\nPURGE={}\n", quote(&plan.project), if purge { 1 } else { 0 });
+    s += &format!(
+        "if [ -e \"$D/{COMPOSE_FILE}\" ]; then\n  if [ -n \"$(docker ps -aq --filter \"label=com.docker.compose.project=$P\")\" ]; then echo \"堆栈 $P 还有容器,请先在堆栈里卸载,或换一个名字\"; exit 1; fi\n  V=$(docker volume ls -q | grep -E \"^($N-|${{P}}_)\" | head -n3 | tr '\\n' ' ') || true\n  [ -z \"$(ls -A \"$D/data\" 2>/dev/null)\" ] || V=\"$V$D/data \"\n  if [ -n \"$V\" ] && [ \"$PURGE\" != 1 ]; then echo \"堆栈目录 $D 里已有 {COMPOSE_FILE},并且留着上次的数据卷或数据目录:$V\"; echo \"继续安装会沿用旧数据和旧密码。换一个名字,或先卸载并勾选「同时删除数据」\"; exit 1; fi\n  if [ \"$PURGE\" = 1 ]; then\n    echo \"清理上次的残留(目录和数据卷)\"; (cd \"$D\" && $DC down -v >/dev/null 2>&1) || true; [ -z \"$V\" ] || docker volume rm $V >/dev/null 2>&1 || true; rm -rf \"$D\"\n  else\n  B=\"{root}/trash/$(basename \"$D\")-$(date +%Y%m%d%H%M%S)\"; mkdir -p \"{root}/trash\"; echo \"上次没装完的残留目录挪到 $B\"; mv \"$D\" \"$B\"\n  fi\nfi\n",
+        root = srvdata::ROOT
+    );
     s += &profile_pre(a, plan);
+    // 从这里开始如果失败,清掉这次建的目录和容器(没动过数据卷)
+    s += "CREATED=1\ntrap 'rc=$?; if [ $rc -ne 0 ] && [ \"$CREATED\" = 1 ] && [ -n \"$D\" ] && [ \"$D\" != / ]; then cd /; [ -f \"$D/compose.yml\" ] && (cd \"$D\" && $DC down >/dev/null 2>&1) || true; rm -rf \"$D\"; echo \"安装失败,已清理 $D\"; fi' EXIT\n";
     s += "echo \"==> 写入配置\"\nmkdir -p \"$D\"\n";
     for (path, content, mode) in &plan.files {
         s += &format!("mkdir -p \"$D/$(dirname {p})\"\n{w}\n", p = quote(path), w = write_file_cmd(&format!("{}/{path}", plan.dir), content, mode));
@@ -1214,7 +1222,13 @@ mod tests {
         let v = vals(&a, "17", "15432", false);
         let plan = render(&a, &v).unwrap();
         let rec = Record::new(&plan, &v);
-        let s = install_script(&a, &plan, &rec);
+        let s = install_script(&a, &plan, &rec, false);
+        if let Ok(dir) = std::env::var("OTTER_DUMP_INSTALL") {
+            std::fs::write(format!("{dir}/install.sh"), &s).unwrap();
+        }
+        let chk = std::process::Command::new("bash").arg("-n").arg("-c").arg(&s).status().unwrap();
+        assert!(chk.success(), "install 脚本语法错误");
+
         assert!(s.contains("15432") && s.contains("$DC up -d") && s.contains("umask 077"));
         assert!(!s.contains("abcDEF123"), "密码只以 base64 出现在脚本里");
         let u = upgrade_script(&a, &plan, &rec);

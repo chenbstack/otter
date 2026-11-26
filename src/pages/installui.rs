@@ -338,6 +338,11 @@ impl Home {
     }
 
     fn api_submit(&mut self, cx: &mut Context<Self>) {
+        self.api_submit_with(false, cx);
+    }
+
+    /// `purge`:清掉上次安装留下的目录和数据卷再装
+    fn api_submit_with(&mut self, purge: bool, cx: &mut Context<Self>) {
         let Some(app) = self.api_app() else { return };
         if self.dock.api.job.is_some() {
             return;
@@ -372,7 +377,7 @@ impl Home {
             return;
         }
         let rec = Record::new(&plan, &v);
-        let script = appstore::install_script(&app, &plan, &rec);
+        let script = appstore::install_script(&app, &plan, &rec, purge);
         let secrets = self.api_secrets(&app, &v);
         self.api_job_start(&app, &plan, format!("安装 {}", app.name), script, secrets, false, cx);
     }
@@ -685,6 +690,46 @@ impl Home {
                     .child(icon(sic, 13.0, sc))
                     .child(div().text_size(px(t::TYPE_CONTROL)).text_color(if last && running { c::text() } else { c::muted() }).child(SharedString::from(st)))
             })));
+        }
+
+        // 上次安装留下了目录和数据卷:让用户选择清理后重装
+        if failed && j.log.contains("留着上次的数据卷") {
+            col = col.child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .p(px(14.0))
+                    .rounded(px(t::RADIUS_MD))
+                    .border_1()
+                    .border_color(c::field_border())
+                    .child(div().text_size(px(t::TYPE_CONTROL)).font_weight(FontWeight::MEDIUM).child("上次安装留下了残留"))
+                    .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child("服务器上没有运行的容器,但留着上次的堆栈目录和数据卷。里面如果没有要保留的数据,可以清理后重新安装;清理会删除这个目录和数据卷,不能恢复。"))
+                    .child(
+                        div()
+                            .id("api-purge")
+                            .flex_shrink_0()
+                            .h(px(34.0))
+                            .px(px(16.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .self_start()
+                            .rounded(px(t::RADIUS_MD))
+                            .bg(c::danger())
+                            .text_color(c::on_accent())
+                            .text_size(px(t::TYPE_CONTROL))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .cursor_pointer()
+                            .hover(|s| s.opacity(0.88))
+                            .child("清理残留并重新安装")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.dock.api.job = None;
+                                this.api_submit_with(true, cx);
+                            })),
+                    ),
+            );
         }
 
         if j.done == Some(0) {

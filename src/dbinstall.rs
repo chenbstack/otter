@@ -174,13 +174,12 @@ impl Spec<'_> {
             s += &format!("    mem_limit: {}\n", self.memory.to_ascii_lowercase());
         }
         s += &format!("    ports:\n      - \"{bind}{}:{}\"\n", self.port, k.port());
-        s += &format!("    volumes:\n      - {}-data:{}\n", self.container, data_dir(k, self.version));
+        s += &format!("    volumes:\n      - ./data:{}\n", data_dir(k, self.version));
         s += &format!("    environment:\n      {}: ${{DB_PASSWORD}}\n", password_env(k));
         if k == DbKind::Redis {
             s += "    command: [\"sh\", \"-c\", \"exec redis-server --appendonly yes --requirepass \\\"$$REDIS_PASSWORD\\\"\"]\n";
         }
         s += "    labels:\n      otter.managed: db\n";
-        s += &format!("volumes:\n  {}-data:\n", self.container);
         s
     }
 
@@ -290,12 +289,12 @@ mod tests {
     #[test]
     fn compose_per_kind() {
         let m = spec(DbKind::Mysql, false).compose();
-        assert!(m.contains("image: mysql:17") && m.contains("MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}") && m.contains("pg-main-data:/var/lib/mysql"));
+        assert!(m.contains("image: mysql:17") && m.contains("MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}") && m.contains("./data:/var/lib/mysql"));
         let r = spec(DbKind::Redis, false).compose();
         assert!(r.contains("REDIS_PASSWORD: ${DB_PASSWORD}") && r.contains("$$REDIS_PASSWORD") && r.contains(":6379\""));
         let p = spec(DbKind::Postgres, false).compose();
         assert!(p.contains("otter.managed: db") && p.contains("container_name: pg-main") && p.contains("restart: unless-stopped"));
-        assert!(p.ends_with("volumes:\n  pg-main-data:\n"));
+        assert!(p.contains("      - ./data:"));
     }
 
     #[test]
@@ -311,7 +310,7 @@ mod tests {
         assert!(valid_tag("17.5-alpine") && valid_tag("8.0.42") && !valid_tag("") && !valid_tag("a b") && !valid_tag("-x") && !valid_tag("a:b"));
         let mut s = spec(DbKind::Postgres, false);
         s.version = "18.1";
-        assert!(s.compose().contains("pg-main-data:/var/lib/postgresql\n"));
+        assert!(s.compose().contains("./data:/var/lib/postgresql\n"));
         s.version = "16.9";
         assert!(s.compose().contains("/var/lib/postgresql/data\n"));
         s.version = "17; rm";

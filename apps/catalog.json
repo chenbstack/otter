@@ -122,7 +122,7 @@
           "default": "/var/lib/postgresql/data"
         }
       ],
-      "compose": "services:\n  db:\n    image: postgres:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:5432\"\n    volumes:\n      - ${container}-data:${data_dir}\n    environment:\n      POSTGRES_PASSWORD: ${env.password}\n    labels:\n      otter.managed: db\n      otter.app: postgres\nvolumes:\n  ${container}-data:\n",
+      "compose": "services:\n  db:\n    image: postgres:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:5432\"\n    volumes:\n      - ./data:${data_dir}\n    environment:\n      POSTGRES_PASSWORD: ${env.password}\n    labels:\n      otter.managed: db\n      otter.app: postgres\n",
       "post": {
         "notes": "管理员密码只显示这一次,Otter 不保存",
         "show": [
@@ -231,7 +231,7 @@
           "default": "/var/lib/mysql"
         }
       ],
-      "compose": "services:\n  db:\n    image: mysql:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:3306\"\n    volumes:\n      - ${container}-data:${data_dir}\n    environment:\n      MYSQL_ROOT_PASSWORD: ${env.password}\n    labels:\n      otter.managed: db\n      otter.app: mysql\nvolumes:\n  ${container}-data:\n",
+      "compose": "services:\n  db:\n    image: mysql:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:3306\"\n    volumes:\n      - ./data:${data_dir}\n    environment:\n      MYSQL_ROOT_PASSWORD: ${env.password}\n    labels:\n      otter.managed: db\n      otter.app: mysql\n",
       "post": {
         "notes": "管理员密码只显示这一次,Otter 不保存",
         "show": [
@@ -340,7 +340,7 @@
           "default": "/var/lib/mysql"
         }
       ],
-      "compose": "services:\n  db:\n    image: mariadb:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:3306\"\n    volumes:\n      - ${container}-data:${data_dir}\n    environment:\n      MARIADB_ROOT_PASSWORD: ${env.password}\n    labels:\n      otter.managed: db\n      otter.app: mariadb\nvolumes:\n  ${container}-data:\n",
+      "compose": "services:\n  db:\n    image: mariadb:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:3306\"\n    volumes:\n      - ./data:${data_dir}\n    environment:\n      MARIADB_ROOT_PASSWORD: ${env.password}\n    labels:\n      otter.managed: db\n      otter.app: mariadb\n",
       "post": {
         "notes": "管理员密码只显示这一次,Otter 不保存",
         "show": [
@@ -449,7 +449,7 @@
           "default": "/data"
         }
       ],
-      "compose": "services:\n  db:\n    image: redis:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:6379\"\n    volumes:\n      - ${container}-data:${data_dir}\n    environment:\n      REDIS_PASSWORD: ${env.password}\n    command: [\"sh\", \"-c\", \"exec redis-server --appendonly yes --requirepass \\\"$$REDIS_PASSWORD\\\"\"]\n    labels:\n      otter.managed: db\n      otter.app: redis\nvolumes:\n  ${container}-data:\n",
+      "compose": "services:\n  db:\n    image: redis:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:6379\"\n    volumes:\n      - ./data:${data_dir}\n    environment:\n      REDIS_PASSWORD: ${env.password}\n    command: [\"sh\", \"-c\", \"exec redis-server --appendonly yes --requirepass \\\"$$REDIS_PASSWORD\\\"\"]\n    labels:\n      otter.managed: db\n      otter.app: redis\n",
       "post": {
         "notes": "管理员密码只显示这一次,Otter 不保存",
         "show": [
