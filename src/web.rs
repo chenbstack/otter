@@ -315,6 +315,32 @@ pub struct Advanced {
     pub max_body: Option<String>,
     /// 反向代理读取超时(秒);None 用 300
     pub read_timeout: Option<u32>,
+    /// 允许的 TLS 协议版本(`TLSv1`、`TLSv1.1`、`TLSv1.2`、`TLSv1.3`);None 用 TLSv1.2 + TLSv1.3
+    pub tls_protocols: Option<Vec<String>>,
+    /// `ssl_ciphers` 的值(只影响 TLS 1.2 及以下);None 用 nginx 默认
+    pub ciphers: Option<String>,
+    /// 关掉 HTTP/2(默认开)
+    pub no_http2: bool,
+    /// HTTP/3(QUIC):额外监听 UDP 的同一个端口并发 Alt-Svc;需要 nginx 带 http_v3_module,防火墙要放行 UDP
+    pub http3: bool,
+    /// OCSP Stapling(默认关;证书里没有 OCSP 地址的颁发机构不适用)
+    pub ocsp: bool,
+    /// HSTS 有效期(秒);None 一年
+    pub hsts_age: Option<u32>,
+    pub hsts_sub: bool,
+    pub hsts_preload: bool,
+}
+
+pub const TLS_VERSIONS: [&str; 4] = ["TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3"];
+/// 加密套件预设:(名称, 值);值为空 = 用 nginx 默认
+pub const CIPHER_PRESETS: [(&str, &str); 3] = [
+    ("默认", ""),
+    ("现代", "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"),
+    ("兼容", "HIGH:!aNULL:!MD5:!RC4"),
+];
+
+fn valid_ciphers(v: &str) -> bool {
+    !v.is_empty() && v.len() <= 1024 && v.chars().all(|c| c.is_ascii_alphanumeric() || ":!+-_@=.".contains(c))
 }
 
 /// `100m` / `512k` / `2g` / `0`
@@ -390,6 +416,20 @@ impl SiteSpec {
         }
         if self.adv.read_timeout.is_some_and(|t| t == 0 || t > 86400) {
             return Err("读取超时要在 1–86400 秒之间".into());
+        }
+        if let Some(p) = &self.adv.tls_protocols
+            && (p.is_empty() || p.iter().any(|v| !TLS_VERSIONS.contains(&v.as_str())))
+        {
+            return Err("HTTPS 至少要允许一个 TLS 协议版本".into());
+        }
+        if self.adv.hsts_age.is_some_and(|a| a == 0 || a > 63072000) {
+            return Err("HSTS 有效期要在 1 秒到 2 年之间".into());
+        }
+        if self.adv.hsts_preload && (!self.adv.hsts_sub || self.adv.hsts_age.unwrap_or(31536000) < 31536000) {
+            return Err("HSTS preload 要求包含子域名,且有效期至少一年".into());
+        }
+        if self.adv.ciphers.as_deref().is_some_and(|c| !valid_ciphers(c)) {
+            return Err("HTTPS 加密套件只能写字母、数字和 : ! + - _ @ = .".into());
         }
         match &self.kind {
             SiteKind::Proxy { locations, upstreams } => check_proxy(locations, upstreams),
@@ -558,6 +598,30 @@ fn header_line(s: &SiteSpec) -> String {
     if let Some(v) = s.adv.read_timeout {
         h += &format!(" timeout={v}");
     }
+    if let Some(v) = &s.adv.tls_protocols {
+        h += &format!(" tlsv={}", esc(&v.join(",")));
+    }
+    if let Some(v) = &s.adv.ciphers {
+        h += &format!(" ciphers={}", esc(v));
+    }
+    if s.adv.no_http2 {
+        h += " h2=0";
+    }
+    if s.adv.http3 {
+        h += " h3=1";
+    }
+    if s.adv.ocsp {
+        h += " ocsp=1";
+    }
+    if let Some(v) = s.adv.hsts_age {
+        h += &format!(" hsts_age={v}");
+    }
+    if s.adv.hsts_sub {
+        h += " hsts_sub=1";
+    }
+    if s.adv.hsts_preload {
+        h += " hsts_pre=1";
+    }
     h
 }
 
@@ -642,8 +706,13 @@ fn body(s: &SiteSpec, tg: &Target) -> String {
     let fmt = if tg.adopted { "" } else { " main" };
     let logs = format!("    access_log /var/log/nginx/{n}.access.log{fmt};\n    error_log /var/log/nginx/{n}.error.log warn;\n", n = s.name);
     // 有 443 的 SSL 监听时,「强制 HTTPS」才有地方可跳
-    let has_443 = s.listeners.iter().any(|l| l.ssl() && l.port == tg.ports.1);
-    let https_at = if tg.ports.1 == 443 { String::new() } else { format!(":{}", tg.ports.1) };
+    let https_port = s.listeners.iter().find(|l| l.ssl()).map(|l| l.port);
+    let has_443 = https_port.is_some();
+    let https_at = match https_port {
+        Some(443) | None => String::new(),
+        Some(p) => format!(":{p}"),
+    };
+    let hsts_v = format!("max-age={}{}{}", s.adv.hsts_age.unwrap_or(31536000), if s.adv.hsts_sub { "; includeSubDomains" } else { "" }, if s.adv.hsts_preload { "; preload" } else { "" });
     let mut out: Vec<String> = Vec::new();
     for l in &s.listeners {
         let ssl = if l.ssl() { " ssl" } else { "" };
@@ -651,13 +720,26 @@ fn body(s: &SiteSpec, tg: &Target) -> String {
         if s.ipv6 {
             t += &format!("    listen [::]:{}{ssl};\n", l.port);
         }
-        if l.ssl() {
+        if l.ssl() && s.adv.http3 {
+            t += &format!("    listen {} quic;\n", l.port);
+            if s.ipv6 {
+                t += &format!("    listen [::]:{} quic;\n", l.port);
+            }
+            t += &format!("    add_header Alt-Svc 'h3=\":{}\"; ma=86400' always;\n", l.port);
+        }
+        if l.ssl() && !s.adv.no_http2 {
             t += "    http2 on;\n";
         }
         t += &format!("    server_name {};\n", l.domains.join(" "));
         if let Some(c) = &l.cert {
             let cm = tg.cert_mount();
-            t += &format!("    ssl_certificate {cm}/{c}/fullchain.pem;\n    ssl_certificate_key {cm}/{c}/privkey.pem;\n    ssl_protocols TLSv1.2 TLSv1.3;\n");
+            t += &format!("    ssl_certificate {cm}/{c}/fullchain.pem;\n    ssl_certificate_key {cm}/{c}/privkey.pem;\n    ssl_protocols {};\n", s.adv.tls_protocols.as_ref().map(|p| p.join(" ")).unwrap_or_else(|| "TLSv1.2 TLSv1.3".into()));
+            if s.adv.ocsp {
+                t += &format!("    ssl_stapling on;\n    ssl_stapling_verify on;\n    ssl_trusted_certificate {cm}/{c}/fullchain.pem;\n    resolver 1.1.1.1 8.8.8.8 valid=300s;\n    resolver_timeout 5s;\n");
+            }
+            if let Some(ci) = &s.adv.ciphers {
+                t += &format!("    ssl_ciphers {ci};\n    ssl_prefer_server_ciphers on;\n");
+            }
         }
         t += &logs;
         if let Some(b) = &s.adv.max_body {
@@ -667,7 +749,7 @@ fn body(s: &SiteSpec, tg: &Target) -> String {
             t += &acme_loc(tg);
         }
         if l.ssl() && s.hsts {
-            t += "    add_header Strict-Transport-Security \"max-age=31536000\" always;\n";
+            t += &format!("    add_header Strict-Transport-Security \"{hsts_v}\" always;\n");
         }
         if !l.ssl() && l.force_https && has_443 {
             t += &format!("    location / {{\n        return 301 https://$host{https_at}$request_uri;\n    }}\n");
@@ -733,7 +815,18 @@ pub fn parse_site(text: &str) -> Option<(SiteSpec, bool)> {
         }
         v
     };
-    let adv = Advanced { max_body: Some(g("body")).filter(|v| !v.is_empty()), read_timeout: g("timeout").parse().ok() };
+    let adv = Advanced {
+        max_body: Some(g("body")).filter(|v| !v.is_empty()),
+        read_timeout: g("timeout").parse().ok(),
+        tls_protocols: Some(g("tlsv")).filter(|v| !v.is_empty()).map(|v| v.split(',').map(str::to_string).collect()),
+        ciphers: Some(g("ciphers")).filter(|v| !v.is_empty()),
+        no_http2: g("h2") == "0",
+        http3: flag("h3"),
+        ocsp: flag("ocsp"),
+        hsts_age: g("hsts_age").parse().ok(),
+        hsts_sub: flag("hsts_sub"),
+        hsts_preload: flag("hsts_pre"),
+    };
     let spec = SiteSpec { name: g("name"), kind, listeners, ipv6: flag("ipv6"), hsts: flag("hsts"), adv };
     let rest = text.get(consumed.min(text.len())..).unwrap_or("");
     let modified = hash.is_none_or(|h| fnv(rest) != h);
@@ -2329,6 +2422,47 @@ mod tests {
     }
 
     #[test]
+    fn tls_options_render_and_roundtrip() {
+        let mut sp = SiteSpec { listeners: vec![ls(&["a.com".to_string()], 80, None, true), ls(&["a.com".to_string()], 443, Some("a.com"), false)], ..multi_loc_spec() };
+        sp.adv.tls_protocols = Some(vec!["TLSv1.2".into()]);
+        sp.adv.ciphers = Some("HIGH:!aNULL:!MD5".into());
+        sp.check().unwrap();
+        let text = render_site(&sp, &Target::own());
+        assert!(text.contains("ssl_protocols TLSv1.2;") && text.contains("ssl_ciphers HIGH:!aNULL:!MD5;"));
+        let (back, modified) = parse_site(&text).unwrap();
+        assert!(!modified && back.adv == sp.adv);
+        sp.adv.ciphers = Some("bad cipher;".into());
+        assert!(sp.check().is_err());
+        sp.adv.ciphers = None;
+        sp.adv.tls_protocols = Some(vec![]);
+        assert!(sp.check().is_err());
+    }
+
+    #[test]
+    fn https_extras_render_and_roundtrip() {
+        let mut sp = SiteSpec { hsts: true, listeners: vec![ls(&["a.com".to_string()], 80, None, true), ls(&["a.com".to_string()], 8443, Some("a.com"), false)], ..multi_loc_spec() };
+        sp.adv.no_http2 = true;
+        sp.adv.http3 = true;
+        sp.adv.ocsp = true;
+        sp.adv.hsts_age = Some(63072000);
+        sp.adv.hsts_sub = true;
+        sp.adv.hsts_preload = true;
+        sp.check().unwrap();
+        let text = render_site(&sp, &Target::own());
+        assert!(text.contains("listen 8443 quic;") && text.contains("Alt-Svc 'h3=\":8443\"; ma=86400'"));
+        assert!(!text.contains("http2 on;") && text.contains("ssl_stapling on;") && text.contains("ssl_trusted_certificate"));
+        assert!(text.contains("max-age=63072000; includeSubDomains; preload"));
+        assert!(text.contains("return 301 https://$host:8443$request_uri;"));
+        let (back, modified) = parse_site(&text).unwrap();
+        assert!(!modified && back.adv == sp.adv);
+        sp.adv.hsts_sub = false;
+        assert!(sp.check().is_err());
+        sp.adv.hsts_preload = false;
+        sp.adv.hsts_age = Some(0);
+        assert!(sp.check().is_err());
+    }
+
+    #[test]
     fn v2_header_still_reads_as_single_location() {
         let v2 = "# managed by otter (layout 1)\n# otter:site v2 name=a type=proxy target=http://127.0.0.1:8080 ws=0 host=1 ipv6=0 hsts=0 ls=a.com@80@-@0\n# otter:hash 0\nserver {}\n";
         let (s, _) = parse_site(v2).unwrap();
@@ -2421,7 +2555,7 @@ mod tests {
     #[test]
     fn advanced_options_render_and_roundtrip() {
         let mut spec = proxy("adv");
-        spec.adv = Advanced { max_body: Some("200m".into()), read_timeout: Some(600) };
+        spec.adv = Advanced { max_body: Some("200m".into()), read_timeout: Some(600), ..Default::default() };
         spec.check().unwrap();
         let t = render_site(&spec, &Target::own());
         let (back, modified) = parse_site(&t).unwrap();

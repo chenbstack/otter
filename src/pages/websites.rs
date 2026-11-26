@@ -646,6 +646,23 @@ impl Home {
         cx.notify();
     }
 
+    /// 在抽屉之上打开「申请证书」(预填域名),关掉后回到抽屉
+    pub(super) fn web_open_issue_over(&mut self, domains: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.web_push();
+        self.web_inputs(&["example.com *.example.com", "证书名,留空则用第一个域名"], &[], window, cx);
+        let w = self.web_mut();
+        (w.i_zero, w.i_dns, w.i_acct, w.i_staging, w.i_auto, w.i_warn) = (false, true, None, false, true, None);
+        let first = self.web_state().and_then(|s| s.dns.first().map(|d| d.id.clone()));
+        self.web_mut().i_acct = first;
+        let ca = self.web_state().and_then(|s| s.acme.first().map(|a| a.id.clone()));
+        self.web_mut().i_ca = ca;
+        if let Some(e) = self.web_ui().ins.first().cloned() {
+            e.update(cx, |s, cx| s.set_value(domains, window, cx));
+        }
+        self.web_mut().dlg = Some(Dlg::Issue);
+        cx.notify();
+    }
+
     /// 关掉当前弹窗;若是从别的弹窗里打开的,回到下一层(表单内容保留)
     fn web_leave(&mut self) {
         let w = self.web_mut();
@@ -692,6 +709,13 @@ impl Home {
     }
 
     fn web_close(&mut self, cx: &mut Context<Self>) {
+        // 抽屉里的编辑窗口开着时,先只关它
+        if let Some(sd) = self.web_mut().sd.as_deref_mut() {
+            if sd.close_edit() {
+                cx.notify();
+                return;
+            }
+        }
         let w = self.web_mut();
         if w.busy.is_some() && !matches!(w.dlg, Some(Dlg::Logs)) {
             return;
@@ -731,7 +755,7 @@ impl Home {
         };
         let timeout = self.web_val(3, cx);
         let read_timeout = if timeout.is_empty() { None } else { Some(timeout.parse::<u32>().map_err(|_| "读取超时要填秒数".to_string())?) };
-        let adv = web::Advanced { max_body: Some(self.web_val(2, cx)).filter(|v| !v.is_empty()), read_timeout };
+        let adv = web::Advanced { max_body: Some(self.web_val(2, cx)).filter(|v| !v.is_empty()), read_timeout, ..Default::default() };
         let spec = SiteSpec { name, kind, listeners, ipv6: w.s_ipv6, hsts: w.s_hsts && w.s_ls.iter().any(|f| f.ssl), adv };
         spec.check()?;
         // 新建时不能和现有站点重名
@@ -956,7 +980,7 @@ impl Home {
                 let entry = self.web_state().and_then(|st| st.sites.iter().find(|e| e.spec.is_some()).cloned());
                 if let Some(e) = entry {
                     self.web_open_drawer(&e, window, cx);
-                    let menu = match m.strip_prefix("drawer:").unwrap_or("") {
+                    let menu = match m.strip_prefix("drawer:").unwrap_or("").split(':').next().unwrap_or("") {
                         "proxy" => Some(sitedrawer::Menu::Proxy),
                         "balance" => Some(sitedrawer::Menu::Balance),
                         "https" => Some(sitedrawer::Menu::Https),
@@ -965,6 +989,17 @@ impl Home {
                     };
                     if let (Some(menu), Some(sd)) = (menu, self.web_mut().sd.as_deref_mut()) {
                         sd.set_menu(menu);
+                    }
+                    if m.ends_with(":edit") {
+                        let kind = match menu {
+                            Some(sitedrawer::Menu::Proxy) => Some(sitedrawer::EdKind::Loc),
+                            Some(sitedrawer::Menu::Balance) => Some(sitedrawer::EdKind::Up),
+                            Some(sitedrawer::Menu::Domains) | None => Some(sitedrawer::EdKind::Listener),
+                            _ => None,
+                        };
+                        if let Some(k) = kind {
+                            self.web_sd_edit(k, Some(0), window, cx);
+                        }
                     }
                 }
             }
@@ -1801,8 +1836,12 @@ impl Home {
         if self.demo {
             self.web_demo_dialog(window, cx);
         }
-        if matches!(self.web_ui().dlg, Some(Dlg::Drawer)) {
+        // 从抽屉里打开的弹窗(申请证书等)盖在抽屉上
+        let over_drawer = self.web_ui().stack.iter().any(|(d, _, _)| matches!(d, Dlg::Drawer));
+        if matches!(self.web_ui().dlg, Some(Dlg::Drawer)) || over_drawer {
             v.extend(self.web_sd_overlay(cx));
+        }
+        if matches!(self.web_ui().dlg, Some(Dlg::Drawer)) {
         } else if let Some(d) = self.web_ui().dlg.clone() {
             let m = match d {
                 Dlg::Drawer => unreachable!(),
