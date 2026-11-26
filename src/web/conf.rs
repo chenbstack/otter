@@ -294,9 +294,13 @@ pub fn parse_conf(text: &str, site: &str, hint: Option<&SiteSpec>) -> Option<Par
         let mut locations = Vec::new();
         let mut timeouts = Vec::new();
         for l in locs.iter().filter(|l| arg0(kids(l), "proxy_pass").is_some()) {
-            let (loc, t) = parse_location(site, l, &upstreams)?;
+            // 认不出的 location(正则匹配、非常规 proxy_pass 等)不进表单,留在正文里原样保留(会列入「Otter 不管理的内容」)
+            let Some((loc, t)) = parse_location(site, l, &upstreams) else { continue };
             locations.push(loc);
             timeouts.push(t);
+        }
+        if locations.is_empty() {
+            return None;
         }
         // 读取超时:出现最多的值是站点默认(300 视为没设),其余的记在各自的路径上
         let mut best: Option<(u32, usize)> = None;
@@ -485,7 +489,9 @@ mod tests {
     fn unsupported_structures_fall_back() {
         let spec = proxy_spec();
         let text = render_site(&spec, &Target::own()).replace("location = /health", "location ~ /health");
-        assert!(parse_conf(&text, "app", Some(&spec)).is_none());
+        // 认不出的 location 不进表单,只列入未识别
+        let p = parse_conf(&text, "app", Some(&spec)).unwrap();
+        assert!(p.unknown.iter().any(|u| u.contains("location ~ /health")), "{:?}", p.unknown);
         assert!(parse_conf("server { listen 80; listen 81; server_name a.com; }", "x", None).is_none());
     }
 }

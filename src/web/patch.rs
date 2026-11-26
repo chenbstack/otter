@@ -477,8 +477,17 @@ mod tests {
         let t = Target::own();
         let text = render_site(&spec, &t).replace("proxy_http_version 1.1;", "proxy_http_version 1.1;\n        proxy_buffering off;");
         assert_eq!(patch_text(&text, &spec, &t).unwrap(), text);
-        let bad = text.replace("location / {", "location ~ ^/x {");
-        assert!(patch_text(&bad, &spec, &t).is_err());
+        // 认不出的 location 原样保留,表单其他改动照常应用
+        let at = text.rfind("    location / {").unwrap();
+        let extra = format!("{}    location ~ ^/x {{\n        proxy_pass http://127.0.0.1:9;\n    }}\n{}", &text[..at], &text[at..]);
+        assert_eq!(patch_text(&extra, &spec, &t).unwrap(), extra);
+        let mut n = spec.clone();
+        n.ipv6 = !n.ipv6;
+        let out = patch_text(&extra, &n, &t).unwrap();
+        assert!(out.contains("location ~ ^/x {") && out.contains("127.0.0.1:9"), "{out}");
+        // 只有认不出的 location 时仍拒绝
+        let only = text.replace("location / {", "location ~ ^/x {");
+        assert!(patch_text(&only, &spec, &t).is_err());
     }
 
     #[test]
