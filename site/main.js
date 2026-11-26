@@ -18,10 +18,10 @@ function count(e){const n=+e.dataset.n,d=+e.dataset.d||0,s=e.dataset.s||'';if(RM
 const secs=$$('section'),dots=$('#dots');
 secs.forEach((s,i)=>{const a=document.createElement('a');a.href='#';a.onclick=e=>{e.preventDefault();s.scrollIntoView({behavior:RM?'auto':'smooth'})};dots.append(a)});
 function panels(){let best=0,bd=9;secs.forEach((s,i)=>{const r=s.getBoundingClientRect(),d=Math.abs((r.top+r.height/2)-innerHeight/2)/innerHeight;
-  const p=Math.max(0,1-Math.max(0,d-.12)*1.8);[...s.children].forEach(c=>c.style.setProperty('--p',p.toFixed(3)));if(d<bd){bd=d;best=i}});
+  const p=Math.max(0,1-Math.max(0,d-.12)*1.8);const mo=matchMedia('(max-width:860px)').matches;if(mo&&(r.bottom<-300||r.top>innerHeight+300))return;[...s.children].forEach(c=>{let q=p;if(mo){const cr=c.getBoundingClientRect();q=Math.max(0,Math.min(1,(innerHeight*.97-cr.top)/(innerHeight*.28)))}c.style.setProperty('--p',q.toFixed(3))});if(d<bd){bd=d;best=i}});
   [...dots.children].forEach((a,i)=>a.classList.toggle('on',i===best))}
 let settled=false,st=0;const flats=$$('.flatimg'),scs=$$('.sc3');let cur=0;
-addEventListener('scroll',panels,{passive:true});addEventListener('resize',panels);panels();
+let _pr=0;const _pf=()=>{_pr=0;panels()};addEventListener('scroll',()=>{if(!_pr)_pr=requestAnimationFrame(_pf)},{passive:true});addEventListener('resize',panels);panels();
 /* 光斑 + 卡片高亮 + hero 倾斜 */
 const spot=$('#spot');
 addEventListener('pointermove',e=>{spot.style.transform=`translate(${e.clientX-innerWidth/2}px,${e.clientY-innerHeight*.3}px)`;
@@ -32,7 +32,22 @@ const stSecs=[$('#top'),...$$('.feat')],slots=[$('#st3'),...$$('.feat .slot')];
 const lerp=(a,b,t)=>a+(b-a)*t,ease=t=>t*t*(3-2*t),cl=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
 function snapRect(i){const s=stSecs[i],e=slots[i];return{x:s.offsetLeft+e.offsetLeft,y:e.offsetTop,w:e.offsetWidth,h:e.offsetHeight}}
 function setScene(i){if(i===cur)return;cur=i;scs.forEach((s,k)=>s.classList.toggle('on',k===i))}
-function tl(){const h=innerHeight,sy=scrollY,tops=stSecs.map(s=>s.offsetTop),n=stSecs.length-1;
+const MQ=matchMedia('(max-width:860px)');
+/* 手机:不吸附滚动,舞台直接贴着当前最显眼的占位走,停稳后切平面(录屏) */
+function tlm(){const h=innerHeight;let best=-1,ba=0;
+  slots.forEach((e,i)=>{if(!e.offsetWidth)return;const r=e.getBoundingClientRect(),a=Math.max(0,Math.min(r.bottom,h)-Math.max(r.top,0))/r.height;if(a>ba){ba=a;best=i}});
+  if(best<0||ba<.15){gs.style.opacity=0;gs.classList.remove('sink','fl');settled=false;clearTimeout(st);st=0;return}
+  const r=slots[best].getBoundingClientRect();
+  gs.style.width=r.width+'px';gs.style.height=r.height+'px';gs.style.transform=`translate(${r.left}px,${r.top}px)`;gs.style.opacity=1;
+  const hero=best===0?cl(1-scrollY/(h*.45)):0,cy=(r.top+r.height/2-h/2)/h;
+  tilt3.style.setProperty('--rx',(best===0?40*ease(hero):cl(cy,-1,1)*-22)+'deg');tilt3.style.setProperty('--ry',(best>=1?cl(cy,-1,1)*10:0)+'deg');
+  tilt3.style.setProperty('--s',lerp(1,.86,ease(hero)));tilt3.style.setProperty('--k',lerp(.45,1,ease(hero)));
+  const k=cl(best-1,0,scs.length-1);setScene(k);
+  const want=(best>=1&&ba>.8)||(best===0&&hero<.03);
+  if(want){if(!settled&&!st)st=setTimeout(()=>{settled=true;st=0;tlm()},500)}else{settled=false;clearTimeout(st);st=0}
+  gs.classList.toggle('sink',want);gs.classList.toggle('fl',settled&&want);
+  flats.forEach((fl,j)=>{const o=j===k;fl.classList.toggle('on',o);if(fl.tagName==='VIDEO'){if(o&&fl.paused)fl.play().catch(()=>{});else if(!o&&!fl.paused)fl.pause()}})}
+function tl(){if(MQ.matches)return tlm();const h=innerHeight,sy=scrollY,tops=stSecs.map(s=>s.offsetTop),n=stSecs.length-1;
   let i=0;for(let k=0;k<=n;k++)if(tops[k]<=sy+2)i=k;
   const t=i<n?cl((sy-tops[i])/(tops[i+1]-tops[i])):0,e=ease(t),A=snapRect(i),B=snapRect(Math.min(n,i+1));
   const x=lerp(A.x,B.x,e),y=lerp(A.y,B.y,e),w=lerp(A.w,B.w,e),ht=lerp(A.h,B.h,e);
@@ -51,7 +66,7 @@ function tl(){const h=innerHeight,sy=scrollY,tops=stSecs.map(s=>s.offsetTop),n=s
   if(want){if(!settled&&!st)st=setTimeout(()=>{settled=true;st=0;tl()},900)}else{settled=false;clearTimeout(st);st=0}
   gs.classList.toggle('sink',want);gs.classList.toggle('fl',settled&&want);flats.forEach((fl,k)=>{const o=k===cl(idx-1,0,scs.length-1);fl.classList.toggle('on',o);if(fl.tagName==='VIDEO'){if(o&&fl.paused)fl.play().catch(()=>{});else if(!o&&!fl.paused)fl.pause()}})}
 addEventListener('pointermove',e=>{mx=e.clientX/innerWidth-.5;my=e.clientY/innerHeight-.5;tl()});
-addEventListener('scroll',tl,{passive:true});addEventListener('resize',tl);
+let _tr=0;const _tf=()=>{_tr=0;tl()};addEventListener('scroll',()=>{if(!_tr)_tr=requestAnimationFrame(_tf)},{passive:true});addEventListener('resize',tl);
 tl();
 /* 首屏元素依次落下 */
 scs[0].classList.remove('on');setTimeout(()=>scs[cur].classList.add('on'),250);

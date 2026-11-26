@@ -275,3 +275,32 @@ background:linear-gradient(var(--k),var(--k)) 0 0/16px 1px,linear-gradient(var(-
 @keyframes hsz{0%,12%{transform:scale(1) translate(0,0)}55%,100%{transform:scale(1.18) translate(clamp(-7.6%,calc(50% - var(--fx)),7.6%),clamp(-7.6%,calc(50% - var(--fy)),7.6%))}}
 
 .hs figure.on .vp img{animation:none!important}
+/* 移动端:宽屏画廊上图下文,按钮和进度条不溢出 */
+@media(max-width:860px),(max-height:639px){
+.feat.wide{padding-inline:18px}
+.feat.wide .hs{grid-template-columns:minmax(0,1fr);gap:20px;width:100%}
+.feat.wide .hs-track{order:-1;margin:0;padding:0;gap:14px}
+.feat.wide .hs-cap{min-height:0}
+.hs-bars{margin-right:auto;flex:1;gap:6px}.hs-bars i{width:auto;flex:1;max-width:44px}
+.hs-side .hs-nav{justify-content:space-between}
+}
+nav .btn,nav a{white-space:nowrap}
+/* 手机:3D 舞台也显示,占位恢复,静态备用图隐藏 */
+@media(max-width:860px){
+#world{display:block}.stage3d{display:block;width:min(100%,520px);margin:10px auto 0}
+.feat:not(.wide) .slot{display:block;width:100%}
+.mob,.mi{display:none!important}
+.feat:not(.wide){gap:22px}
+}
+@media(max-width:860px){section>*{opacity:clamp(0,calc(var(--p)*2),1);transform:translateY(calc((1 - var(--p))*50px)) scale(calc(.92 + .08*var(--p)))}
+section>.slot,section>.stage3d{opacity:1!important;transform:none!important}}
+@media(max-width:860px){.hero{padding-top:170px}}
+@media(max-width:860px){.stage3d{margin-top:110px;margin-bottom:40px}}
+@media(max-width:860px){html{scroll-snap-type:y proximity}section,footer{scroll-snap-align:start}.feat:not(.wide){min-height:100svh;align-content:center}}
+/* 手机性能:去掉大范围阴影、扫描光带、光斑,滚动更跟手 */
+@media(max-width:860px){
+.flatimg,.l3,.l3.bs,.gs.sink .sc3.on .l3.bs{box-shadow:0 0 0 1px rgba(167,139,250,.22)!important}
+.gs::after,.gs::before,#spot{display:none!important}
+}
+/* 手机吸附:强制整屏停靠,避免停在两屏之间时舞台图和文字错位 */
+@media(max-width:860px){html{scroll-snap-type:y mandatory}.feat:not(.wide),.hero{scroll-snap-stop:always}}
