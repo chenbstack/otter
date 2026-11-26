@@ -280,8 +280,7 @@ impl Home {
     /// 每次渲染前调用:收后台读到的文件位置和内容
     pub(crate) fn comp_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.create_sync(window, cx);
-        self.dbi_sync(window, cx);
-        self.wbi_sync(window, cx);
+        self.api_sync(window, cx);
         let Some(stack) = self.dock.comp.open.clone() else { return };
         self.env_sync(window, cx);
         if self.demo || !matches!(self.dock.comp.phase, Phase::Loading) {
@@ -571,12 +570,12 @@ impl Home {
 }
 
 /// 表单里「标签 + 一个框」的一列;`w` 为空时占满剩余宽度
-pub(super) fn field_col(label: &'static str, w: Option<f32>, inner: AnyElement, mono: bool, dim: bool) -> Div {
+pub(super) fn field_col(label: impl Into<SharedString>, w: Option<f32>, inner: AnyElement, mono: bool, dim: bool) -> Div {
     field_col_with(label, w, inner, mono, dim, None)
 }
 
 /// 同 `field_col`,框内右侧可以再放一个后缀(单位、小按钮等),不占框外的宽度
-pub(super) fn field_col_with(label: &'static str, w: Option<f32>, inner: AnyElement, mono: bool, dim: bool, suffix: Option<AnyElement>) -> Div {
+pub(super) fn field_col_with(label: impl Into<SharedString>, w: Option<f32>, inner: AnyElement, mono: bool, dim: bool, suffix: Option<AnyElement>) -> Div {
     div()
         .flex_shrink_0()
         .when(w.is_none(), |d| d.flex_1().min_w_0())
@@ -584,7 +583,7 @@ pub(super) fn field_col_with(label: &'static str, w: Option<f32>, inner: AnyElem
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(label))
+        .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(label.into()))
         .child(
             div()
                 .h(px(34.0))

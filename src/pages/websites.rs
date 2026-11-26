@@ -863,8 +863,8 @@ impl Home {
                 self.web_mut().s_adv = true;
             }
             "install" => {
-                if !self.dock.wbi.is_open() {
-                    self.wbi_open(window, cx);
+                if !self.dock.api.is_open() {
+                    self.api_open("openresty", window, cx);
                 }
             }
             "issue" if self.web_ui().dlg.is_none() => self.web_open_issue(window, cx),
@@ -1068,7 +1068,7 @@ impl Home {
             e = e.action(
                 button("web-install", IconName::Plus, "安装 OpenResty").when(busy, |d| d.opacity(0.5)).on_click(cx.listener(move |this, _, window, cx| {
                     if !busy {
-                        this.wbi_open(window, cx);
+                        this.api_open("openresty", window, cx);
                     }
                 })),
             );

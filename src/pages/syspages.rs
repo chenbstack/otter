@@ -99,7 +99,7 @@ fn spec(p: Page) -> Option<(Kind, &'static str)> {
     }
 }
 
-pub(super) fn chip(id: (&'static str, usize), label: &'static str, active: bool) -> Stateful<Div> {
+pub(super) fn chip(id: (&'static str, usize), label: impl Into<SharedString>, active: bool) -> Stateful<Div> {
     div()
         .id(id)
         .h(px(30.0))
@@ -110,7 +110,7 @@ pub(super) fn chip(id: (&'static str, usize), label: &'static str, active: bool)
         .text_size(px(t::TYPE_CONTROL))
         .when(active, |d| d.glass(t::RADIUS_MD, GlassStyle::CONTROL).text_color(c::text()).font_weight(FontWeight::SEMIBOLD))
         .when(!active, |d| d.rounded(px(t::RADIUS_MD)).border_1().border_color(gpui_kit::transparent_black()).text_color(c::muted()).hover(|s| s.bg(c::field_hover()).text_color(c::secondary())))
-        .child(label)
+        .child(label.into())
 }
 
 pub(super) fn tip(b: Stateful<Div>, text: &'static str) -> Stateful<Div> {
@@ -187,7 +187,7 @@ impl Home {
     pub(crate) fn sys_due(&self) -> bool {
         // 刚过了 1 秒的「结束」:重绘一次,把按钮换成强制结束
         let force_now = self.page == Page::Processes && self.dock.sys.killed.values().any(|t| t.elapsed() >= FORCE_AFTER && t.elapsed() < FORCE_AFTER + Duration::from_millis(900));
-        force_now || self.web_due() || (self.page == Page::Processes && !self.demo && !self.dock.sys.inflight.contains(&Kind::Procs) && self.dock.sys.asked.get(&Kind::Procs).is_some_and(|t| t.elapsed() >= proc_every()))
+        force_now || self.web_due() || self.api_due() || (self.page == Page::Processes && !self.demo && !self.dock.sys.inflight.contains(&Kind::Procs) && self.dock.sys.asked.get(&Kind::Procs).is_some_and(|t| t.elapsed() >= proc_every()))
     }
 
     /// 记下刚发出的结束操作(`dock_act` 调用)

@@ -22,6 +22,8 @@ mod srvdata;
 mod web;
 mod dbinst;
 mod dbinstall;
+#[allow(dead_code)]
+mod appstore;
 mod json_hl;
 mod group_form;
 mod import;
@@ -74,10 +76,11 @@ enum Page {
     Storage,
     Cron,
     Websites,
+    Store,
 }
 
 impl Page {
-    const ALL: [Page; 13] = [
+    const ALL: [Page; 14] = [
         Page::Overview,
         Page::Containers,
         Page::Database,
@@ -91,6 +94,7 @@ impl Page {
         Page::Storage,
         Page::Cron,
         Page::Websites,
+        Page::Store,
     ];
     /// 容器相关的页(侧栏的「容器」项下面用页签切换)
     fn is_docker(self) -> bool {
@@ -98,7 +102,7 @@ impl Page {
     }
     /// 整页(页头 + 内容)一起滚动的列表页;配置页有定高的编辑器、堆栈页是虚拟列表,不在其中
     fn scrolls_whole(self) -> bool {
-        matches!(self, Page::Containers | Page::Images | Page::Volumes | Page::Registry | Page::Database | Page::Processes | Page::Services | Page::Storage | Page::Cron | Page::Websites)
+        matches!(self, Page::Containers | Page::Images | Page::Volumes | Page::Registry | Page::Database | Page::Processes | Page::Services | Page::Storage | Page::Cron | Page::Websites | Page::Store)
     }
     /// 服务器运维页:读 SSH 命令的输出,不依赖 Docker
     fn is_sys(self) -> bool {
@@ -119,6 +123,7 @@ impl Page {
             Page::Storage => "存储",
             Page::Cron => "计划任务",
             Page::Websites => "网站",
+            Page::Store => "应用商店",
         }
     }
     fn icon(self) -> IconName {
@@ -136,6 +141,7 @@ impl Page {
             Page::Storage => IconName::HardDrive,
             Page::Cron => IconName::CalendarClock,
             Page::Websites => IconName::Globe,
+            Page::Store => IconName::Store,
         }
     }
 }

@@ -73,7 +73,7 @@ impl Home {
         if list.is_empty() {
             return div().flex_1().flex().flex_col().child(empty(IconName::Database, "没有这类数据库")
                     .desc("这台服务器上没有运行这类数据库容器")
-                    .action(button("db-install", IconName::Plus, "安装数据库").on_click(cx.listener(|this, _, window, cx| this.dbi_open(window, cx))))).into_any_element();
+                    .action(button("db-install", IconName::Plus, "安装数据库").on_click(cx.listener(|this, _, window, cx| { let id = match this.db_tab { 1 => "mysql", 2 => "redis", _ => "postgres" }; this.api_open(id, window, cx) })))).into_any_element();
         }
         self.dbm_page(list, cx)
     }

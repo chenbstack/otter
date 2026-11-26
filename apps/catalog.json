@@ -1,0 +1,486 @@
+{
+  "schema": 1,
+  "updated": "2026-11-25",
+  "categories": [
+    {
+      "id": "database",
+      "name": "数据库"
+    },
+    {
+      "id": "web",
+      "name": "网站"
+    },
+    {
+      "id": "tool",
+      "name": "工具"
+    }
+  ],
+  "apps": [
+    {
+      "id": "postgres",
+      "name": "PostgreSQL",
+      "category": "database",
+      "icon": "database",
+      "summary": "关系型数据库",
+      "kind": "database",
+      "versions": {
+        "source": "dockerhub",
+        "repo": "library/postgres",
+        "match": "^\\d+(\\.\\d+){0,2}$",
+        "default": "latest"
+      },
+      "limits": true,
+      "params": [
+        {
+          "id": "port",
+          "label": "宿主机端口",
+          "type": "port",
+          "default": 5432,
+          "min": 1024,
+          "autoFree": true
+        },
+        {
+          "id": "password",
+          "label": "管理员密码",
+          "type": "password",
+          "generate": true,
+          "secret": true,
+          "env": "DB_PASSWORD",
+          "showOnce": true
+        },
+        {
+          "id": "public",
+          "label": "对外开放端口",
+          "type": "bool",
+          "default": false,
+          "warn": "数据库暴露在公网上有被扫描、爆破的风险,请确认防火墙和密码强度"
+        }
+      ],
+      "derive": [
+        {
+          "id": "bind",
+          "from": "public",
+          "map": {
+            "true": "",
+            "false": "127.0.0.1:"
+          }
+        },
+        {
+          "id": "data_dir",
+          "from": "version",
+          "rules": [
+            {
+              "major_gte": 18,
+              "value": "/var/lib/postgresql"
+            }
+          ],
+          "default": "/var/lib/postgresql/data"
+        }
+      ],
+      "compose": "services:\n  db:\n    image: postgres:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:5432\"\n    volumes:\n      - ${container}-data:${data_dir}\n    environment:\n      POSTGRES_PASSWORD: ${env.password}\n    labels:\n      otter.managed: db\n      otter.app: postgres\nvolumes:\n  ${container}-data:\n",
+      "post": {
+        "notes": "管理员密码只显示这一次,Otter 不保存",
+        "show": [
+          "password"
+        ]
+      }
+    },
+    {
+      "id": "mysql",
+      "name": "MySQL",
+      "category": "database",
+      "icon": "database",
+      "summary": "关系型数据库(默认 8.4 长期支持版)",
+      "kind": "database",
+      "versions": {
+        "source": "dockerhub",
+        "repo": "library/mysql",
+        "match": "^\\d+(\\.\\d+){0,2}$",
+        "default": "pin:8.4"
+      },
+      "limits": true,
+      "params": [
+        {
+          "id": "port",
+          "label": "宿主机端口",
+          "type": "port",
+          "default": 3306,
+          "min": 1024,
+          "autoFree": true
+        },
+        {
+          "id": "password",
+          "label": "管理员密码",
+          "type": "password",
+          "generate": true,
+          "secret": true,
+          "env": "DB_PASSWORD",
+          "showOnce": true
+        },
+        {
+          "id": "public",
+          "label": "对外开放端口",
+          "type": "bool",
+          "default": false,
+          "warn": "数据库暴露在公网上有被扫描、爆破的风险,请确认防火墙和密码强度"
+        }
+      ],
+      "derive": [
+        {
+          "id": "bind",
+          "from": "public",
+          "map": {
+            "true": "",
+            "false": "127.0.0.1:"
+          }
+        },
+        {
+          "id": "data_dir",
+          "from": "version",
+          "rules": [],
+          "default": "/var/lib/mysql"
+        }
+      ],
+      "compose": "services:\n  db:\n    image: mysql:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:3306\"\n    volumes:\n      - ${container}-data:${data_dir}\n    environment:\n      MYSQL_ROOT_PASSWORD: ${env.password}\n    labels:\n      otter.managed: db\n      otter.app: mysql\nvolumes:\n  ${container}-data:\n",
+      "post": {
+        "notes": "管理员密码只显示这一次,Otter 不保存",
+        "show": [
+          "password"
+        ]
+      }
+    },
+    {
+      "id": "mariadb",
+      "name": "MariaDB",
+      "category": "database",
+      "icon": "database",
+      "summary": "MySQL 兼容的关系型数据库(默认 11.8 长期支持版)",
+      "kind": "database",
+      "versions": {
+        "source": "dockerhub",
+        "repo": "library/mariadb",
+        "match": "^\\d+(\\.\\d+){0,2}$",
+        "default": "pin:11.8"
+      },
+      "limits": true,
+      "params": [
+        {
+          "id": "port",
+          "label": "宿主机端口",
+          "type": "port",
+          "default": 3306,
+          "min": 1024,
+          "autoFree": true
+        },
+        {
+          "id": "password",
+          "label": "管理员密码",
+          "type": "password",
+          "generate": true,
+          "secret": true,
+          "env": "DB_PASSWORD",
+          "showOnce": true
+        },
+        {
+          "id": "public",
+          "label": "对外开放端口",
+          "type": "bool",
+          "default": false,
+          "warn": "数据库暴露在公网上有被扫描、爆破的风险,请确认防火墙和密码强度"
+        }
+      ],
+      "derive": [
+        {
+          "id": "bind",
+          "from": "public",
+          "map": {
+            "true": "",
+            "false": "127.0.0.1:"
+          }
+        },
+        {
+          "id": "data_dir",
+          "from": "version",
+          "rules": [],
+          "default": "/var/lib/mysql"
+        }
+      ],
+      "compose": "services:\n  db:\n    image: mariadb:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:3306\"\n    volumes:\n      - ${container}-data:${data_dir}\n    environment:\n      MARIADB_ROOT_PASSWORD: ${env.password}\n    labels:\n      otter.managed: db\n      otter.app: mariadb\nvolumes:\n  ${container}-data:\n",
+      "post": {
+        "notes": "管理员密码只显示这一次,Otter 不保存",
+        "show": [
+          "password"
+        ]
+      }
+    },
+    {
+      "id": "redis",
+      "name": "Redis",
+      "category": "database",
+      "icon": "database",
+      "summary": "内存键值数据库",
+      "kind": "database",
+      "versions": {
+        "source": "dockerhub",
+        "repo": "library/redis",
+        "match": "^\\d+(\\.\\d+){0,2}$",
+        "default": "latest"
+      },
+      "limits": true,
+      "params": [
+        {
+          "id": "port",
+          "label": "宿主机端口",
+          "type": "port",
+          "default": 6379,
+          "min": 1024,
+          "autoFree": true
+        },
+        {
+          "id": "password",
+          "label": "管理员密码",
+          "type": "password",
+          "generate": true,
+          "secret": true,
+          "env": "DB_PASSWORD",
+          "showOnce": true
+        },
+        {
+          "id": "public",
+          "label": "对外开放端口",
+          "type": "bool",
+          "default": false,
+          "warn": "数据库暴露在公网上有被扫描、爆破的风险,请确认防火墙和密码强度"
+        }
+      ],
+      "derive": [
+        {
+          "id": "bind",
+          "from": "public",
+          "map": {
+            "true": "",
+            "false": "127.0.0.1:"
+          }
+        },
+        {
+          "id": "data_dir",
+          "from": "version",
+          "rules": [],
+          "default": "/data"
+        }
+      ],
+      "compose": "services:\n  db:\n    image: redis:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:6379\"\n    volumes:\n      - ${container}-data:${data_dir}\n    environment:\n      REDIS_PASSWORD: ${env.password}\n    command: [\"sh\", \"-c\", \"exec redis-server --appendonly yes --requirepass \\\"$$REDIS_PASSWORD\\\"\"]\n    labels:\n      otter.managed: db\n      otter.app: redis\nvolumes:\n  ${container}-data:\n",
+      "post": {
+        "notes": "管理员密码只显示这一次,Otter 不保存",
+        "show": [
+          "password"
+        ]
+      }
+    },
+    {
+      "id": "openresty",
+      "name": "OpenResty",
+      "category": "web",
+      "icon": "globe",
+      "summary": "反向代理、静态站点、HTTPS 证书;装好后在「网站」页管理站点",
+      "kind": "website",
+      "profile": "openresty",
+      "versions": {
+        "source": "dockerhub",
+        "repo": "openresty/openresty",
+        "match": "^\\d+(\\.\\d+){3}-alpine$",
+        "default": "alpine",
+        "extra": [
+          "alpine"
+        ],
+        "pages": 10,
+        "search": "-alpine"
+      },
+      "limits": true,
+      "params": [
+        {
+          "id": "http",
+          "label": "HTTP 端口",
+          "type": "port",
+          "default": 80,
+          "min": 1,
+          "help": "容器用 host 网络,由 OpenResty 直接占用;默认站点监听它,新建站点也以它为默认端口。证书的 HTTP 验证需要公网能访问 80"
+        },
+        {
+          "id": "https",
+          "label": "HTTPS 端口",
+          "type": "port",
+          "default": 443,
+          "min": 1
+        }
+      ],
+      "compose": "# managed by otter (layout 1)\nservices:\n  openresty:\n    image: openresty/openresty:${version}\n    container_name: ${container}\n    network_mode: host\n    restart: unless-stopped\n    ${limits}\n    labels:\n      otter.managed: websites\n      otter.app: openresty\n    volumes:\n      - /opt/otter/websites/conf/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro\n      - /opt/otter/websites/conf/conf.d:/etc/nginx/conf.d:ro\n      - /opt/otter/websites/certs:/etc/otter/certs:ro\n      - /opt/otter/websites/sites:/www/sites:ro\n      - /opt/otter/websites/acme-webroot:/www/acme:ro\n      - /opt/otter/websites/logs:/var/log/nginx\n"
+    },
+    {
+      "id": "uptime-kuma",
+      "name": "Uptime Kuma",
+      "category": "tool",
+      "icon": "activity",
+      "summary": "网站和服务的可用性监控,带告警和状态页",
+      "versions": {
+        "source": "dockerhub",
+        "repo": "louislam/uptime-kuma",
+        "match": "^\\d+\\.\\d+\\.\\d+$",
+        "default": "latest"
+      },
+      "limits": true,
+      "params": [
+        {
+          "id": "port",
+          "label": "宿主机端口",
+          "type": "port",
+          "default": 3001,
+          "min": 1024,
+          "autoFree": true
+        },
+        {
+          "id": "public",
+          "label": "对外开放端口",
+          "type": "bool",
+          "default": true,
+          "help": "关闭则只绑定 127.0.0.1,配合网站页的反向代理使用"
+        }
+      ],
+      "derive": [
+        {
+          "id": "bind",
+          "from": "public",
+          "map": {
+            "true": "",
+            "false": "127.0.0.1:"
+          }
+        }
+      ],
+      "compose": "services:\n  app:\n    image: louislam/uptime-kuma:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:3001\"\n    volumes:\n      - ${container}-data:/app/data\n    labels:\n      otter.managed: app\n      otter.app: uptime-kuma\nvolumes:\n  ${container}-data:\n",
+      "post": {
+        "notes": "第一次打开页面时创建管理员账号",
+        "url": "http://<服务器>:${port}"
+      }
+    },
+    {
+      "id": "memos",
+      "name": "Memos",
+      "category": "tool",
+      "icon": "notebook-pen",
+      "summary": "轻量的自托管笔记和想法记录",
+      "versions": {
+        "source": "dockerhub",
+        "repo": "neosmemo/memos",
+        "match": "^\\d+\\.\\d+\\.\\d+$",
+        "default": "latest"
+      },
+      "limits": true,
+      "params": [
+        {
+          "id": "port",
+          "label": "宿主机端口",
+          "type": "port",
+          "default": 5230,
+          "min": 1024,
+          "autoFree": true
+        },
+        {
+          "id": "public",
+          "label": "对外开放端口",
+          "type": "bool",
+          "default": true,
+          "help": "关闭则只绑定 127.0.0.1,配合网站页的反向代理使用"
+        }
+      ],
+      "derive": [
+        {
+          "id": "bind",
+          "from": "public",
+          "map": {
+            "true": "",
+            "false": "127.0.0.1:"
+          }
+        }
+      ],
+      "compose": "services:\n  app:\n    image: neosmemo/memos:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    ports:\n      - \"${bind}${port}:5230\"\n    volumes:\n      - ${container}-data:/var/opt/memos\n    labels:\n      otter.managed: app\n      otter.app: memos\nvolumes:\n  ${container}-data:\n",
+      "post": {
+        "notes": "第一次打开页面时注册的账号就是管理员",
+        "url": "http://<服务器>:${port}"
+      }
+    },
+    {
+      "id": "minio",
+      "name": "MinIO",
+      "category": "tool",
+      "icon": "hard-drive",
+      "summary": "兼容 S3 的对象存储(API 9000,控制台 9001)",
+      "versions": {
+        "source": "dockerhub",
+        "repo": "minio/minio",
+        "match": "^RELEASE\\.\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}Z$",
+        "default": "latest"
+      },
+      "limits": true,
+      "params": [
+        {
+          "id": "api_port",
+          "label": "API 端口",
+          "type": "port",
+          "default": 9000,
+          "min": 1024,
+          "autoFree": true
+        },
+        {
+          "id": "console_port",
+          "label": "控制台端口",
+          "type": "port",
+          "default": 9001,
+          "min": 1024,
+          "autoFree": true
+        },
+        {
+          "id": "user",
+          "label": "管理员账号",
+          "type": "text",
+          "default": "admin",
+          "required": true,
+          "pattern": "^[A-Za-z0-9_-]{3,32}$"
+        },
+        {
+          "id": "password",
+          "label": "管理员密码",
+          "type": "password",
+          "generate": true,
+          "secret": true,
+          "env": "MINIO_PASSWORD",
+          "showOnce": true
+        },
+        {
+          "id": "public",
+          "label": "对外开放端口",
+          "type": "bool",
+          "default": false,
+          "warn": "对象存储暴露在公网上有被扫描、爆破的风险,请确认防火墙和密码强度"
+        }
+      ],
+      "derive": [
+        {
+          "id": "bind",
+          "from": "public",
+          "map": {
+            "true": "",
+            "false": "127.0.0.1:"
+          }
+        }
+      ],
+      "compose": "services:\n  app:\n    image: minio/minio:${version}\n    container_name: ${container}\n    restart: unless-stopped\n    ${limits}\n    command: [\"server\", \"/data\", \"--console-address\", \":9001\"]\n    ports:\n      - \"${bind}${api_port}:9000\"\n      - \"${bind}${console_port}:9001\"\n    volumes:\n      - ${container}-data:/data\n    environment:\n      MINIO_ROOT_USER: \"${user}\"\n      MINIO_ROOT_PASSWORD: ${env.password}\n    labels:\n      otter.managed: app\n      otter.app: minio\nvolumes:\n  ${container}-data:\n",
+      "post": {
+        "notes": "控制台用上面的账号密码登录;密码只显示这一次",
+        "url": "http://<服务器>:${console_port}",
+        "show": [
+          "password"
+        ]
+      }
+    }
+  ]
+}

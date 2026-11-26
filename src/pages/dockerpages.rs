@@ -62,8 +62,7 @@ pub(crate) struct DockUi {
     sort: (SortKey, bool),
     confirm: Option<DockAsk>,
     pub(super) comp: super::composeedit::CompUi,
-    pub(super) dbi: super::dbinstallui::DbInstallUi,
-    pub(super) wbi: super::webinstallui::WebInstallUi,
+    pub(super) api: super::installui::AppUi,
     pub(super) dbm: super::dbmanage::DbMgr,
     pub(super) notice: Option<(SharedString, Instant)>,
     /// 刚点下的容器操作(容器名 → 动词, 点击时刻):后台标记「进行中」前先让按钮转起来
@@ -86,7 +85,7 @@ const PENDING_MAX_SECS: u64 = 60;
 
 impl DockUi {
     pub fn new() -> Self {
-        Self { snap: Arc::new(Snapshot::default()), dbm_dbg: None, search: None, pull: None, pull_open: false, pull_reg: None, pull_reg_open: false, inst_src: None, inst_src_open: false, inst_accel: false, inst_log_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), comp: Default::default(), dbi: Default::default(), wbi: Default::default(), dbm: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, pending: Vec::new(), polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
+        Self { snap: Arc::new(Snapshot::default()), dbm_dbg: None, search: None, pull: None, pull_open: false, pull_reg: None, pull_reg_open: false, inst_src: None, inst_src_open: false, inst_accel: false, inst_log_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), comp: Default::default(), api: Default::default(), dbm: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, pending: Vec::new(), polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
     }
 }
 
@@ -243,7 +242,6 @@ impl Home {
         self.dock.seen = ver;
         if let Some(n) = notice {
             self.comp_applied(&n, cx);
-            self.dbi_applied(&n, cx);
             self.dock.notice = Some((n.into(), Instant::now()));
         }
         if let Some(s) = snap {
@@ -717,6 +715,9 @@ impl Home {
             if this.page == Page::Database {
                 this.dbm_invalidate();
             }
+            if this.page == Page::Store {
+                this.store_refresh(cx);
+            }
             this.dock_refresh(cx)
         })).into_any_element());
         v
@@ -728,6 +729,7 @@ impl Home {
             Page::Overview => format!("{n} 的系统资源"),
             Page::Containers => format!("{n} 上的全部容器"),
             Page::Database => format!("{n} 上的数据库容器"),
+            Page::Store => "一键安装常用应用;列表来自 GitHub 上的应用目录".to_string(),
             Page::Stacks => format!("{n} 上的 Compose 项目"),
             Page::Images => format!("{n} 上的本地镜像"),
             Page::Volumes => format!("{n} 上的存储卷"),
@@ -742,6 +744,7 @@ impl Home {
             Page::Overview => self.overview_page(cx),
             Page::Containers => self.containers_page(cx),
             Page::Database => self.database_page(cx),
+            Page::Store => self.store_page(cx),
             Page::Images => self.images_page(cx),
             Page::Volumes => self.volumes_page(cx),
             Page::Registry => self.registry_page(cx),
@@ -769,8 +772,7 @@ impl Home {
         if let Some(m) = self.create_drawer(window, cx) {
             v.push(m.into_any_element());
         }
-        v.extend(self.dbi_overlays(window, cx));
-        v.extend(self.wbi_overlays(window, cx));
+        v.extend(self.api_overlays(window, cx));
         if let Some(m) = self.comp_dialog(window, cx) {
             v.push(m.into_any_element());
         }

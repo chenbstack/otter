@@ -40,6 +40,8 @@ pub struct Container {
     pub panel: Option<&'static str>,
     /// 挂载的卷名或路径
     pub mounts: Vec<String>,
+    /// Otter 应用商店装的:标签 `otter.app` 的值(应用 id)
+    pub app: Option<String>,
 }
 
 impl Container {
@@ -125,7 +127,7 @@ impl Snapshot {
 
 // ---- 解析(纯函数) -------------------------------------------------------------
 
-pub const PS_FORMAT: &str = r#"{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}\t{{.Ports}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}\t{{.Label "createdBy"}}\t{{.Mounts}}"#;
+pub const PS_FORMAT: &str = r#"{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}\t{{.Ports}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}\t{{.Label "createdBy"}}\t{{.Mounts}}\t{{.Label "otter.app"}}"#;
 pub const STATS_FORMAT: &str = r"{{.ID}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}";
 pub const IMAGES_FORMAT: &str = r"{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}";
 pub const VOLUMES_FORMAT: &str = r"{{.Name}}\t{{.Driver}}";
@@ -178,6 +180,7 @@ pub fn parse_ps(text: &str) -> Vec<Container> {
                 project,
                 service: opt(get(7)),
                 mounts: get(9).split(',').map(str::trim).filter(|m| !m.is_empty()).map(String::from).collect(),
+                app: opt(get(10)),
             })
         })
         .collect()
@@ -2382,7 +2385,7 @@ pub fn demo_snapshot(stacks: &[Stack]) -> Snapshot {
     let mut snap = Snapshot::default();
     // 调试:OTTER_DBM 截图时补一个 PostgreSQL 容器,数据库页才有实例可看
     if std::env::var_os("OTTER_DBM").is_some() {
-        snap.containers.push(Container { id: "demo-pg".into(), name: "demo-postgres".into(), image: "postgres:16".into(), state: "running".into(), status: "Up 3 days".into(), ports: vec!["127.0.0.1:5432->5432".into()], project: None, service: None, panel: None, mounts: vec![] });
+        snap.containers.push(Container { id: "demo-pg".into(), name: "demo-postgres".into(), image: "postgres:16".into(), state: "running".into(), status: "Up 3 days".into(), ports: vec!["127.0.0.1:5432->5432".into()], project: None, service: None, panel: None, mounts: vec![], app: None });
     }
     for (si, s) in stacks.iter().enumerate() {
         for (i, svc) in s.services.iter().enumerate() {
@@ -2398,6 +2401,7 @@ pub fn demo_snapshot(stacks: &[Stack]) -> Snapshot {
                 service: Some(svc.name.clone()),
                 panel: None,
                 mounts: vec![format!("{}-data", svc.name)],
+                app: None,
             });
             snap.stats.insert(id.clone(), Stats { cpu: svc.cpu_v, mem: (svc.mem_mb * 1e6) as u64, net: 0, disk: 0 });
             let mut se = Series::default();

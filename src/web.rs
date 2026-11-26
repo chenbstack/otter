@@ -475,6 +475,7 @@ pub fn default_conf(http: u16, https: u16) -> String {
 
 /// 安装 OpenResty 的表单(安装抽屉填的东西)
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct InstallSpec {
     /// 镜像 tag,如 `alpine`、`1.27.1.2-alpine`
     pub version: String,
@@ -496,6 +497,7 @@ impl Default for InstallSpec {
 }
 
 /// 默认的堆栈名/容器名:`otter-openresty`;已被占用就在后面加 4 位随机数
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn gen_install_name(taken: &[String]) -> String {
     use rand::RngExt as _;
     if !taken.iter().any(|n| n == CONTAINER) {
@@ -511,6 +513,7 @@ pub fn gen_install_name(taken: &[String]) -> String {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl InstallSpec {
     pub fn image(&self) -> String {
         format!("openresty/openresty:{}", self.version)
@@ -574,13 +577,16 @@ impl InstallSpec {
 }
 
 /// 查 Docker Hub 上 OpenResty 镜像的 tag 的地址(第 `page` 页;镜像有上千个 tag,稳定版本散在前十页里,第 11 页起接口拒绝访问)
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn tags_url(page: u32) -> String {
     format!("https://hub.docker.com/v2/repositories/openresty/openresty/tags?page_size=100&name=-alpine&page={page}")
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 const TAG_PAGES: u32 = 10;
 
 /// 服务器上取 tag 列表的脚本:十页并行请求(curl,没有就 wget),按页序输出一串 JSON
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn tags_script() -> String {
     format!(
         "d=$(mktemp -d); for i in $(seq 1 {TAG_PAGES}); do u='https://hub.docker.com/v2/repositories/openresty/openresty/tags?page_size=100&name=-alpine&page='$i; ( curl -fsSL --max-time 15 \"$u\" || wget -qO- -T 15 \"$u\" ) > $d/$i.json 2>/dev/null & done; wait; for i in $(seq 1 {TAG_PAGES}); do cat $d/$i.json 2>/dev/null; echo; done; rm -rf $d"
@@ -588,6 +594,7 @@ pub fn tags_script() -> String {
 }
 
 /// 从 tags 接口响应(一页,或多页 JSON 连在一起)里挑出可选版本:`alpine`(跟随最新)排第一,其后是 `1.27.1.2-alpine` 这样的固定版本,新的在前;带构建序号的(`1.27.1.2-3-alpine`)和 `-fat` 之类的变体不要
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_tags(json: &str) -> Option<Vec<String>> {
     let mut fixed: Vec<(Vec<u32>, String)> = Vec::new();
     for v in serde_json::Deserializer::from_str(json).into_iter::<Value>().map_while(Result::ok) {
@@ -611,6 +618,7 @@ pub fn parse_tags(json: &str) -> Option<Vec<String>> {
 }
 
 /// 本机直接请求 Docker Hub(阻塞,放后台线程调用;十页并行)
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn fetch_tags_local() -> Result<Vec<String>, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(15))).user_agent("otter").build().into();
     let pages: Vec<Result<String, String>> = std::thread::scope(|sc| {
@@ -1710,6 +1718,7 @@ pub fn renew_now_script() -> String {
 // ---------------------------------------------------------------- 安装 OpenResty、容器控制
 
 /// 安装 OpenResty 的长任务脚本(经 `job_start_script` 脱离运行)
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn install_job_script(spec: &InstallSpec) -> String {
     let mut limits = String::new();
     if !spec.cpus.is_empty() {

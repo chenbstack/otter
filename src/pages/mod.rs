@@ -3,8 +3,8 @@
 pub mod dockerpages;
 pub mod dbpages;
 pub mod dbbackup;
-pub mod dbinstallui;
-pub mod webinstallui;
+pub mod installui;
+pub mod storepage;
 pub mod dbmanage;
 pub mod stacks;
 pub mod monitorpage;

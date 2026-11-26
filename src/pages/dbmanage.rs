@@ -280,9 +280,9 @@ impl Home {
     }
 
     pub(crate) fn dbm_page(&mut self, list: Vec<DbInstance>, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(n) = self.dock.dbi.jump.clone() {
+        if let Some(n) = self.dock.api.jump.clone() {
             if list.iter().any(|d| d.container.name == n) {
-                self.dock.dbi.jump = None;
+                self.dock.api.jump = None;
                 self.dock.dbm.reset(&n);
             }
         }

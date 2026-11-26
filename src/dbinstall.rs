@@ -6,6 +6,7 @@
 use crate::dbinst::DbKind;
 use rand::RngExt as _;
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub const KINDS: [DbKind; 4] = [DbKind::Postgres, DbKind::Mysql, DbKind::Mariadb, DbKind::Redis];
 
 /// 自定义版本号:镜像 tag 的合法写法
@@ -14,6 +15,7 @@ pub fn valid_tag(s: &str) -> bool {
     cs.next().is_some_and(|c| c.is_ascii_alphanumeric()) && s.len() <= 128 && cs.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn image(kind: DbKind, version: &str) -> String {
     let name = match kind {
         DbKind::Postgres => "postgres",
@@ -24,6 +26,7 @@ fn image(kind: DbKind, version: &str) -> String {
     format!("{name}:{version}")
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn data_dir(kind: DbKind, version: &str) -> &'static str {
     match kind {
         // PostgreSQL 18 起镜像把数据放在 /var/lib/postgresql 下的版本子目录,挂载点也跟着变
@@ -34,6 +37,7 @@ fn data_dir(kind: DbKind, version: &str) -> &'static str {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn password_env(kind: DbKind) -> &'static str {
     match kind {
         DbKind::Postgres => "POSTGRES_PASSWORD",
@@ -92,6 +96,7 @@ pub fn valid_password(s: &str) -> Result<(), String> {
 }
 
 /// 自动生成的名字:默认 `otter-postgres`;已被堆栈名或容器名占用就在后面加 4 位随机数,如 `otter-postgres-a3f9`
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn gen_name(kind: DbKind, taken: &[String]) -> String {
     let base = format!("otter-{}", image(kind, "").trim_end_matches(':'));
     if !taken.contains(&base) {
@@ -107,6 +112,7 @@ pub fn gen_name(kind: DbKind, taken: &[String]) -> String {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct Spec<'a> {
     pub kind: DbKind,
     pub version: &'a str,
@@ -123,6 +129,7 @@ pub struct Spec<'a> {
     pub memory: &'a str,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl Spec<'_> {
     /// 检查表单;`taken_names` 是已有的堆栈名和容器名,`used_ports` 是服务器上已被占用的宿主机端口
     pub fn validate(&self, taken_names: &[String], used_ports: &[u16]) -> Result<(), String> {
@@ -189,23 +196,27 @@ impl Spec<'_> {
 }
 
 /// 查 Docker Hub 上官方镜像的 tag 的地址
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn tags_url(kind: DbKind) -> String {
     format!("https://hub.docker.com/v2/repositories/library/{}/tags?page_size=100&ordering=last_updated", image(kind, "").trim_end_matches(':'))
 }
 
 /// 服务器上取 tag 列表的脚本:curl,没有就 wget;输出 JSON
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn tags_script(kind: DbKind) -> String {
     let u = tags_url(kind);
     format!("(curl -fsSL --max-time 12 '{u}' || wget -qO- -T 12 '{u}') 2>&1")
 }
 
 /// 版本号 `17.5`/`8.4.5` → 可排序的数字元组;不是纯数字版本返回 None
+#[cfg_attr(not(test), allow(dead_code))]
 fn ver_key(tag: &str) -> Option<Vec<u32>> {
     let parts: Vec<u32> = tag.split('.').map(|p| p.parse().ok()).collect::<Option<_>>()?;
     (1..=3).contains(&parts.len()).then_some(parts)
 }
 
 /// 从 Docker Hub 的 tags 接口响应里挑出稳定版本号(纯数字,不带 -alpine 等后缀),新的在前,最多 60 个。解析不出来返回 None
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_tags(json: &str) -> Option<Vec<String>> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let mut tags: Vec<(Vec<u32>, String)> = v.get("results")?.as_array()?.iter().filter_map(|r| r.get("name")?.as_str()).filter_map(|n| ver_key(n).map(|k| (k, n.to_string()))).collect();
@@ -216,6 +227,7 @@ pub fn parse_tags(json: &str) -> Option<Vec<String>> {
 }
 
 /// 本机直接请求 Docker Hub(阻塞,放后台线程调用)
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn fetch_tags_local(kind: DbKind) -> Result<Vec<String>, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(12))).user_agent("otter").build().into();
     let mut resp = agent.get(&tags_url(kind)).call().map_err(|e| format!("请求 Docker Hub 失败:{e}"))?;

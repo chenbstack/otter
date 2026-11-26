@@ -4,7 +4,7 @@ use super::super::*;
 
 pub(crate) fn menu_count(node: &Node, snap: &crate::docker::Snapshot, page: Page) -> Option<usize> {
     match page {
-        Page::Overview | Page::Registry | Page::Config | Page::Processes | Page::Services | Page::Storage | Page::Cron | Page::Websites => None,
+        Page::Overview | Page::Registry | Page::Config | Page::Processes | Page::Services | Page::Storage | Page::Cron | Page::Websites | Page::Store => None,
         Page::Containers => Some(snap.containers.len()),
         Page::Database => Some(crate::dbinst::detect(&snap.containers).len()),
         Page::Stacks => Some(node.stacks.len()),
@@ -93,7 +93,7 @@ impl Home {
                     .child("节点详情"),
             );
         // 侧边栏:概览,把容器/堆栈/镜像/存储卷合在一起的「容器」(里面用页签切换),以及服务器的运维页
-        for (i, p) in [Page::Overview, Page::Containers, Page::Database, Page::Processes, Page::Services, Page::Storage, Page::Cron, Page::Websites].into_iter().enumerate() {
+        for (i, p) in [Page::Overview, Page::Containers, Page::Database, Page::Processes, Page::Services, Page::Storage, Page::Cron, Page::Websites, Page::Store].into_iter().enumerate() {
             let active = if p == Page::Containers { self.page.is_docker() } else { self.page == p };
             let count = menu_count(node, &self.dock.snap, p);
             col = col.child(
@@ -281,7 +281,7 @@ impl Home {
 
     /// 页头(图标、标题、副标题)已经滚出去、页签/按钮该吸在顶部了吗。整页滚动的容器、镜像、存储卷、仓库、进程、服务、存储、定时任务页和堆栈页有
     pub(crate) fn dock_stuck(&self) -> bool {
-        if !(self.page.is_docker() || self.page == Page::Database || self.page.is_sys()) || (self.page == Page::Config && !self.conf_scrolls_whole()) {
+        if !(self.page.is_docker() || self.page == Page::Database || self.page == Page::Store || self.page.is_sys()) || (self.page == Page::Config && !self.conf_scrolls_whole()) {
             return false;
         }
         let h = if self.page == Page::Stacks { self.scroll.base_handle() } else { &self.page_scroll };
