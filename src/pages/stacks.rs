@@ -4,7 +4,7 @@ use super::super::*;
 
 pub(crate) fn menu_count(node: &Node, snap: &crate::docker::Snapshot, page: Page) -> Option<usize> {
     match page {
-        Page::Overview | Page::Registry | Page::Config | Page::Processes | Page::Services | Page::Storage | Page::Cron | Page::Websites | Page::Store => None,
+        Page::Overview | Page::Registry | Page::Config | Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites | Page::Store => None,
         Page::Containers => Some(snap.containers.len()),
         Page::Database => Some(crate::dbinst::detect(&snap.containers).len()),
         Page::Stacks => Some(node.stacks.len()),
@@ -93,7 +93,7 @@ impl Home {
                     .child("节点详情"),
             );
         // 侧边栏:概览,把容器/堆栈/镜像/存储卷合在一起的「容器」(里面用页签切换),以及服务器的运维页
-        for (i, p) in [Page::Overview, Page::Containers, Page::Websites, Page::Database, Page::Processes, Page::Services, Page::Storage, Page::Cron, Page::Store].into_iter().enumerate() {
+        for (i, p) in [Page::Overview, Page::Containers, Page::Websites, Page::Database, Page::Processes, Page::Services, Page::Firewall, Page::Storage, Page::Cron, Page::Store].into_iter().enumerate() {
             let active = if p == Page::Containers { self.page.is_docker() } else { self.page == p };
             let count = menu_count(node, &self.dock.snap, p);
             col = col.child(

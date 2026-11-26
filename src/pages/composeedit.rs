@@ -372,7 +372,7 @@ impl Home {
             c.orig = text.clone();
             (c.path.clone(), c.root)
         };
-        let job = Job { label: "保存".into(), target: path.clone(), script: write_script(&path), root, input: Some(text), reload: None };
+        let job = Job { label: "保存".into(), target: path.clone(), script: write_script(&path), root, input: Some(text), reload: None, guard: None };
         self.dock_act(Action::Sys(job), cx);
     }
 

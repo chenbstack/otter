@@ -1182,7 +1182,7 @@ mod tests {
     use super::*;
 
     fn ct(name: &str, image: &str, state: &str) -> Container {
-        Container { id: name.into(), name: name.into(), image: image.into(), state: state.into(), status: String::new(), ports: vec![], project: None, service: None, panel: None, mounts: vec![], app: None }
+        Container { id: name.into(), name: name.into(), image: image.into(), state: state.into(), status: String::new(), ports: vec![], publish: vec![], project: None, service: None, panel: None, mounts: vec![], app: None }
     }
 
     #[test]

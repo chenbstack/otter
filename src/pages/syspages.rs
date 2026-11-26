@@ -48,6 +48,9 @@ pub(crate) struct SysUi {
     services: Option<Result<Vec<Service>, String>>,
     pub(super) storage: Option<Result<Vec<Mount>, String>>,
     pub(super) cron: Option<Result<CronInfo, String>>,
+    /// 防火墙页的状态和新增规则表单
+    pub(super) fw: Option<Result<crate::firewall::FwInfo, String>>,
+    pub(super) fwf: super::firewallpage::FwForm,
     /// 存储页的空间透镜(点开的挂载点和扫描结果)
     pub(super) lens: Option<LensStore>,
     /// 透镜扫描的编号,每次扫描加一
@@ -96,6 +99,7 @@ fn spec(p: Page) -> Option<(Kind, &'static str)> {
         Page::Services => Some((Kind::Services, sysops::SERVICES_SCRIPT)),
         Page::Storage => Some((Kind::Storage, sysops::STORAGE_SCRIPT)),
         Page::Cron => Some((Kind::Cron, sysops::CRON_SCRIPT)),
+        Page::Firewall => Some((Kind::Firewall, crate::firewall::READ_SCRIPT)),
         // 网站页的脚本是动态生成的(见 `sys_sync`)
         Page::Websites => Some((Kind::Web, "")),
         _ => None,
@@ -113,7 +117,7 @@ fn keep_old<T>(slot: &mut Option<Result<T, String>>, new: Result<T, String>) {
 /// 页面停留时自动重读的间隔(进程页另有自己的间隔;网站页见 `web_reload_due`)
 fn reload_every(k: Kind) -> Option<Duration> {
     match k {
-        Kind::Services | Kind::Cron => Some(Duration::from_secs(crate::prefs::page_secs())),
+        Kind::Services | Kind::Cron | Kind::Firewall => Some(Duration::from_secs(crate::prefs::page_secs())),
         Kind::Storage => Some(Duration::from_secs(crate::prefs::page_secs())),
         _ => None,
     }
@@ -145,7 +149,7 @@ fn mono_cell(w: f32, s: impl Into<SharedString>, color: Rgba) -> Div {
     div().w(px(w)).flex_shrink_0().truncate().text_size(px(t::TYPE_CONTROL)).font_family(MONO).text_color(color).child(s.into())
 }
 
-fn message(icon_name: IconName, title: &'static str, detail: String) -> AnyElement {
+pub(super) fn message(icon_name: IconName, title: &'static str, detail: String) -> AnyElement {
     div()
         .flex_1()
         .flex()
@@ -155,12 +159,12 @@ fn message(icon_name: IconName, title: &'static str, detail: String) -> AnyEleme
         .into_any_element()
 }
 
-fn reading(what: &'static str) -> AnyElement {
+pub(super) fn reading(what: &'static str) -> AnyElement {
     crate::ui::loading(format!("正在{what}…")).into_any_element()
 }
 
 fn job(label: &str, target: &str, script: String, reload: (Kind, &str)) -> Job {
-    Job { label: label.into(), target: target.into(), script, root: true, input: None, reload: Some((reload.0, reload.1.to_string(), false)) }
+    Job { label: label.into(), target: target.into(), script, root: true, input: None, reload: Some((reload.0, reload.1.to_string(), false)), guard: None }
 }
 
 fn svc_ask(title: &'static str, body: &'static str, verb: &'static str, cmd: &str, ic: IconName, name: String) -> DockAsk {
@@ -252,6 +256,7 @@ impl Home {
             Kind::Services => keep_old(&mut s.services, res.and_then(|t| sysops::parse_services(&t))),
             Kind::Storage => keep_old(&mut s.storage, res.and_then(|t| sysops::parse_storage(&t))),
             Kind::Cron => keep_old(&mut s.cron, res.map(|t| sysops::parse_cron(&t))),
+            Kind::Firewall => keep_old(&mut s.fw, res.map(|t| crate::firewall::parse(&t))),
             Kind::Web => self.web_loaded(res, cx),
             Kind::WebOp => self.web_op_done(res, cx),
             Kind::WebPoll => self.web_polled(res, cx),
@@ -287,6 +292,12 @@ impl Home {
             self.sys_demo();
             if page == Page::Websites {
                 self.web_demo();
+            }
+            if page == Page::Firewall {
+                self.fw_debug_tab();
+            }
+            if page == Page::Firewall && !self.dock.sys.fwf.open && self.dock.sys.fwf.inputs.is_none() && std::env::var_os("OTTER_FW_FORM").is_some() {
+                self.fw_open(window, cx);
             }
             // 调试:截图时直接打开编辑表单
             if page == Page::Cron && self.dock.sys.cron_form.is_none() && self.dock.sys.cron_inputs.is_none() && std::env::var_os("OTTER_CRON_FORM").is_some() {
@@ -330,7 +341,7 @@ impl Home {
             if kind == Kind::Web {
                 self.sys_ask(kind, &crate::web::state_script(), true);
             } else {
-                self.sys_ask(kind, script, false);
+                self.sys_ask(kind, script, kind == Kind::Firewall);
             }
         }
     }
@@ -345,6 +356,7 @@ impl Home {
         s.services = Some(sysops::parse_services(DEMO_SERVICES));
         s.storage = Some(sysops::parse_storage(DEMO_STORAGE));
         s.cron = Some(Ok(sysops::parse_cron(DEMO_CRON)));
+        s.fw = Some(Ok(crate::firewall::parse(super::firewallpage::demo_fw())));
         if std::env::var_os("OTTER_SYS_TOP").is_some() {
             s.lens = Some(LensStore::mock("/"));
             // 截图用:OTTER_LENS_HOVER=/var/lib  OTTER_LENS_OPEN="/var/lib;/usr"
@@ -403,6 +415,7 @@ impl Home {
                 v.extend(self.dock.sys.search.clone().map(search));
             }
             Page::Websites => v.extend(self.web_header_actions(cx)),
+            Page::Firewall => v.extend(self.fw_header_actions(cx)),
             Page::Cron => {
                 if matches!(self.dock.sys.cron, Some(Ok(_))) {
                     v.push(button("cron-add", IconName::Plus, "新增任务").on_click(cx.listener(|this, _, window, cx| this.cron_open(None, "", "", window, cx))).into_any_element());
@@ -421,6 +434,7 @@ impl Home {
             Page::Storage => Some(format!("{n} 的磁盘和挂载点,点一行看里面最大的目录")),
             Page::Websites => Some(self.web_subtitle()),
             Page::Cron => Some(format!("{n} 上的 crontab 和 systemd 定时器;只能改自己的 crontab")),
+            Page::Firewall => Some(self.fw_subtitle()),
             _ => None,
         }
     }
@@ -431,6 +445,7 @@ impl Home {
             Page::Services => self.services_page(cx),
             Page::Storage => self.storage_page(cx),
             Page::Websites => self.web_page(cx),
+            Page::Firewall => self.firewall_page(cx),
             _ => self.cron_page(cx),
         }
     }
@@ -698,7 +713,7 @@ impl Home {
                             let Some(Ok(info)) = &this.dock.sys.cron else { return };
                             this.dock.sys.cron_row = Some(line);
                             let text = sysops::crontab_replace(&info.user_text, Some(line), None);
-                            let j = Job { label: "删除任务".into(), target: "crontab".into(), script: "crontab -".into(), root: false, input: Some(text), reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)) };
+                            let j = Job { label: "删除任务".into(), target: "crontab".into(), script: "crontab -".into(), root: false, input: Some(text), reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)), guard: None };
                             this.ask(DockAsk { title: "删除计划任务", tile: IconName::CalendarClock, name: cm.chars().take(40).collect(), detail: "我的 crontab", body: "从 crontab 里删除这一行,之后不会再自动执行", label: "删除任务", action: Action::Sys(j), list: Vec::new() }, cx);
                         })));
                     }
@@ -730,7 +745,7 @@ impl Home {
                             Some(_) => return,
                             None => crate::web::cron_remove_script(),
                         };
-                        let j = Job { label: "删除任务".into(), target: "crontab".into(), script: rm, root: true, input: None, reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)) };
+                        let j = Job { label: "删除任务".into(), target: "crontab".into(), script: rm, root: true, input: None, reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)), guard: None };
                         this.ask(DockAsk { title, tile: IconName::CalendarClock, name: name.clone(), detail: "/etc/cron.d", body, label: "删除任务", action: Action::Sys(j), list: Vec::new() }, cx);
                     })));
                 }

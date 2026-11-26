@@ -42,6 +42,7 @@ fn page_code(p: Page) -> &'static str {
         Page::Config => "cf",
         Page::Processes => "pr",
         Page::Services => "sv",
+        Page::Firewall => "fw",
         Page::Storage => "sg",
         Page::Cron => "cr",
         Page::Websites => "ws",
@@ -50,7 +51,7 @@ fn page_code(p: Page) -> &'static str {
 }
 
 fn page_from(c: &str) -> Option<Page> {
-    [Page::Overview, Page::Containers, Page::Database, Page::Stacks, Page::Images, Page::Volumes, Page::Registry, Page::Config, Page::Processes, Page::Services, Page::Storage, Page::Cron, Page::Websites, Page::Store].into_iter().find(|p| page_code(*p) == c)
+    [Page::Overview, Page::Containers, Page::Database, Page::Stacks, Page::Images, Page::Volumes, Page::Registry, Page::Config, Page::Processes, Page::Services, Page::Firewall, Page::Storage, Page::Cron, Page::Websites, Page::Store].into_iter().find(|p| page_code(*p) == c)
 }
 
 impl Home {

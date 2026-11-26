@@ -767,7 +767,7 @@ impl Home {
             Page::Volumes => format!("{n} 上的存储卷"),
             Page::Registry => format!("{n} 上登录的镜像仓库"),
             Page::Config => format!("{n} 上的 Docker 守护进程配置"),
-            Page::Processes | Page::Services | Page::Storage | Page::Cron | Page::Websites => self.sys_subtitle().unwrap_or_default(),
+            Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites => self.sys_subtitle().unwrap_or_default(),
         }
     }
 
@@ -782,7 +782,7 @@ impl Home {
             Page::Registry => self.registry_page(cx),
             Page::Config => self.config_page(cx),
             Page::Stacks => div().into_any_element(),
-            Page::Processes | Page::Services | Page::Storage | Page::Cron | Page::Websites => self.sys_page(cx),
+            Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites => self.sys_page(cx),
         }
     }
 
@@ -791,6 +791,12 @@ impl Home {
         let mut v: Vec<AnyElement> = Vec::new();
         v.extend(self.ct_drawer(window, cx));
         if let Some(m) = self.cron_dialog(cx) {
+            v.push(m.into_any_element());
+        }
+        if let Some(m) = self.fw_dialog(cx) {
+            v.push(m.into_any_element());
+        }
+        if let Some(m) = self.fw_du_dialog(cx) {
             v.push(m.into_any_element());
         }
         if let Some(m) = self.lens_confirm_dialog(cx) {

@@ -22,6 +22,46 @@ use crate::terminal::ssh::{Client, Conn, Io, PendingHost, Step, open_authenticat
 
 // ---- 数据 --------------------------------------------------------------------
 
+/// 一条端口发布:`0.0.0.0:8080->80/tcp`
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Publish {
+    /// 绑定地址:`0.0.0.0`、`::`、`127.0.0.1`…
+    pub ip: String,
+    /// 宿主机端口(可能是 `8000-8010` 这样的一段)
+    pub host: String,
+    pub container: String,
+    pub proto: String,
+}
+
+impl Publish {
+    pub fn wildcard(&self) -> bool {
+        matches!(self.ip.as_str(), "0.0.0.0" | "::" | "")
+    }
+
+    pub fn loopback(&self) -> bool {
+        self.ip.starts_with("127.") || self.ip == "::1"
+    }
+}
+
+/// 解析 `docker ps` 的 Ports 列里发布到宿主机的部分;没写绑定地址的当作 `0.0.0.0`,v4 与 v6 的重复项合并
+pub fn parse_publish(s: &str) -> Vec<Publish> {
+    let mut out: Vec<Publish> = Vec::new();
+    for p in s.split(',').map(str::trim) {
+        let Some((l, r)) = p.split_once("->") else { continue };
+        let (container, proto) = r.split_once('/').unwrap_or((r, "tcp"));
+        let (ip, host) = match l.rsplit_once(':') {
+            Some((ip, h)) => (ip.trim_matches(['[', ']']), h),
+            None => ("0.0.0.0", l),
+        };
+        let ip = if ip == "::" { "0.0.0.0" } else { ip };
+        let item = Publish { ip: ip.to_string(), host: host.to_string(), container: container.to_string(), proto: proto.to_string() };
+        if !out.contains(&item) {
+            out.push(item);
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Container {
     /// 短 ID(12 位),`ps` 和 `stats` 都用它
@@ -33,6 +73,8 @@ pub struct Container {
     /// 原样的 `Up 2 hours` / `Exited (3) 5 minutes ago`
     pub status: String,
     pub ports: Vec<String>,
+    /// 发布到宿主机的端口(带绑定地址),防火墙页的「容器暴露端口」用
+    pub publish: Vec<Publish>,
     /// Compose 项目 / 服务(来自标签)
     pub project: Option<String>,
     pub service: Option<String>,
@@ -178,6 +220,7 @@ pub fn parse_ps(text: &str) -> Vec<Container> {
                 state: f[3].trim().to_lowercase(),
                 status: f[4].trim().to_string(),
                 ports: parse_ports(get(5)),
+                publish: parse_publish(get(5)),
                 panel: panel_of(created_by.as_deref(), project.as_deref()),
                 project,
                 service: opt(get(7)),
@@ -1688,17 +1731,48 @@ async fn sys_job(r: &Runner, sh: &Shared, job: crate::sysops::Job) {
     sh.bump();
     let res = sys_exec(r, &job.script, job.root, job.input.as_deref(), Duration::from_secs(60)).await;
     sh.busy.lock().unwrap().remove(&key);
-    let msg = match res {
-        Ok(o) if o.code == 0 => format!("已{}:{}", job.label, job.target),
-        Ok(o) => format!("{}失败:{}", job.label, last_line(&o)),
-        Err(e) => format!("{}失败:{e}", job.label),
+    let mut msg = match res {
+        Ok(ref o) if o.code == 0 => format!("已{}:{}", job.label, job.target),
+        Ok(ref o) => format!("{}失败:{}", job.label, last_line(o)),
+        Err(ref e) => format!("{}失败:{e}", job.label),
     };
+    if let (Some(g), Ok(o)) = (&job.guard, &res) {
+        if o.code == 0 {
+            msg = guard_check(r, g, msg).await;
+        }
+    }
     logs::push(logs::Level::Info, "服务器", msg.clone());
     *sh.notice.lock().unwrap() = Some(msg);
     sh.bump();
     if let Some((kind, script, root)) = job.reload {
         tokio::time::sleep(Duration::from_millis(500)).await;
         sys_load(r, sh, kind, &script, root).await;
+    }
+}
+
+/// 高风险操作做完后:隔几秒新建一次 TCP 连接,连得上就取消服务器上的定时回滚,一直连不上就让它回滚
+async fn guard_check(r: &Runner, g: &crate::sysops::Guard, done: String) -> String {
+    let addr = format!("{}:{}", g.host, g.port);
+    let deadline = Instant::now() + Duration::from_secs(u64::from(g.secs.saturating_sub(40)));
+    let mut ok = false;
+    loop {
+        let c = tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(&addr)).await;
+        if matches!(c, Ok(Ok(_))) {
+            ok = true;
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    if !ok {
+        logs::push(logs::Level::Warn, "服务器", format!("{addr} 新建连接失败,等待服务器自动回滚"));
+        return format!("{done}。但新连接连不上 {addr},服务器会在 {} 秒内自动回滚防火墙", g.secs);
+    }
+    match sys_exec(r, &g.cancel, true, None, Duration::from_secs(20)).await {
+        Ok(o) if o.code == 0 => format!("{done}(已确认能新建 SSH 连接,自动回滚已取消)"),
+        _ => format!("{done}。能新建连接,但取消自动回滚失败:{} 秒后服务器会关闭防火墙,请重新启用", g.secs),
     }
 }
 
@@ -2413,7 +2487,7 @@ pub fn demo_snapshot(stacks: &[Stack]) -> Snapshot {
     let mut snap = Snapshot::default();
     // 调试:OTTER_DBM 截图时补一个 PostgreSQL 容器,数据库页才有实例可看
     if std::env::var_os("OTTER_DBM").is_some() {
-        snap.containers.push(Container { id: "demo-pg".into(), name: "demo-postgres".into(), image: "postgres:16".into(), state: "running".into(), status: "Up 3 days".into(), ports: vec!["127.0.0.1:5432->5432".into()], project: None, service: None, panel: None, mounts: vec![], app: None });
+        snap.containers.push(Container { id: "demo-pg".into(), name: "demo-postgres".into(), image: "postgres:16".into(), state: "running".into(), status: "Up 3 days".into(), ports: vec!["127.0.0.1:5432->5432".into()], publish: parse_publish("127.0.0.1:5432->5432"), project: None, service: None, panel: None, mounts: vec![], app: None });
     }
     for (si, s) in stacks.iter().enumerate() {
         for (i, svc) in s.services.iter().enumerate() {
@@ -2425,6 +2499,7 @@ pub fn demo_snapshot(stacks: &[Stack]) -> Snapshot {
                 state: if svc.state == Running::Up { "running".into() } else { "exited".into() },
                 status: if svc.state == Running::Up { format!("Up {}", svc.uptime.replace("天", " days").replace("小时", " hours")) } else { "Exited (137) 2 hours ago".into() },
                 ports: svc.ports.clone(),
+                publish: parse_publish(&svc.ports.join(",")),
                 project: Some(s.name.clone()),
                 service: Some(svc.name.clone()),
                 panel: None,

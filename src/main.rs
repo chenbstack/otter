@@ -22,6 +22,7 @@ mod srvdata;
 mod web;
 mod dbinst;
 mod crontasks;
+mod firewall;
 mod dbsecret;
 mod dbinstall;
 mod dbparams;
@@ -78,6 +79,7 @@ enum Page {
     Config,
     Processes,
     Services,
+    Firewall,
     Storage,
     Cron,
     Websites,
@@ -85,7 +87,7 @@ enum Page {
 }
 
 impl Page {
-    const ALL: [Page; 14] = [
+    const ALL: [Page; 15] = [
         Page::Overview,
         Page::Containers,
         Page::Database,
@@ -96,6 +98,7 @@ impl Page {
         Page::Config,
         Page::Processes,
         Page::Services,
+        Page::Firewall,
         Page::Storage,
         Page::Cron,
         Page::Websites,
@@ -107,11 +110,11 @@ impl Page {
     }
     /// 整页(页头 + 内容)一起滚动的列表页;配置页有定高的编辑器、堆栈页是虚拟列表,不在其中
     fn scrolls_whole(self) -> bool {
-        matches!(self, Page::Containers | Page::Images | Page::Volumes | Page::Registry | Page::Database | Page::Processes | Page::Services | Page::Storage | Page::Cron | Page::Websites | Page::Store)
+        matches!(self, Page::Containers | Page::Images | Page::Volumes | Page::Registry | Page::Database | Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites | Page::Store)
     }
     /// 服务器运维页:读 SSH 命令的输出,不依赖 Docker
     fn is_sys(self) -> bool {
-        matches!(self, Page::Processes | Page::Services | Page::Storage | Page::Cron | Page::Websites)
+        matches!(self, Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites)
     }
     fn label(self) -> &'static str {
         match self {
@@ -125,6 +128,7 @@ impl Page {
             Page::Config => "配置",
             Page::Processes => "进程",
             Page::Services => "服务",
+            Page::Firewall => "防火墙",
             Page::Storage => "存储",
             Page::Cron => "计划任务",
             Page::Websites => "网站",
@@ -143,6 +147,7 @@ impl Page {
             Page::Config => IconName::FileCog,
             Page::Processes => IconName::Cpu,
             Page::Services => IconName::Settings2,
+            Page::Firewall => IconName::Shield,
             Page::Storage => IconName::HardDrive,
             Page::Cron => IconName::CalendarClock,
             Page::Websites => IconName::Globe,

@@ -9,6 +9,8 @@ pub enum Kind {
     Services,
     Storage,
     Cron,
+    /// 防火墙页:读取全部状态(root)
+    Firewall,
     /// 空间透镜扫描前的访问检查
     Probe,
     /// 空间透镜里删除一个文件/目录
@@ -25,6 +27,17 @@ pub enum Kind {
     ComposeEnv,
 }
 
+/// 高风险操作(启用防火墙等)的「连不上就回滚」保险:脚本里已经在服务器上排了一个定时回滚,
+/// 操作成功后由本机去连 `host:port`,连得上就执行 `cancel` 取消回滚,连不上就让服务器自己回滚
+#[derive(Clone, Debug, PartialEq)]
+pub struct Guard {
+    pub host: String,
+    pub port: u16,
+    /// 服务器上回滚前等多少秒
+    pub secs: u32,
+    pub cancel: String,
+}
+
 /// 一次要在服务器上执行的操作(结束进程、重启服务、保存 crontab……),完成后可以顺带重读一份数据
 #[derive(Clone, Debug, PartialEq)]
 pub struct Job {
@@ -38,6 +51,8 @@ pub struct Job {
     pub input: Option<String>,
     /// 完成后重读:(种类, 脚本, 是否 root)
     pub reload: Option<(Kind, String, bool)>,
+    /// 高风险操作的自动回滚保险
+    pub guard: Option<Guard>,
 }
 
 pub const PROCS_SCRIPT: &str = "ps -eo pid=,user:20=,pcpu=,pmem=,rss=,etime=,args= --sort=-pcpu 2>&1 | head -400";
