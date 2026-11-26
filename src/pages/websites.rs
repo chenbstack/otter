@@ -1,4 +1,4 @@
-//! 网站页:一键安装 OpenResty、站点(反向代理/静态/跳转)、证书(申请/上传/自签)、自动续期、DNS 账号。
+//! 网站页:安装 OpenResty、站点(反向代理/静态/跳转)、证书(申请/上传/自签)、自动续期、DNS 账号。
 //! 纯逻辑和脚本在 `crate::web`,服务器目录在 `crate::srvdata`,设计见 `docs/modules/websites.md`。
 //! 所有操作以 root 身份在服务器上执行(`Kind::Web*`);界面从不读回 DNS 密钥,只显示「已保存」。
 
@@ -1066,7 +1066,7 @@ impl Home {
         }
         if blocker.is_none() {
             e = e.action(
-                button("web-install", IconName::Rocket, "一键安装 OpenResty").when(busy, |d| d.opacity(0.5)).on_click(cx.listener(move |this, _, window, cx| {
+                button("web-install", IconName::Plus, "安装 OpenResty").when(busy, |d| d.opacity(0.5)).on_click(cx.listener(move |this, _, window, cx| {
                     if !busy {
                         this.wbi_open(window, cx);
                     }
