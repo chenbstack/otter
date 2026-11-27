@@ -176,7 +176,16 @@ fn docker_traffic(vm: &Vm) {
     }
     let got = |_: &str| (curl(&ip, 18080), curl(&ip, 18081), curl(&ip, 18082));
     assert_eq!(got("iptables"), ("000".into(), "200".into(), "000".into()), "iptables 后端:禁止 / 只允许本机 / 只允许别人");
+    // 本机访问不受影响:被禁止的 18080,在服务器上用它自己的 IP 和 127.0.0.1 访问仍然通
+    let local = |what: &str| {
+        for h in [ip.as_str(), "127.0.0.1"] {
+            let c = vm.sh(&format!("curl -s -m 5 -o /dev/null -w '%{{http_code}}' http://{h}:18080/"));
+            assert_eq!(c.trim(), "200", "{what}:本机用 {h} 访问被禁止的端口应该通");
+        }
+    };
+    local("iptables 后端");
     f.exec("后端换 nftables", &du_backend(true, &cur).unwrap());
+    local("nftables 后端");
     assert_eq!(got("nft"), ("000".into(), "200".into(), "000".into()), "nftables 后端");
     f.exec("后端换回 iptables", &du_backend(false, &cur).unwrap());
     for l in f.info().du {
