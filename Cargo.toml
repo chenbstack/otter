@@ -25,6 +25,8 @@ path = "src/bin/bench.rs"
 [features]
 # 安装程序里编入 target/release 下已构建好的 otter-gui.exe / otter.exe(CI 先构建它们,再带此特性构建 otter-setup)
 payload = []
+# OrbStack 虚拟机真机测试(src/orbtest,只在 scripts/orbtest.sh 里带上);不开它,普通 cargo test 连编译都不编译这些用例
+orbtest = []
 
 [dependencies]
 # 上游 0.3.0 的副本,为了给渲染层加关键字高亮钩子,改动见 docs/modules/terminal.md

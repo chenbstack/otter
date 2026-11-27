@@ -23,6 +23,8 @@ mod web;
 mod dbinst;
 mod crontasks;
 mod firewall;
+#[cfg(all(test, feature = "orbtest"))]
+mod orbtest;
 mod dbsecret;
 mod dbinstall;
 mod dbparams;
