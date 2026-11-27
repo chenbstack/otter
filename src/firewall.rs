@@ -1812,11 +1812,45 @@ mod tests {
         assert_eq!(du_preview("tcp", 80, &only, false).len(), 3);
     }
 
+    /// 测试用临时目录:离开作用域(含断言 panic)就删掉,避免在 $TMPDIR 里留下 otter-fwd* 残留
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+            std::fs::remove_dir_all(&dir).ok();
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    /// 跑套用脚本,最多等 20 秒;超时就杀掉脚本再失败,不让它在后台一直空转
+    fn run_apply(sh: &std::path::Path) -> std::process::Output {
+        use std::process::Stdio;
+        let mut child = std::process::Command::new("sh").arg(sh).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let t0 = std::time::Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            if t0.elapsed() > std::time::Duration::from_secs(20) {
+                child.kill().ok();
+                child.wait().ok();
+                panic!("套用脚本 20 秒没跑完,已杀掉: {}", sh.display());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        child.wait_with_output().unwrap()
+    }
+
     /// 用假的 iptables 跑一遍套用脚本:先清掉旧的 Otter 规则,再按 conf 写,允许来源在 DROP 之前
     #[test]
     fn docker_apply_script_with_fake_iptables() {
-        let dir = std::env::temp_dir().join(format!("otter-fwdu-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = Scratch::new("otter-fwdu");
+        let dir = scratch.0.clone();
         let (log, conf) = (dir.join("log"), dir.join("ports.conf"));
         std::fs::write(&conf, "tcp 8080 deny\ntcp 3306 only 1.2.3.4,10.0.0.0/8\nxx 1 deny\n").unwrap();
         let fake = dir.join("iptables");
@@ -1824,7 +1858,7 @@ mod tests {
         std::process::Command::new("chmod").arg("755").arg(&fake).status().unwrap();
         let sh = dir.join("apply.sh");
         std::fs::write(&sh, du_apply_script(conf.to_str().unwrap(), false).replace("PATH=/usr/local/sbin", &format!("PATH={}:/usr/local/sbin", dir.display()))).unwrap();
-        let out = std::process::Command::new("sh").arg(&sh).output().unwrap();
+        let out = run_apply(&sh);
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let log = std::fs::read_to_string(&log).unwrap();
         let lines: Vec<&str> = log.lines().collect();
@@ -1836,7 +1870,6 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("-w -I DOCKER-USER 1") && l.ends_with("-j OTTER-DOCKER")), "{log}");
         assert!(lines.iter().any(|l| l.contains("--ctorigdstport 8080") && l.ends_with("-j DROP")));
         assert!(!log.contains("xx"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// 切到 nftables:带走规则、SSH 端口先放行,回滚里删掉 inet otter 表;目标必须已安装
@@ -1857,8 +1890,8 @@ mod tests {
     /// 容器端口防护选 nftables:套用脚本用 inet otter_docker 表,按 ct original proto-dst 匹配,来源在 drop 之前;切换后端时清另一边
     #[test]
     fn docker_port_nft_backend() {
-        let dir = std::env::temp_dir().join(format!("otter-fwdnft-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = Scratch::new("otter-fwdnft");
+        let dir = scratch.0.clone();
         let (log, conf) = (dir.join("log"), dir.join("ports.conf"));
         std::fs::write(&conf, "tcp 8080 deny\ntcp 3306 only 1.2.3.4,10.0.0.0/8,2001:db8::1\nxx 1 deny\n").unwrap();
         for (name, body) in [("nft", format!("#!/bin/sh\necho \"$@\" >>{0}\ncase \"$1\" in -f) cat >>{0};; esac\nexit 0\n", log.display())), ("iptables", format!("#!/bin/sh\necho \"iptables $@\" >>{0}\ncase \"$*\" in *-S*) echo '-A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9 --ctdir ORIGINAL ! -i docker0 ! -i br-+ -m comment --comment otter:dp -j DROP';; esac\nexit 0\n", log.display()))] {
@@ -1868,7 +1901,7 @@ mod tests {
         }
         let sh = dir.join("apply.sh");
         std::fs::write(&sh, du_apply_script(conf.to_str().unwrap(), true).replace("PATH=/usr/local/sbin", &format!("PATH={}:/usr/local/sbin", dir.display()))).unwrap();
-        let out = std::process::Command::new("sh").arg(&sh).output().unwrap();
+        let out = run_apply(&sh);
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let log = std::fs::read_to_string(&log).unwrap();
         assert!(log.contains("iptables -w -D DOCKER-USER") && log.contains("--ctorigdstport 9 "), "{log}");
@@ -1877,7 +1910,6 @@ mod tests {
         let (r1, r2, dr) = (log.find("proto-dst 3306 iifname != \"docker0\" iifname != \"br-*\" ip saddr 1.2.3.4 return comment \"otter:dp\""), log.find("ip saddr 10.0.0.0/8 return"), log.rfind("proto-dst 3306"));
         assert!(r1.is_some() && r2.is_some() && r1 < r2 && r2 < dr, "{log}");
         assert!(!log.contains("2001:db8") && !log.contains(" xx "), "{log}");
-        std::fs::remove_dir_all(&dir).ok();
         // 解析:live 的 nft 行也算已套用
         let live = "\t\tmeta l4proto tcp ct original proto-dst 8080 iifname != \"docker0\" iifname != \"br-*\" comment \"otter:dp\" drop\n";
         assert!(parse_du("tcp 8080 deny\n", live)[0].live);
@@ -1919,8 +1951,8 @@ mod tests {
     /// 用假的 nft 跑套用脚本:一次 `nft -f -` 删表重建,规则带 iifname,IPv6 来源用 ip6 saddr,坏行被跳过
     #[test]
     fn nft_apply_script_with_fake_nft() {
-        let dir = std::env::temp_dir().join(format!("otter-fwnft-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = Scratch::new("otter-fwnft");
+        let dir = scratch.0.clone();
         let (log, conf) = (dir.join("log"), dir.join("nft.conf"));
         std::fs::write(&conf, "allow tcp 80 -\ndrop tcp 8000:8100 203.0.113.0/24\nreject udp 53 2001:db8::/32\nallow tcp 22 ;rm\nxx tcp 1 -\n").unwrap();
         let fake = dir.join("nft");
@@ -1928,7 +1960,7 @@ mod tests {
         std::process::Command::new("chmod").arg("755").arg(&fake).status().unwrap();
         let sh = dir.join("apply.sh");
         std::fs::write(&sh, nft_apply_script().replace(NFT_CONF, conf.to_str().unwrap()).replace("PATH=/usr/local/sbin", &format!("PATH={}:/usr/local/sbin", dir.display()))).unwrap();
-        let out = std::process::Command::new("sh").arg(&sh).output().unwrap();
+        let out = run_apply(&sh);
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let log = std::fs::read_to_string(&log).unwrap();
         assert!(log.starts_with("-f -\n"), "{log}");
@@ -1938,7 +1970,6 @@ mod tests {
         assert!(log.contains("tcp dport 8000-8100 ip saddr 203.0.113.0/24 drop"), "{log}");
         assert!(log.contains("udp dport 53 ip6 saddr 2001:db8::/32 reject"), "{log}");
         assert!(!log.contains(";rm") && !log.contains("xx"), "{log}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1965,8 +1996,8 @@ mod tests {
     /// 套用脚本先建新链、填规则、换名,每条规则都排除 lo
     #[test]
     fn iptables_apply_with_fake() {
-        let dir = std::env::temp_dir().join(format!("otter-fwipt-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = Scratch::new("otter-fwipt");
+        let dir = scratch.0.clone();
         let (log, conf) = (dir.join("log"), dir.join("c.conf"));
         std::fs::write(&conf, "allow tcp 80 -\ndrop tcp 8000:8100 1.2.3.4\nreject udp 53 -\n").unwrap();
         let fake = dir.join("iptables");
@@ -1974,12 +2005,11 @@ mod tests {
         std::process::Command::new("chmod").arg("755").arg(&fake).status().unwrap();
         let sh = dir.join("a.sh");
         std::fs::write(&sh, ipt_apply_script().replace(IPT_CONF, conf.to_str().unwrap()).replace("PATH=/usr/local/sbin", &format!("PATH={}:/usr/local/sbin", dir.display()))).unwrap();
-        let out = std::process::Command::new("sh").arg(&sh).output().unwrap();
+        let out = run_apply(&sh);
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let log = std::fs::read_to_string(&log).unwrap();
         assert!(log.contains("-w -A OTTER-NEW ! -i lo -p tcp --dport 80 -j ACCEPT"), "{log}");
         assert!(log.contains("--dport 8000:8100 -s 1.2.3.4 -j DROP") && log.contains("-p udp --dport 53 -j REJECT"), "{log}");
         assert!(log.trim_end().ends_with("-w -E OTTER-NEW OTTER-INPUT"), "{log}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

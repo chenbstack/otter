@@ -1,8 +1,6 @@
 //! 概览页:整机资源监控(CPU、内存、磁盘、网络、进程),有 Docker 时再加一块容器。
 //! 数据来自 `crate::monitor`(经 `Docker` 连接采样),界面只读 `MonSnapshot`。
 
-use std::time::Duration;
-
 use super::super::*;
 use crate::monitor::{self, MonSnapshot};
 
@@ -454,7 +452,8 @@ impl Home {
                         .font_family(MONO)
                         .font_weight(FontWeight::BOLD)
                         .text_color(c::online())
-                        .child(div().size(px(6.0)).rounded_full().bg(c::online()).with_animation("live-dot", Animation::new(Duration::from_millis(1400)).repeat().with_easing(ease_in_out), |d, t| d.opacity(0.35 + 0.65 * (1.0 - (2.0 * t - 1.0).abs()))))
+                                                // 不用循环动画:动画会让窗口每帧(60/120Hz)整页重绘,CPU 白白占 20%;改成跟着 2 秒一次的采样明暗交替
+                        .child(div().size(px(6.0)).rounded_full().bg(c::online()).opacity(if (m.now.uptime as u64 / 2) % 2 == 0 { 1.0 } else { 0.35 }))
                         .child("LIVE · 2s"),
                 )
                 .child(div().min_w_0().truncate().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::secondary()).child(who))
