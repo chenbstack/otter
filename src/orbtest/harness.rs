@@ -135,7 +135,12 @@ impl Vm {
         let vm = {
             let mut m = SHARED.get_or_init(Default::default).lock().unwrap();
             // 防火墙用例会改网络规则(开启 ufw 默认拒绝、切换前端、等回滚),会拖累别的用例的网络访问:单独用一台机器
-            let group = if area == "firewall" { "fw" } else { "main" };
+            // 容器用例会 `prune -a`(清掉所有没用的镜像和卷),同样单独一台
+            let group = match area {
+                "firewall" => "fw",
+                "docker" => "dk",
+                _ => "main",
+            };
             m.entry(format!("{}/{group}", d.key)).or_insert_with(|| Arc::new(Vm::acquire(d))).clone()
         };
         let (c, o) = vm.run(reset);

@@ -45,6 +45,7 @@ macro_rules! per_distro {
 mod appstore;
 mod cron;
 mod database;
+mod docker;
 mod firewall;
 mod harness;
 mod provision;

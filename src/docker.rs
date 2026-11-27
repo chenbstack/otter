@@ -540,7 +540,7 @@ pub enum Action {
 }
 
 impl Action {
-    fn args(&self) -> Vec<String> {
+    pub(crate) fn args(&self) -> Vec<String> {
         let v = |a: &[&str], x: &str| a.iter().map(|s| s.to_string()).chain([x.to_string()]).collect();
         match self {
             Action::Start(n) => v(&["start"], n),
@@ -551,7 +551,8 @@ impl Action {
             Action::RemoveImage(n) => v(&["rmi"], n),
             Action::RemoveVolume(n) => v(&["volume", "rm"], n),
             Action::PruneImages => ["image", "prune", "-a", "-f"].iter().map(|s| s.to_string()).collect(),
-            Action::PruneVolumes => ["volume", "prune", "-f"].iter().map(|s| s.to_string()).collect(),
+            // Docker 23+ 的 `volume prune` 默认只清匿名卷;确认框列的是所有没被容器用的卷,所以要带 `-a`
+            Action::PruneVolumes => ["volume", "prune", "-a", "-f"].iter().map(|s| s.to_string()).collect(),
             // 走 `run_daemon`,不经过 docker 命令
             Action::SaveDaemon(_) | Action::SaveRestartDaemon(_) => Vec::new(),
             Action::Logout(h) => v(&["logout"], h),
@@ -2504,7 +2505,11 @@ async fn run_action(r: &Runner, sh: &Shared, a: Action) {
     sh.busy.lock().unwrap().insert(key.clone());
     sh.bump();
     let timeout = if matches!(a, Action::Pull(_) | Action::PruneImages | Action::ComposeDown(_) | Action::ComposeUp { .. } | Action::ComposeCreate { .. }) { Duration::from_secs(600) } else { Duration::from_secs(60) };
-    let res = r.docker(&a.args(), timeout).await;
+    let mut res = r.docker(&a.args(), timeout).await;
+    // Docker 23 以前没有 `-a`(那时 prune 本来就清所有没被用的卷):去掉再来一次
+    if matches!(a, Action::PruneVolumes) && matches!(&res, Ok(o) if o.code != 0 && o.stderr.contains("unknown shorthand flag")) {
+        res = r.docker(&["volume".into(), "prune".into(), "-f".into()], timeout).await;
+    }
     // 先把列表刷新到最新再撤掉"进行中",否则动画结束后要等下一轮轮询才看到变化
     let _ = refresh_ps(r, sh).await;
     sh.busy.lock().unwrap().remove(&key);
