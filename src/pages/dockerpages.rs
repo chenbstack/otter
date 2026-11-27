@@ -796,9 +796,6 @@ impl Home {
         if let Some(m) = self.fw_dialog(cx) {
             v.push(m.into_any_element());
         }
-        if let Some(m) = self.fw_switch_dialog(cx) {
-            v.push(m.into_any_element());
-        }
         if let Some(m) = self.fw_du_dialog(cx) {
             v.push(m.into_any_element());
         }

@@ -1737,7 +1737,7 @@ async fn sys_job(r: &Runner, sh: &Shared, job: crate::sysops::Job) {
     let key = format!("{}:{}", job.label, job.target);
     sh.busy.lock().unwrap().insert(key.clone());
     sh.bump();
-    let secs = if job.script.contains(crate::firewall::SLOW_MARK) { 600 } else { 60 };
+    let secs = 60;
     let track = job.script.contains(crate::firewall::PROGRESS_MARK);
     if track {
         set_progress(sh, Some(format!("正在{}", job.label)));

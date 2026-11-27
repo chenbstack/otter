@@ -26,6 +26,8 @@ esac
 case "$on" in *ufw*|*firewalld*) ;; *)
   echo "@@RAW"; if command -v nft >/dev/null 2>&1; then nft list ruleset 2>&1 | head -n 300; elif command -v iptables >/dev/null 2>&1; then iptables -S 2>&1 | head -n 300; fi;;
 esac
+command -v nft >/dev/null 2>&1 && nft list table inet otter >/dev/null 2>&1 && echo "@@NFTON"
+echo "@@NFT"; cat /opt/otter/firewall/nftables.conf 2>/dev/null
 echo "@@IPT"; cat /opt/otter/firewall/iptables.conf 2>/dev/null
 echo "@@POL $(iptables -w -S INPUT 2>/dev/null | sed -n 's/^-P INPUT //p')"
 iptables -w -C INPUT -j OTTER-INPUT >/dev/null 2>&1 && echo "@@IPTON"
@@ -49,7 +51,12 @@ case "$on" in *ufw*|*firewalld*) ;; *)
   fi;;
 esac
 echo "@@DU"; cat /opt/otter/firewall/docker-ports.conf 2>/dev/null
-echo "@@DUL"; command -v iptables >/dev/null 2>&1 && iptables -w -S DOCKER-USER 2>/dev/null | grep 'otter:dp'
+dbe=$(cat /opt/otter/firewall/docker-backend 2>/dev/null)
+echo "@@DBE $dbe"
+command -v nft >/dev/null 2>&1 && nft list table ip docker-bridges >/dev/null 2>&1 && echo "@@DNFT"
+echo "@@DUL"
+if [ "$dbe" = nftables ]; then command -v nft >/dev/null 2>&1 && nft list table inet otter_docker 2>/dev/null | grep 'otter:dp'
+else command -v iptables >/dev/null 2>&1 && iptables -w -S DOCKER-USER 2>/dev/null | grep 'otter:dp'; fi
 exit 0
 "#;
 
@@ -59,6 +66,8 @@ pub enum Front {
     Firewalld,
     /// 没有 ufw / firewalld 时,Otter 在 iptables 里自己建的 `OTTER-INPUT` 链
     Iptables,
+    /// Otter 在 nftables 里自己建的 `inet otter` 表
+    Nftables,
 }
 
 impl Front {
@@ -67,6 +76,7 @@ impl Front {
             Front::Ufw => "ufw",
             Front::Firewalld => "firewalld",
             Front::Iptables => "iptables",
+            Front::Nftables => "nftables",
         }
     }
 }
@@ -100,6 +110,8 @@ pub enum RuleKind {
     Rich,
     /// Otter 的 iptables 规则(key 是 conf 里的整行)
     Ipt,
+    /// Otter 的 nftables 规则(key 是 conf 里的整行)
+    Nft,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -250,6 +262,14 @@ pub struct FwInfo {
     pub input_policy: String,
     /// `OTTER-INPUT` 链在 iptables 里并被 INPUT 链调用
     pub ipt_live: bool,
+    /// 有 nft 命令
+    pub nft: bool,
+    /// Docker 用原生 nftables 后端(有 `ip docker-bridges` 表,Docker ≥ 29 实验性),没有 DOCKER-USER 链
+    pub docker_nft: bool,
+    /// 用户选的容器端口防护方式是 nftables(服务器上 `docker-backend` 文件里写着 nftables),否则是 iptables
+    pub du_nft: bool,
+    /// Otter 的 `inet otter` 表在 nftables 里(表在就生效)
+    pub nft_live: bool,
     /// 服务器 iptables 里已有的端口规则(面板等写的),只读
     pub ext_rules: Vec<LiveRule>,
     /// 已有的不含端口的放行/丢弃规则个数(状态跟踪、回环等)
@@ -257,6 +277,11 @@ pub struct FwInfo {
 }
 
 impl FwInfo {
+    /// 能不能限制容器发布的端口:Docker 用 nftables 后端要有 nft,否则要有 iptables
+    pub fn du_ok(&self) -> bool {
+        if self.du_nft { self.nft } else { self.iptables }
+    }
+
     /// 正在生效的前端;两个都在生效是冲突,返回 None 并由 `conflict` 提示
     pub fn active(&self) -> Option<Front> {
         match (self.ufw_active, self.firewalld_active) {
@@ -277,12 +302,16 @@ impl FwInfo {
         } else if self.ipt_live {
             // Otter 的 iptables 规则链正在生效:不因为另装了个没启用的 ufw / firewalld 就换掉它
             Some(Front::Iptables)
+        } else if self.nft_live {
+            Some(Front::Nftables)
         } else if self.ufw_installed {
             Some(Front::Ufw)
         } else if self.firewalld_installed {
             Some(Front::Firewalld)
         } else if self.iptables {
             Some(Front::Iptables)
+        } else if self.nft {
+            Some(Front::Nftables)
         } else {
             None
         })
@@ -295,7 +324,7 @@ pub fn parse(out: &str) -> FwInfo {
     let mut ufw_verbose = String::new();
     let mut ufw_num = String::new();
     let mut zone_text: Vec<(String, String)> = Vec::new();
-    let (mut du_conf, mut du_live, mut ipt_conf, mut ipt_ext) = (String::new(), String::new(), String::new(), String::new());
+    let (mut du_conf, mut du_live, mut ipt_conf, mut ipt_ext, mut nft_conf) = (String::new(), String::new(), String::new(), String::new(), String::new());
     for line in out.lines() {
         if let Some(rest) = line.strip_prefix("@@") {
             let (tag, arg) = rest.split_once(' ').unwrap_or((rest, ""));
@@ -306,6 +335,7 @@ pub fn parse(out: &str) -> FwInfo {
                     info.firewalld_installed = names.contains(&"firewall-cmd");
                     info.low_level = names.contains(&"nft") || names.contains(&"iptables");
                     info.iptables = names.contains(&"iptables");
+                    info.nft = names.contains(&"nft");
                 }
                 "ON" => {
                     info.ufw_active = arg.split_whitespace().any(|x| x == "ufw");
@@ -320,6 +350,9 @@ pub fn parse(out: &str) -> FwInfo {
                 }
                 "POL" => info.input_policy = arg.trim().to_string(),
                 "IPTON" => info.ipt_live = true,
+                "NFTON" => info.nft_live = true,
+                "DNFT" => info.docker_nft = true,
+                "DBE" => info.du_nft = arg.trim() == "nftables",
                 "FWD" => info.default_zone = arg.trim().to_string(),
                 "ZONE" => {
                     zone = arg.trim().to_string();
@@ -349,6 +382,10 @@ pub fn parse(out: &str) -> FwInfo {
                 info.raw.push_str(line);
                 info.raw.push('\n');
             }
+            "NFT" => {
+                nft_conf.push_str(line);
+                nft_conf.push('\n');
+            }
             "IPT" => {
                 ipt_conf.push_str(line);
                 ipt_conf.push('\n');
@@ -375,6 +412,8 @@ pub fn parse(out: &str) -> FwInfo {
     (info.ext_rules, info.ext_other) = parse_ipt_live(&ipt_ext);
     if info.manage() == Some(Front::Iptables) {
         info.rules = parse_ipt(&ipt_conf);
+    } else if info.manage() == Some(Front::Nftables) {
+        info.rules = parse_nft(&nft_conf);
     }
     info.rules.extend(parse_ufw_numbered(&ufw_num));
     for (z, t) in zone_text {
@@ -751,7 +790,7 @@ pub fn fwd_delete(r: &Rule) -> Result<String, String> {
         RuleKind::Service => format!("--remove-service={}", quote(&r.key)),
         RuleKind::Source => format!("--remove-source={}", quote(&r.key)),
         RuleKind::Rich => format!("--remove-rich-rule={}", quote(&r.key)),
-        RuleKind::Ufw(_) | RuleKind::Ipt => return Err("不是 firewalld 的规则".into()),
+        RuleKind::Ufw(_) | RuleKind::Ipt | RuleKind::Nft => return Err("不是 firewalld 的规则".into()),
     };
     Ok(format!("{FWD_PATH}firewall-cmd --permanent --zone={z} {opt}\nfirewall-cmd --reload\n"))
 }
@@ -787,9 +826,6 @@ pub fn stage(text: &str) -> String {
 pub fn with_progress(first: &str, script: &str) -> String {
     format!("{PROGRESS_MARK}\n{}{script}", stage(first))
 }
-
-/// 脚本里带这个标记的操作可能要装软件,执行器给更长的超时
-pub const SLOW_MARK: &str = "# otter-slow";
 
 /// 常见 firewalld 服务名对应的端口
 fn service_ports(name: &str) -> Option<&'static [(&'static str, &'static str)]> {
@@ -828,7 +864,7 @@ pub fn migrate_rules(rules: &[Rule], ssh: &[u16], to: Front) -> (Vec<NewRule>, V
         let from = if r.from.eq_ignore_ascii_case("anywhere") { String::new() } else { r.from.clone() };
         let what = format!("{} {} 来自{}", r.action.label(), r.to, if from.is_empty() { "任意地址" } else { &from });
         match r.kind {
-            RuleKind::Ufw(_) | RuleKind::Ipt | RuleKind::Port => {
+            RuleKind::Ufw(_) | RuleKind::Ipt | RuleKind::Nft | RuleKind::Port => {
                 let (port, proto) = match r.to.split_once('/') {
                     Some((p, "tcp")) => (p, Proto::Tcp),
                     Some((p, "udp")) => (p, Proto::Udp),
@@ -860,32 +896,20 @@ pub fn migrate_rules(rules: &[Rule], ssh: &[u16], to: Front) -> (Vec<NewRule>, V
     (ok, skip)
 }
 
-fn install_snippet(to: Front) -> String {
-    let (cmd, pkg) = match to {
+/// 目标前端必须已经装好:Otter 不替用户装软件(装完服务可能自己启动、按旧配置生效,风险比切换大)
+fn require_installed(to: Front) -> String {
+    let (cmd, name) = match to {
         Front::Ufw => ("ufw", "ufw"),
-        _ => ("firewall-cmd", "firewalld"),
+        Front::Firewalld => ("firewall-cmd", "firewalld"),
+        Front::Iptables => ("iptables", "iptables"),
+        Front::Nftables => ("nft", "nftables"),
     };
-    let st = stage(&format!("正在安装 {pkg}(可能要几分钟)"));
-    // 安装器的输出写进日志文件,失败时只报最后几行(不然最后一行是「Processing triggers…」这种看不出原因的内容)
-    format!(
-        r#"{SLOW_MARK}
-if ! command -v {cmd} >/dev/null 2>&1; then
-  {st}L=/tmp/otter-fw-install.log; : >"$L"
-  if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get install -y {pkg} >>"$L" 2>&1 || {{ apt-get update >>"$L" 2>&1 && apt-get install -y {pkg} >>"$L" 2>&1; }}
-  elif command -v dnf >/dev/null 2>&1; then dnf install -y {pkg} >>"$L" 2>&1
-  elif command -v yum >/dev/null 2>&1; then yum install -y {pkg} >>"$L" 2>&1
-  elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install {pkg} >>"$L" 2>&1
-  elif command -v apk >/dev/null 2>&1; then apk add {pkg} >>"$L" 2>&1
-  else echo "没有支持的包管理器,请手动安装 {pkg}" >&2; exit 1; fi || true
-  command -v {cmd} >/dev/null 2>&1 || {{ tail -n 3 "$L" >&2; echo "安装 {pkg} 失败(上面是安装器的最后几行)" >&2; exit 1; }}
-fi
-"#
-    )
+    format!("command -v {cmd} >/dev/null 2>&1 || {{ echo '服务器上没有安装 {name},Otter 不代装,请先自己装好再切换' >&2; exit 1; }}\n")
 }
 
 /// 切换:`from` 是现在管理的前端(没有就是 None)
 pub fn switch_script(from: Option<Front>, to: Front, rules: &[Rule], ssh: &[u16]) -> Result<String, String> {
-    if from == Some(to) || (to == Front::Iptables && from.is_none()) {
+    if from == Some(to) || (matches!(to, Front::Iptables | Front::Nftables) && from.is_none()) {
         return Err("不需要切换".into());
     }
     ssh_ports_ok(ssh)?;
@@ -895,15 +919,17 @@ pub fn switch_script(from: Option<Front>, to: Front, rules: &[Rule], ssh: &[u16]
         Some(Front::Ufw) => ("ufw disable >/dev/null 2>&1 || true\n", "ufw --force enable"),
         Some(Front::Firewalld) => ("systemctl disable --now firewalld\n", "systemctl enable --now firewalld"),
         Some(Front::Iptables) => (&*ipt_disable_cmds(), "sh /opt/otter/firewall/iptables.sh; systemctl enable otter-iptables.service"),
+        Some(Front::Nftables) => (&*nft_disable_cmds(), "sh /opt/otter/firewall/nftables.sh; systemctl enable otter-nftables.service"),
         None => ("", "true"),
     };
     let undo_new = match to {
         Front::Ufw => "ufw disable".to_string(),
         Front::Firewalld => "systemctl disable --now firewalld".to_string(),
         Front::Iptables => ipt_disable_cmds().trim_end().replace('\n', "; "),
+        Front::Nftables => nft_disable_cmds().trim_end().replace('\n', "; "),
     };
     let rollback = format!("{undo_new}; {restore_old}");
-    let mut s = format!("{PROGRESS_MARK}\n{FWD_PATH}{}", if to == Front::Iptables { String::new() } else { install_snippet(to) });
+    let mut s = format!("{PROGRESS_MARK}\n{FWD_PATH}{}", require_installed(to));
     let old_name = from.map(Front::label).unwrap_or("");
     let stop_stage = if from.is_some() { stage(&format!("正在停用 {old_name}")) } else { String::new() };
     let move_stage = stage(&format!("正在放行 SSH 端口并带过去 {} 条规则", moved.len()));
@@ -917,6 +943,16 @@ pub fn switch_script(from: Option<Front>, to: Front, rules: &[Rule], ssh: &[u16]
             let mut all: Vec<NewRule> = ssh.iter().map(|p| NewRule { action: Action::Allow, port: p.to_string(), proto: Proto::Tcp, from: String::new() }).collect();
             all.extend(moved.iter().cloned());
             s.push_str(&ipt_add_many(&all, &[])?);
+        }
+        Front::Nftables => {
+            s.push_str(&stage("正在设置自动回滚保险"));
+            s.push_str(&guard_arm(&rollback));
+            s.push_str(&stop_stage);
+            s.push_str(stop_old);
+            s.push_str(&move_stage);
+            let mut all: Vec<NewRule> = ssh.iter().map(|p| NewRule { action: Action::Allow, port: p.to_string(), proto: Proto::Tcp, from: String::new() }).collect();
+            all.extend(moved.iter().cloned());
+            s.push_str(&nft_add_many(&all, &[])?);
         }
         Front::Ufw => {
             s.push_str(&stage("正在检查有没有规则挡住 SSH 端口"));
@@ -981,6 +1017,14 @@ fn ipt_word(a: Action) -> Option<&'static str> {
 
 /// conf 的一行:`allow tcp 80 -` / `drop tcp 8000:8100 203.0.113.0/24`
 pub fn parse_ipt(conf: &str) -> Vec<Rule> {
+    parse_conf(conf, RuleKind::Ipt)
+}
+
+pub fn parse_nft(conf: &str) -> Vec<Rule> {
+    parse_conf(conf, RuleKind::Nft)
+}
+
+fn parse_conf(conf: &str, kind: RuleKind) -> Vec<Rule> {
     let mut v = Vec::new();
     for line in conf.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
@@ -997,7 +1041,7 @@ pub fn parse_ipt(conf: &str) -> Vec<Rule> {
             continue;
         }
         let from = if f[3] == "-" { "Anywhere".to_string() } else { f[3].to_string() };
-        v.push(Rule { kind: RuleKind::Ipt, zone: String::new(), to: format!("{}/{}", f[2], f[1]), action, from, v6: false, key: f[..4].join(" ") });
+        v.push(Rule { kind: kind.clone(), zone: String::new(), to: format!("{}/{}", f[2], f[1]), action, from, v6: false, key: f[..4].join(" ") });
     }
     v
 }
@@ -1085,13 +1129,18 @@ pub fn ipt_add(n: &NewRule, current: &[Rule]) -> Result<String, String> {
 
 /// 一次加多条(端口列表拆出来的),合在一起写一次
 pub fn ipt_add_many(ns: &[NewRule], current: &[Rule]) -> Result<String, String> {
-    let mut lines: Vec<String> = current.iter().filter(|r| r.kind == RuleKind::Ipt).map(|r| r.key.clone()).collect();
+    let lines: Vec<String> = current.iter().filter(|r| r.kind == RuleKind::Ipt).map(|r| r.key.clone()).collect();
+    Ok(ipt_install(&conf_add(ns, lines, true)?))
+}
+
+/// 在 conf 行里加上新规则(去重);`v4_only` 时来源只能是 IPv4
+fn conf_add(ns: &[NewRule], mut lines: Vec<String>, v4_only: bool) -> Result<Vec<String>, String> {
     for n in ns {
         n.validate()?;
         if n.action == Action::Limit {
             return Err("暂不支持限速规则".into());
         }
-        if !n.from.is_empty() && !valid_du_source(&n.from) {
+        if v4_only && !n.from.is_empty() && !valid_du_source(&n.from) {
             return Err("来源要写成 IPv4 地址或网段,如 203.0.113.5、10.0.0.0/8".into());
         }
         let (a, b) = parse_port(&n.port).ok_or("端口不合法")?;
@@ -1104,7 +1153,7 @@ pub fn ipt_add_many(ns: &[NewRule], current: &[Rule]) -> Result<String, String> 
             }
         }
     }
-    Ok(ipt_install(&lines))
+    Ok(lines)
 }
 
 pub fn ipt_delete(r: &Rule, current: &[Rule]) -> Result<String, String> {
@@ -1113,6 +1162,118 @@ pub fn ipt_delete(r: &Rule, current: &[Rule]) -> Result<String, String> {
     }
     let lines: Vec<String> = current.iter().filter(|x| x.kind == RuleKind::Ipt && x.key != r.key).map(|x| x.key.clone()).collect();
     Ok(ipt_install(&lines))
+}
+
+// ---- nftables(Otter 自己的表)-----------------------------------------------------------
+//
+// 不碰已有的表:Otter 只管 `table inet otter`(链 `input`,policy accept),规则存在
+// `/opt/otter/firewall/nftables.conf`(和 iptables.conf 同一种行),由 `otter-nftables.service` 开机套用。
+// 套用时整张表在一次 `nft -f -` 里删掉重建,没有空窗。每条规则带 `iifname != "lo"`;IPv4、IPv6 同表。
+
+const NFT_CONF: &str = "/opt/otter/firewall/nftables.conf";
+const NFT_SH: &str = "/opt/otter/firewall/nftables.sh";
+const NFT_UNIT: &str = "/etc/systemd/system/otter-nftables.service";
+
+fn nft_apply_script() -> String {
+    format!(
+        r#"#!/bin/sh
+# Otter 生成:把 {NFT_CONF} 里的规则写进 nftables 的 inet otter 表。开机时由 otter-nftables.service 套用;请在 Otter 里修改,手改会被覆盖
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+CONF={NFT_CONF}
+{{
+  echo "table inet otter"
+  echo "delete table inet otter"
+  echo "table inet otter {{"
+  echo "  chain input {{"
+  echo "    type filter hook input priority 0; policy accept;"
+  if [ -f "$CONF" ]; then
+    while read -r act proto port src; do
+      case "$act" in allow) v=accept;; drop) v=drop;; reject) v=reject;; *) continue;; esac
+      case "$proto" in tcp|udp) ;; *) continue;; esac
+      case "$port" in ''|*[!0-9:]*) continue;; esac
+      dp=$(printf '%s' "$port" | tr : -)
+      s=
+      if [ -n "$src" ] && [ "$src" != "-" ]; then
+        case "$src" in *[!0-9a-fA-F:./]*) continue;; esac
+        case "$src" in *:*) s="ip6 saddr $src";; *) s="ip saddr $src";; esac
+      fi
+      echo "    iifname != \"lo\" $proto dport $dp $s $v"
+    done <"$CONF"
+  fi
+  echo "  }}"
+  echo "}}"
+}} | nft -f - || exit 1
+exit 0
+"#
+    )
+}
+
+fn nft_install(lines: &[String]) -> String {
+    let mut conf = String::from("# Otter 管理的 nftables 入站规则:动作 协议 端口 来源(- 表示任意)\n");
+    for l in lines {
+        conf.push_str(l);
+        conf.push('\n');
+    }
+    let apply = nft_apply_script();
+    format!(
+        r#"PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH
+set -e
+command -v nft >/dev/null 2>&1 || {{ echo '服务器上没有 nft 命令' >&2; exit 1; }}
+command -v systemctl >/dev/null 2>&1 || {{ echo '服务器没有 systemd,没法让规则在重启后保留,所以没有改动' >&2; exit 1; }}
+mkdir -p {DU_DIR}
+cat >{NFT_CONF} <<'OTTER_EOF'
+{conf}OTTER_EOF
+cat >{NFT_SH} <<'OTTER_EOF'
+{apply}OTTER_EOF
+chmod 700 {NFT_SH}
+cat >{NFT_UNIT} <<'OTTER_EOF'
+[Unit]
+Description=Otter: nftables inbound rules
+Wants=network-pre.target
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={NFT_SH}
+
+[Install]
+WantedBy=multi-user.target
+OTTER_EOF
+systemctl daemon-reload
+systemctl enable otter-nftables.service >/dev/null 2>&1
+{NFT_SH}
+"#
+    )
+}
+
+/// 绑定:按现有规则重新写 conf、装单元并套用
+pub fn nft_enable(current: &[Rule]) -> String {
+    let lines: Vec<String> = current.iter().filter(|r| r.kind == RuleKind::Nft).map(|r| r.key.clone()).collect();
+    nft_install(&lines)
+}
+
+/// 解绑:停开机套用,删掉 inet otter 表(规则和 conf 保留)
+pub fn nft_disable() -> String {
+    "PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH\ncommand -v systemctl >/dev/null 2>&1 && systemctl disable otter-nftables.service >/dev/null 2>&1\nnft delete table inet otter 2>/dev/null\nexit 0\n".to_string()
+}
+
+/// 每行后面加 `|| true`,放进 `set -e` 的脚本里不会因为表或单元不存在而退出
+fn nft_disable_cmds() -> String {
+    nft_disable().lines().skip(1).filter(|l| !l.starts_with("exit")).map(|l| format!("{l} || true\n")).collect()
+}
+
+pub fn nft_add_many(ns: &[NewRule], current: &[Rule]) -> Result<String, String> {
+    let lines: Vec<String> = current.iter().filter(|r| r.kind == RuleKind::Nft).map(|r| r.key.clone()).collect();
+    Ok(nft_install(&conf_add(ns, lines, false)?))
+}
+
+pub fn nft_delete(r: &Rule, current: &[Rule]) -> Result<String, String> {
+    if r.kind != RuleKind::Nft {
+        return Err("不是 Otter 的 nftables 规则".into());
+    }
+    let lines: Vec<String> = current.iter().filter(|x| x.kind == RuleKind::Nft && x.key != r.key).map(|x| x.key.clone()).collect();
+    Ok(nft_install(&lines))
 }
 
 // ---- Docker 发布端口(DOCKER-USER 链)------------------------------------------------
@@ -1160,7 +1321,10 @@ pub fn parse_du(conf: &str, live: &str) -> Vec<PortLimit> {
             _ => continue,
         };
         let proto = f[0].to_string();
-        let has = live.lines().any(|l| l.contains(&format!("-p {proto} ")) && l.contains(&format!("--ctorigdstport {port} ")) && l.contains("-j DROP"));
+        let has = live.lines().any(|l| {
+            (l.contains(&format!("-p {proto} ")) && l.contains(&format!("--ctorigdstport {port} ")) && l.contains("-j DROP"))
+                || (l.contains(&format!("meta l4proto {proto} ")) && l.contains(&format!("ct original proto-dst {port} ")) && l.trim_end().contains(" drop"))
+        });
         v.push(PortLimit { proto, port, mode, live: has });
     }
     v
@@ -1176,7 +1340,18 @@ fn du_match(proto: &str, port: u16) -> String {
 }
 
 /// 给用户看的预览:最终会写进 DOCKER-USER 的 iptables 规则
-pub fn du_preview(proto: &str, port: u16, mode: &PortMode) -> Vec<String> {
+pub fn du_preview(proto: &str, port: u16, mode: &PortMode, nft: bool) -> Vec<String> {
+    if nft {
+        let m = format!("meta l4proto {proto} ct original proto-dst {port} iifname != \"docker0\" iifname != \"br-*\"");
+        let mut v = Vec::new();
+        if let PortMode::Only(src) = mode {
+            for s in src {
+                v.push(format!("add rule inet otter_docker forward {m} ip saddr {s} return"));
+            }
+        }
+        v.push(format!("add rule inet otter_docker forward {m} drop"));
+        return v;
+    }
     let m = du_match(proto, port);
     let mut v = Vec::new();
     if let PortMode::Only(src) = mode {
@@ -1188,12 +1363,44 @@ pub fn du_preview(proto: &str, port: u16, mode: &PortMode) -> Vec<String> {
     v
 }
 
-fn du_apply_script(conf: &str) -> String {
-    format!(
-        r#"#!/bin/sh
-# Otter 生成:把 {conf} 里的规则写进 DOCKER-USER 链。开机和 Docker 重启后由 otter-docker-user.service 重新套用;请在 Otter 里修改,手改会被覆盖
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH
-CONF={conf}
+/// 套用脚本:按选定的后端只写一种。iptables 写 `DOCKER-USER` 链;nftables(Docker ≥ 29 的原生后端没有 DOCKER-USER)
+/// 在 `inet otter_docker` 表里挂一条 forward 链,优先级在 Docker 的链之前。切换后端时顺手清掉另一种留下的规则
+fn du_apply_script(conf: &str, nft: bool) -> String {
+    let body = if nft {
+        format!(
+            r#"if command -v iptables >/dev/null 2>&1; then
+  iptables -w -S DOCKER-USER 2>/dev/null | grep -- 'comment {DU_TAG}' | sed 's/^-A /-D /' | while read -r l; do iptables -w $l; done
+fi
+{{
+  echo "table inet otter_docker"
+  echo "delete table inet otter_docker"
+  echo "table inet otter_docker {{"
+  echo "  chain forward {{"
+  echo "    type filter hook forward priority -1; policy accept;"
+  if [ -f "$CONF" ]; then
+    while read -r proto port mode srcs; do
+      case "$proto" in tcp|udp) ;; *) continue;; esac
+      case "$port" in ''|*[!0-9]*) continue;; esac
+      m="meta l4proto $proto ct original proto-dst $port iifname != \"docker0\" iifname != \"br-*\" comment \"{DU_TAG}\""
+      case "$mode" in
+        deny) echo "    $m drop";;
+        only) for s in $(echo "$srcs" | tr ',' ' '); do
+                case "$s" in *[!0-9./]*) continue;; esac
+                echo "    $m ip saddr $s return"
+              done
+              echo "    $m drop";;
+      esac
+    done <"$CONF"
+  fi
+  echo "  }}"
+  echo "}}"
+}} | nft -f - || exit 1
+exit 0
+"#
+        )
+    } else {
+        format!(
+            r#"command -v nft >/dev/null 2>&1 && nft delete table inet otter_docker >/dev/null 2>&1
 iptables -w -n -L DOCKER-USER >/dev/null 2>&1 || iptables -w -N DOCKER-USER || exit 1
 iptables -w -S DOCKER-USER | grep -- 'comment {DU_TAG}' | sed 's/^-A /-D /' | while read -r l; do iptables -w $l; done
 [ -f "$CONF" ] || exit 0
@@ -1209,6 +1416,15 @@ while read -r proto port mode srcs; do
 done <"$CONF"
 exit 0
 "#
+        )
+    };
+    format!(
+        r#"#!/bin/sh
+# Otter 生成:把 {conf} 里的规则写进{target}。开机和 Docker 重启后由 otter-docker-user.service 重新套用;请在 Otter 里修改,手改会被覆盖
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+CONF={conf}
+{body}"#,
+        target = if nft { " nftables 的 inet otter_docker 表" } else { " DOCKER-USER 链" }
     )
 }
 
@@ -1225,7 +1441,7 @@ fn du_conf_text(list: &[PortLimit]) -> String {
 
 /// 设置(`Some`)或取消(`None`)一个端口的限制,返回 root 脚本:写 conf、装脚本和 systemd 单元、立即套用。
 /// `current` 是现有的限制;`ssh` 里的端口不允许限制
-pub fn du_set(proto: &str, port: u16, mode: Option<&PortMode>, current: &[PortLimit], ssh: &[u16]) -> Result<String, String> {
+pub fn du_set(proto: &str, port: u16, mode: Option<&PortMode>, current: &[PortLimit], ssh: &[u16], nft: bool) -> Result<String, String> {
     if !matches!(proto, "tcp" | "udp") || port == 0 {
         return Err("端口或协议不合法".into());
     }
@@ -1245,14 +1461,25 @@ pub fn du_set(proto: &str, port: u16, mode: Option<&PortMode>, current: &[PortLi
         list.push(PortLimit { proto: proto.into(), port, mode: m.clone(), live: false });
     }
     list.sort_by(|a, b| (a.port, &a.proto).cmp(&(b.port, &b.proto)));
-    let conf = du_conf_text(&list);
-    let apply = du_apply_script(DU_CONF);
-    Ok(format!(
+    Ok(du_install(&list, nft))
+}
+
+/// 换容器端口防护的后端:现有的限制原样搬过去,另一种后端留下的规则由套用脚本清掉
+pub fn du_backend(nft: bool, current: &[PortLimit]) -> Result<String, String> {
+    Ok(du_install(current, nft))
+}
+
+fn du_install(list: &[PortLimit], nft: bool) -> String {
+    let conf = du_conf_text(list);
+    let apply = du_apply_script(DU_CONF, nft);
+    let (cmd, backend) = if nft { ("nft", "nftables") } else { ("iptables", "iptables") };
+    format!(
         r#"PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH
 set -e
-command -v iptables >/dev/null 2>&1 || {{ echo '服务器上没有 iptables 命令' >&2; exit 1; }}
+command -v {cmd} >/dev/null 2>&1 || {{ echo '服务器上没有 {cmd} 命令' >&2; exit 1; }}
 command -v systemctl >/dev/null 2>&1 || {{ echo '服务器没有 systemd,没法让规则在重启后保留,所以没有改动' >&2; exit 1; }}
 mkdir -p {DU_DIR}
+echo {backend} >{DU_DIR}/docker-backend
 cat >{DU_CONF} <<'OTTER_EOF'
 {conf}OTTER_EOF
 cat >{DU_SH} <<'OTTER_EOF'
@@ -1276,7 +1503,7 @@ systemctl daemon-reload
 systemctl enable otter-docker-user.service >/dev/null 2>&1
 {DU_SH}
 "#
-    ))
+    )
 }
 
 #[cfg(test)]
@@ -1407,10 +1634,10 @@ mod tests {
         assert!(ok.iter().any(|n| n.port == "3306" && n.from == "10.0.0.0/8"));
         assert!(!skip.is_empty());
         let s = switch_script(Some(Front::Ufw), Front::Firewalld, &ufw.rules, &[22]).unwrap();
-        assert!(s.contains(SLOW_MARK) && s.contains(GUARD_MARK) && s.contains("ufw disable") && s.contains("--add-port=80/tcp") && s.contains("--zone=\"$z\""), "{s}");
+        assert!(s.contains(GUARD_MARK) && s.contains("command -v firewall-cmd") && !s.contains("apt-get") && s.contains("ufw disable") && s.contains("--add-port=80/tcp") && s.contains("--zone=\"$z\""), "{s}");
         sh_ok(&s);
         let s = switch_script(Some(Front::Firewalld), Front::Ufw, &[], &[22]).unwrap();
-        assert!(s.contains("apt-get install -y ufw") && s.contains("systemctl disable --now firewalld") && s.contains("ufw --force enable"));
+        assert!(s.contains("command -v ufw") && !s.contains("apt-get") && s.contains("systemctl disable --now firewalld") && s.contains("ufw --force enable"));
         sh_ok(&s);
         sh_ok(&switch_script(Some(Front::Iptables), Front::Ufw, &[], &[22]).unwrap());
         sh_ok(&switch_script(None, Front::Firewalld, &[], &[22, 2222]).unwrap());
@@ -1556,18 +1783,18 @@ mod tests {
         assert!(i.iptables && i.du.len() == 2);
 
         let only = PortMode::Only(vec!["203.0.113.5".into()]);
-        let s = du_set("tcp", 5432, Some(&only), &v, &[22]).unwrap();
+        let s = du_set("tcp", 5432, Some(&only), &v, &[22], false).unwrap();
         sh_ok(&s);
         assert!(s.contains("tcp 5432 only 203.0.113.5") && s.contains("tcp 8080 deny"));
         // 取消限制:conf 里不再有这个端口
-        let s = du_set("tcp", 8080, None, &v, &[22]).unwrap();
+        let s = du_set("tcp", 8080, None, &v, &[22], false).unwrap();
         assert!(!s.contains("tcp 8080 deny") && s.contains("tcp 3306 only"));
         // 拒绝:SSH 端口、IPv6 来源、空来源、坏来源
-        assert!(du_set("tcp", 22, Some(&PortMode::Deny), &[], &[22]).is_err());
-        assert!(du_set("tcp", 80, Some(&PortMode::Only(vec!["2001:db8::1".into()])), &[], &[22]).is_err());
-        assert!(du_set("tcp", 80, Some(&PortMode::Only(vec![])), &[], &[22]).is_err());
-        assert!(du_set("tcp", 80, Some(&PortMode::Only(vec!["1.2.3.4; id".into()])), &[], &[22]).is_err());
-        assert_eq!(du_preview("tcp", 80, &only).len(), 2);
+        assert!(du_set("tcp", 22, Some(&PortMode::Deny), &[], &[22], false).is_err());
+        assert!(du_set("tcp", 80, Some(&PortMode::Only(vec!["2001:db8::1".into()])), &[], &[22], false).is_err());
+        assert!(du_set("tcp", 80, Some(&PortMode::Only(vec![])), &[], &[22], false).is_err());
+        assert!(du_set("tcp", 80, Some(&PortMode::Only(vec!["1.2.3.4; id".into()])), &[], &[22], false).is_err());
+        assert_eq!(du_preview("tcp", 80, &only, false).len(), 2);
     }
 
     /// 用假的 iptables 跑一遍套用脚本:先清掉旧的 Otter 规则,再按 conf 写,允许来源在 DROP 之前
@@ -1581,7 +1808,7 @@ mod tests {
         std::fs::write(&fake, format!("#!/bin/sh\necho \"$@\" >>{}\ncase \"$*\" in *-S*) echo '-A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9 --ctdir ORIGINAL ! -i docker0 ! -i br-+ -m comment --comment otter:dp -j DROP';; esac\nexit 0\n", log.display())).unwrap();
         std::process::Command::new("chmod").arg("755").arg(&fake).status().unwrap();
         let sh = dir.join("apply.sh");
-        std::fs::write(&sh, du_apply_script(conf.to_str().unwrap()).replace("PATH=/usr/local/sbin", &format!("PATH={}:/usr/local/sbin", dir.display()))).unwrap();
+        std::fs::write(&sh, du_apply_script(conf.to_str().unwrap(), false).replace("PATH=/usr/local/sbin", &format!("PATH={}:/usr/local/sbin", dir.display()))).unwrap();
         let out = std::process::Command::new("sh").arg(&sh).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let log = std::fs::read_to_string(&log).unwrap();
@@ -1592,6 +1819,108 @@ mod tests {
         assert!(drop < ret1 && drop < ret2);
         assert!(lines.iter().any(|l| l.contains("--ctorigdstport 8080") && l.ends_with("-j DROP")));
         assert!(!log.contains("xx"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 切到 nftables:带走规则、SSH 端口先放行,回滚里删掉 inet otter 表;目标必须已安装
+    #[test]
+    fn switch_to_nftables() {
+        let ufw = parse("@@HAS ufw nft\n@@ON ufw\n@@SSH 22\n@@UFW\nStatus: active\nDefault: deny (incoming), allow (outgoing), disabled (routed)\n@@UFWN\nStatus: active\n\n     To                         Action      From\n     --                         ------      ----\n[ 1] 22/tcp                     ALLOW IN    Anywhere\n[ 2] 80/tcp                     ALLOW IN    Anywhere\n[ 3] 3306/tcp                   ALLOW IN    2001:db8::/32\n");
+        let s = switch_script(Some(Front::Ufw), Front::Nftables, &ufw.rules, &[22]).unwrap();
+        assert!(s.contains("command -v nft") && !s.contains("apt-get") && s.contains(GUARD_MARK) && s.contains("ufw disable"), "{s}");
+        assert!(s.contains("allow tcp 22 -") && s.contains("allow tcp 80 -") && s.contains("allow tcp 3306 2001:db8::/32"), "{s}");
+        assert!(s.contains("nft delete table inet otter"), "{s}");
+        sh_ok(&s);
+        sh_ok(&switch_script(Some(Front::Nftables), Front::Ufw, &[], &[22]).unwrap());
+        sh_ok(&switch_script(Some(Front::Nftables), Front::Iptables, &[], &[22]).unwrap());
+        assert!(switch_script(None, Front::Nftables, &[], &[22]).is_err());
+        assert!(switch_script(Some(Front::Nftables), Front::Nftables, &[], &[22]).is_err());
+    }
+
+    /// 容器端口防护选 nftables:套用脚本用 inet otter_docker 表,按 ct original proto-dst 匹配,来源在 drop 之前;切换后端时清另一边
+    #[test]
+    fn docker_port_nft_backend() {
+        let dir = std::env::temp_dir().join(format!("otter-fwdnft-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (log, conf) = (dir.join("log"), dir.join("ports.conf"));
+        std::fs::write(&conf, "tcp 8080 deny\ntcp 3306 only 1.2.3.4,10.0.0.0/8,2001:db8::1\nxx 1 deny\n").unwrap();
+        for (name, body) in [("nft", format!("#!/bin/sh\necho \"$@\" >>{0}\ncase \"$1\" in -f) cat >>{0};; esac\nexit 0\n", log.display())), ("iptables", format!("#!/bin/sh\necho \"iptables $@\" >>{0}\ncase \"$*\" in *-S*) echo '-A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9 --ctdir ORIGINAL ! -i docker0 ! -i br-+ -m comment --comment otter:dp -j DROP';; esac\nexit 0\n", log.display()))] {
+            let fake = dir.join(name);
+            std::fs::write(&fake, body).unwrap();
+            std::process::Command::new("chmod").arg("755").arg(&fake).status().unwrap();
+        }
+        let sh = dir.join("apply.sh");
+        std::fs::write(&sh, du_apply_script(conf.to_str().unwrap(), true).replace("PATH=/usr/local/sbin", &format!("PATH={}:/usr/local/sbin", dir.display()))).unwrap();
+        let out = std::process::Command::new("sh").arg(&sh).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let log = std::fs::read_to_string(&log).unwrap();
+        assert!(log.contains("iptables -w -D DOCKER-USER") && log.contains("--ctorigdstport 9 "), "{log}");
+        assert!(log.contains("delete table inet otter_docker") && log.contains("type filter hook forward priority -1; policy accept;"), "{log}");
+        assert!(log.contains("meta l4proto tcp ct original proto-dst 8080 iifname != \"docker0\" iifname != \"br-*\" comment \"otter:dp\" drop"), "{log}");
+        let (r1, r2, dr) = (log.find("proto-dst 3306 iifname != \"docker0\" iifname != \"br-*\" comment \"otter:dp\" ip saddr 1.2.3.4 return"), log.find("ip saddr 10.0.0.0/8 return"), log.rfind("proto-dst 3306"));
+        assert!(r1.is_some() && r2.is_some() && r1 < r2 && r2 < dr, "{log}");
+        assert!(!log.contains("2001:db8") && !log.contains(" xx "), "{log}");
+        std::fs::remove_dir_all(&dir).ok();
+        // 解析:live 的 nft 行也算已套用
+        let live = "\t\tmeta l4proto tcp ct original proto-dst 8080 iifname != \"docker0\" iifname != \"br-*\" comment \"otter:dp\" drop\n";
+        assert!(parse_du("tcp 8080 deny\n", live)[0].live);
+        // 读取:backend 文件决定用哪种;DNFT 只是检测到 Docker 用 nftables
+        let i = parse("@@HAS nft iptables\n@@ON\n@@DBE nftables\n@@DNFT\n@@DU\ntcp 8080 deny\n@@DUL\n");
+        assert!(i.du_nft && i.docker_nft && i.du_ok());
+        assert!(!parse("@@HAS nft iptables\n@@ON\n@@DBE \n@@DNFT\n").du_nft);
+        assert!(!parse("@@HAS nft\n@@ON\n@@DBE \n").du_ok());
+        // 安装脚本:写 backend 文件、检查对应命令、预览
+        let s = du_set("tcp", 8080, Some(&PortMode::Deny), &[], &[22], true).unwrap();
+        sh_ok(&s);
+        assert!(s.contains("echo nftables >") && s.contains("服务器上没有 nft 命令") && !s.contains("服务器上没有 iptables 命令"), "{s}");
+        let b = du_backend(false, &[]).unwrap();
+        sh_ok(&b);
+        assert!(b.contains("echo iptables >") && b.contains("服务器上没有 iptables 命令"));
+        assert!(du_preview("tcp", 80, &PortMode::Deny, true)[0].starts_with("add rule inet otter_docker forward meta l4proto tcp"));
+    }
+
+    #[test]
+    fn nftables_front() {
+        let i = parse("@@HAS nft\n@@ON\n@@SSH 22\n@@NFTON\n@@NFT\n# c\nallow tcp 80 -\ndrop tcp 8000:8100 2001:db8::/32\nbad\n@@IPT\n@@DU\n@@DUL\n");
+        assert_eq!(i.manage(), Some(Front::Nftables));
+        assert!(i.nft && i.nft_live);
+        assert_eq!(i.rules.len(), 2);
+        assert!(i.rules.iter().all(|r| r.kind == RuleKind::Nft));
+        // 没有表、只有 nft 命令时也管 nftables;有已装的 ufw 就还是 ufw
+        assert_eq!(parse("@@HAS nft\n@@ON\n").manage(), Some(Front::Nftables));
+        assert_eq!(parse("@@HAS ufw nft\n@@ON\n").manage(), Some(Front::Ufw));
+        let s = nft_add_many(&[nr(Action::Allow, "443", Proto::Both, "2001:db8::1")], &i.rules).unwrap();
+        sh_ok(&s);
+        assert!(s.contains("allow tcp 443 2001:db8::1") && s.contains("allow udp 443 2001:db8::1") && s.contains("allow tcp 80 -"));
+        let d = nft_delete(&i.rules[0], &i.rules).unwrap();
+        assert!(!d.contains("allow tcp 80 -") && d.contains("drop tcp 8000:8100 2001:db8::/32"));
+        assert!(nft_delete(&Rule { kind: RuleKind::Ipt, ..i.rules[0].clone() }, &i.rules).is_err());
+        sh_ok(&nft_enable(&i.rules));
+        sh_ok(&nft_disable());
+    }
+
+    /// 用假的 nft 跑套用脚本:一次 `nft -f -` 删表重建,规则带 iifname,IPv6 来源用 ip6 saddr,坏行被跳过
+    #[test]
+    fn nft_apply_script_with_fake_nft() {
+        let dir = std::env::temp_dir().join(format!("otter-fwnft-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (log, conf) = (dir.join("log"), dir.join("nft.conf"));
+        std::fs::write(&conf, "allow tcp 80 -\ndrop tcp 8000:8100 203.0.113.0/24\nreject udp 53 2001:db8::/32\nallow tcp 22 ;rm\nxx tcp 1 -\n").unwrap();
+        let fake = dir.join("nft");
+        std::fs::write(&fake, format!("#!/bin/sh\necho \"$@\" >>{0}\ncat >>{0}\nexit 0\n", log.display())).unwrap();
+        std::process::Command::new("chmod").arg("755").arg(&fake).status().unwrap();
+        let sh = dir.join("apply.sh");
+        std::fs::write(&sh, nft_apply_script().replace(NFT_CONF, conf.to_str().unwrap()).replace("PATH=/usr/local/sbin", &format!("PATH={}:/usr/local/sbin", dir.display()))).unwrap();
+        let out = std::process::Command::new("sh").arg(&sh).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let log = std::fs::read_to_string(&log).unwrap();
+        assert!(log.starts_with("-f -\n"), "{log}");
+        let pos = |n: &str| log.find(n).unwrap_or_else(|| panic!("{n}\n{log}"));
+        assert!(pos("delete table inet otter") < pos("table inet otter {"));
+        assert!(log.contains("iifname != \"lo\" tcp dport 80  accept"), "{log}");
+        assert!(log.contains("tcp dport 8000-8100 ip saddr 203.0.113.0/24 drop"), "{log}");
+        assert!(log.contains("udp dport 53 ip6 saddr 2001:db8::/32 reject"), "{log}");
+        assert!(!log.contains(";rm") && !log.contains("xx"), "{log}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
