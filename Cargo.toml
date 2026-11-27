@@ -36,9 +36,9 @@ csv = "1.4"
 russh = "0.65"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs"] }
-gpui-kit = { version = "=0.9.1", features = ["tree-sitter-yaml", "tree-sitter-bash"] }
+gpui-kit = { version = "=0.9.1", features = ["tree-sitter-yaml", "tree-sitter-bash", "gpui-fast"] }
 # 仅为用 Window::render_to_image 离屏截图:直接给底层 crate 开 test-support,靠特性统一生效
-gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
+gpui = { package = "gpui-fast", version = "=0.1.14", features = ["test-support"] }
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 directories = "6.0.0"
 keyring = "4.2.0"
@@ -58,7 +58,6 @@ ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] 
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui-macos = { package = "gpui-pre-macos", version = "=0.3.12", features = ["test-support"] }
 
 [target.'cfg(windows)'.dependencies]
 # 命名管道对端进程号:GetNamedPipeClientProcessId

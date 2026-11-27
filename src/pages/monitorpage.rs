@@ -484,7 +484,7 @@ pub(crate) fn tw_reset() {
 
 /// LIVE 点的不透明度:按墙上时钟 2.4 秒一个周期,0.35 ~ 1.0 平滑起伏
 /// 呼吸开关:关掉后点常亮,dock 的定时器只在数值滑动时重绘
-pub(crate) const LIVE_BREATH: bool = false;
+pub(crate) const LIVE_BREATH: bool = true;
 
 fn live_pulse() -> f32 {
     if !LIVE_BREATH {
