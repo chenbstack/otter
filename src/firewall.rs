@@ -639,6 +639,7 @@ pub const GUARD_MARK: &str = "# otter-guard";
 /// 服务器等多久还没人取消就回滚
 pub const GUARD_SECS: u32 = 120;
 const GUARD_UNIT: &str = "otter-fw-rollback";
+const GUARD_SH: &str = "/run/otter-fw-rollback.sh";
 
 /// 取消定时回滚(能连上之后执行)
 pub fn guard_cancel() -> String {
@@ -647,9 +648,10 @@ pub fn guard_cancel() -> String {
 
 /// 排一个 `GUARD_SECS` 秒后执行 `rollback` 的临时 systemd 定时器;没有 systemd-run 就不排(操作照常做)
 fn guard_arm(rollback: &str) -> String {
+    // 回滚命令写成脚本文件再让定时器跑它:命令行里带 `;` 的话,systemd 252(CentOS 9)重载后会认不出这个临时单元的命令,
+    // 回滚脚本里第一个 `systemctl disable` 触发的重载就把后面的命令全杀了(2026-11-26 真机测出)
     format!(
-        "{GUARD_MARK}\nsystemctl stop {GUARD_UNIT}.timer {GUARD_UNIT}.service >/dev/null 2>&1 || true\ncommand -v systemd-run >/dev/null 2>&1 && systemd-run --quiet --unit={GUARD_UNIT} --on-active={GUARD_SECS} --timer-property=AccuracySec=1s /bin/sh -c {} || true\n",
-        quote(rollback)
+        "{GUARD_MARK}\nsystemctl stop {GUARD_UNIT}.timer {GUARD_UNIT}.service >/dev/null 2>&1 || true\ncat >{GUARD_SH} <<'OTTER_RB'\nPATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH\n{rollback}\nOTTER_RB\ncommand -v systemd-run >/dev/null 2>&1 && systemd-run --quiet --unit={GUARD_UNIT} --on-active={GUARD_SECS} --timer-property=AccuracySec=1s /bin/sh {GUARD_SH} || true\n"
     )
 }
 
