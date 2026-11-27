@@ -1774,7 +1774,10 @@ async fn sys_job(r: &Runner, sh: &Shared, job: crate::sysops::Job) {
     sh.busy.lock().unwrap().remove(&key);
     let mut msg = match res {
         Ok(ref o) if o.code == 0 => format!("已{}:{}", job.label, job.target),
-        Ok(ref o) => format!("{}失败:{}", job.label, last_line(o)),
+        Ok(ref o) => match crate::toolbox::common::pkg_error_hint(&format!("{}\n{}", o.stderr, o.stdout)) {
+            Some(hint) => format!("{}失败:{hint}(原始提示:{})", job.label, last_line(o)),
+            None => format!("{}失败:{}", job.label, last_line(o)),
+        },
         Err(ref e) => format!("{}失败:{e}", job.label),
     };
     if let (Some(g), Ok(o)) = (&job.guard, &res) {

@@ -79,3 +79,50 @@ mod tests {
         assert!(valid_user("deploy") && valid_user("_svc-1") && !valid_user("Root") && !valid_user("1abc") && !valid_user("a b") && !valid_user(&"a".repeat(33)));
     }
 }
+
+/// 把 apt / dnf / yum 的常见安装失败翻成能直接照着处理的话;认不出来返回 None(界面照旧显示原始最后一行)。
+/// 输入是命令的完整输出(stderr 在前)。
+pub fn pkg_error_hint(out: &str) -> Option<&'static str> {
+    let has = |s: &str| out.contains(s);
+    if has("Could not get lock") || has("dpkg frontend lock") || has("Waiting for cache lock") || has("Another app is currently holding the yum lock") || has("Waiting for process with pid") {
+        return Some("服务器上有别的包管理进程在运行(常见于开机后的自动更新),等几分钟再试");
+    }
+    if has("No space left on device") {
+        return Some("服务器磁盘空间不够,清理后再试");
+    }
+    if has("NO_PUBKEY") || has("GPG error") || has("signatures couldn't be verified") || has("GPG check FAILED") || has("public key is not installed") {
+        return Some("软件源的签名校验没通过,多半是源的密钥过期或没导入,先修好软件源再试");
+    }
+    if has("Cannot find a valid baseurl") || has("Cannot prepare internal mirrorlist") || has("Failed to download metadata for repo") {
+        return Some("软件源已经失效(CentOS 7/8 等停止维护的系统,官方镜像已下架),需要先把软件源换成可用的镜像,再重试");
+    }
+    if has("404  Not Found") || has("404 Not Found") || has("Unable to fetch some archives") {
+        return Some("软件源上的包已经下架或索引过期,多半是系统版本已结束支持(如 Debian 11、Ubuntu 18.04);先 apt-get update,仍不行就把软件源换成归档源或升级系统");
+    }
+    if has("Could not resolve host") || has("Temporary failure resolving") || has("Could not resolve '") || has("Name or service not known") || has("Temporary failure in name resolution") {
+        return Some("服务器解析不了软件源的域名,检查服务器的 DNS(工具箱「主机名与 DNS」)和网络");
+    }
+    if has("Connection timed out") || has("Network is unreachable") || has("Unable to connect to") || has("Could not connect to") || has("Connection refused") || has("Operation timed out") {
+        return Some("服务器连不上软件源,检查服务器能不能访问外网(防火墙、代理、安全组)");
+    }
+    if has("Unable to locate package") || has("No match for argument") || has("Unable to find a match") || has("has no installation candidate") {
+        return Some("软件源里没有这个包:先更新软件源;RHEL 系可能要先启用 EPEL 等额外仓库");
+    }
+    None
+}
+
+#[cfg(test)]
+mod pkg_hint_tests {
+    use super::pkg_error_hint;
+
+    #[test]
+    fn hints() {
+        let apt404 = "E: Failed to fetch http://deb.debian.org/debian-security/pool/x.deb  404  Not Found [IP: 1.2.3.4 80]\nE: Unable to fetch some archives, maybe run apt-get update or try with --fix-missing?";
+        assert!(pkg_error_hint(apt404).unwrap().contains("结束支持"));
+        assert!(pkg_error_hint("E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 123").unwrap().contains("别的包管理"));
+        assert!(pkg_error_hint("Errors during downloading metadata for repository 'base':\nError: Cannot find a valid baseurl for repo: base").unwrap().contains("已经失效"));
+        assert!(pkg_error_hint("Err:1 http://x InRelease\n  Temporary failure resolving 'deb.debian.org'").unwrap().contains("DNS"));
+        assert!(pkg_error_hint("E: Unable to locate package fail2ban").unwrap().contains("没有这个包"));
+        assert!(pkg_error_hint("sshd 配置校验失败,已还原").is_none());
+    }
+}
