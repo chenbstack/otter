@@ -45,6 +45,8 @@ pub(crate) struct DbMgr {
     pub(super) bk: Option<super::dbbackup::BackupDlg>,
     /// 新建用户弹窗、等用户确认删除的用户 (用户名, 主机)
     uform: Option<UserForm>,
+    /// 先改 pg_hba、成功后再接着跑的 SQL (tag, SQL)
+    next_sql: Option<(String, String)>,
     udrop_ask: Option<(String, String)>,
     /// 一次性结果弹窗的种类:0 数据库已创建,1 密码已重置,2 用户已创建
     done_kind: u8,
@@ -102,7 +104,14 @@ struct DbForm {
 #[derive(Clone)]
 struct UserForm {
     name: Entity<InputState>,
-    host: Entity<InputState>,
+    /// 授权 IP:MySQL 每行一个账号主机(默认 %),PostgreSQL 每行一个 IP 或网段(空 = 不限制)
+    ips: Entity<TextareaState>,
+    /// 打开时服务器上现有的;None = 还没读到(PostgreSQL 要读 pg_hba.conf)
+    ips_orig: Option<Vec<String>>,
+    /// 读回的 pg_hba.conf(PostgreSQL)
+    hba: Option<Result<String, String>>,
+    /// 读到后要填进输入框的文字,弹窗渲染时填
+    ips_fill: Option<String>,
     password: Entity<InputState>,
     /// 授权的库和各自的权限档位,空 = 不授权
     grants: Vec<dbinst::Grant>,
@@ -401,10 +410,58 @@ impl Home {
                 }
                 continue;
             }
+            if tag.starts_with("dbm:hba:") {
+                if let Some(f) = m.uform.as_mut() {
+                    let parsed = r.and_then(|o| crate::dbconf::parse_read(&o)).map(|(_, t)| t);
+                    if let (Ok(t), Some((u, _))) = (&parsed, &f.edit) {
+                        let ips = crate::dbconf::hba_ips(t, u);
+                        f.ips_fill = Some(if ips.is_empty() { "0.0.0.0/0".to_string() } else { ips.join("\n") });
+                        f.ips_orig = Some(ips);
+                    } else {
+                        f.ips_orig = Some(Vec::new());
+                    }
+                    f.hba = Some(parsed);
+                }
+                continue;
+            }
+            if tag.starts_with("dbm:hbawrite:") {
+                match r {
+                    Ok(o) if !o.trim_start().starts_with("ERR:") => match m.next_sql.take() {
+                        Some((t, sql)) => {
+                            if let (Some(inst), Some(d)) = (self.dbm_inst(), self.dbm_docker()) {
+                                d.db_run(&t, inst.kind.exec_args(&inst.container.name), Some(sql));
+                                self.dock.dbm.inflight.push(t);
+                            }
+                        }
+                        None => {
+                            m.busy = false;
+                            m.uform = None;
+                            m.form_err = None;
+                            m.users = None;
+                        }
+                    },
+                    Ok(o) => {
+                        m.busy = false;
+                        m.next_sql = None;
+                        m.pending = None;
+                        m.save_req = None;
+                        m.form_err = Some(o.trim_start().trim_start_matches("ERR:").trim().to_string());
+                    }
+                    Err(e) => {
+                        m.busy = false;
+                        m.next_sql = None;
+                        m.pending = None;
+                        m.save_req = None;
+                        m.form_err = Some(e);
+                    }
+                }
+                continue;
+            }
             if tag.starts_with("dbm:updateuser:") {
                 m.busy = false;
                 match r {
                     Ok(_) => {
+                        m.users = None;
                         m.uform = None;
                         m.form_err = None;
                     }
@@ -923,12 +980,14 @@ impl Home {
 
     fn dbm_open_uform(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("例如 app_user"));
-        let host = cx.new(|cx| InputState::new(window, cx).placeholder("%").default_value("%"));
+        let pg = self.dbm_inst().is_some_and(|i| i.kind == DbKind::Postgres);
+        let ips = cx.new(|cx| TextareaState::new(window, cx).placeholder(if pg { "一行一个 IP 或网段,如 203.0.113.5 或 10.0.0.0/8" } else { "一行一个主机,% 表示任意,也可以 10.0.0.% 或 localhost" }).rows(3));
+        ips.update(cx, |s, cx| s.set_value(if pg { "0.0.0.0/0" } else { "%" }, window, cx));
         let password = cx.new(|cx| InputState::new(window, cx).placeholder("密码").masked(true).default_value(crate::dbinstall::gen_password()));
         let fh = name.focus_handle(cx);
         window.focus(&fh, cx);
         let m = &mut self.dock.dbm;
-        m.uform = Some(UserForm { name, host, password, grants: Vec::new(), add_open: false, show_pw: false, save_pw: true, edit: None, orig: None });
+        m.uform = Some(UserForm { name, ips, ips_orig: (!pg).then(|| vec!['%'.to_string()]), hba: None, ips_fill: None, password, grants: Vec::new(), add_open: false, show_pw: false, save_pw: true, edit: None, orig: None });
         m.busy = false;
         m.form_err = None;
         cx.notify();
@@ -937,7 +996,19 @@ impl Home {
     /// 编辑已有用户的按库授权:先弹窗,现有授权在 `dbm_request_uform` 里读回来
     fn dbm_open_edit(&mut self, user: String, host: String, window: &mut Window, cx: &mut Context<Self>) {
         self.dbm_open_uform(window, cx);
+        let hosts: Vec<String> = match &self.dock.dbm.users {
+            Some(Ok(v)) => v.iter().filter(|u| u.name == user && !u.host.is_empty()).map(|u| u.host.clone()).collect(),
+            _ => Vec::new(),
+        };
+        let mysql = self.dbm_inst().is_some_and(|i| i.kind != DbKind::Postgres);
         if let Some(f) = self.dock.dbm.uform.as_mut() {
+            if mysql {
+                let hosts = if hosts.is_empty() { vec![host.clone()] } else { hosts };
+                f.ips.update(cx, |s, cx| s.set_value(&hosts.join("\n"), window, cx));
+                f.ips_orig = Some(hosts);
+            } else {
+                f.ips_orig = None;
+            }
             f.edit = Some((user, host));
         }
         if self.demo {
@@ -985,6 +1056,22 @@ impl Home {
                 self.dock.dbm.inflight.push(tag);
             }
         }
+        // PostgreSQL:读 pg_hba.conf(现有的来源限制、保存时要在它上面改)
+        let htag = format!("dbm:hba:{}", self.dock.dbm.cur);
+        if kind == DbKind::Postgres && self.dock.dbm.uform.as_ref().is_some_and(|f| f.hba.is_none()) && !self.dock.dbm.inflight.contains(&htag) {
+            match (crate::dbconf::read_script(kind, &inst.container.name, 1), self.dbm_docker()) {
+                (Ok(script), Some(d)) => {
+                    d.host_run(&htag, script, 30);
+                    self.dock.dbm.inflight.push(htag);
+                }
+                (Err(e), _) => {
+                    if let Some(f) = self.dock.dbm.uform.as_mut() {
+                        f.hba = Some(Err(e));
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     fn dbm_close_uform(&mut self, cx: &mut Context<Self>) {
@@ -992,86 +1079,146 @@ impl Home {
         cx.notify();
     }
 
-    /// 提交新建用户:可顺带授予一个库的全部权限
+    /// 提交新建/编辑用户。PostgreSQL 的来源限制写 pg_hba.conf,**先写它**再跑 SQL:写失败什么都没变,不会出现用户已建好却没有限制
     fn dbm_user_submit(&mut self, cx: &mut Context<Self>) {
         let Some(f) = self.dock.dbm.uform.clone() else { return };
         if self.dock.dbm.busy {
             return;
         }
         let Some(inst) = self.dbm_inst() else { return };
+        let pg = inst.kind == DbKind::Postgres;
+        let fail = |this: &mut Self, e: String, cx: &mut Context<Self>| {
+            this.dock.dbm.form_err = Some(e);
+            cx.notify();
+        };
+        let ips = match dbinst::parse_ips(inst.kind, &f.ips.read(cx).value()) {
+            Ok(v) => v,
+            Err(e) => return fail(self, e, cx),
+        };
+        if !pg && ips.is_empty() {
+            return fail(self, "至少要有一个允许连接的主机(% 表示任意)".into(), cx);
+        }
+        let ctr = inst.container.name.clone();
+        // (标记, SQL, 要先跑的 pg_hba 脚本)
+        let (tag, sql, hba): (String, String, Option<String>);
         if let Some((user, host)) = f.edit.clone() {
             // 编辑:拿读回来的授权和现在的比,只改有变化的
-            let Some(orig) = f.orig.clone() else { return };
-            let sql = match inst.kind.update_grants_sql(&user, &host, &orig, &f.grants) {
-                Ok(q) => q,
-                Err(e) => {
-                    self.dock.dbm.form_err = Some(e);
-                    cx.notify();
-                    return;
+            let (Some(orig), Some(ips_orig)) = (f.orig.clone(), f.ips_orig.clone()) else { return };
+            let mut q = String::new();
+            if pg {
+                match inst.kind.update_grants_sql(&user, &host, &orig, &f.grants) {
+                    Ok(v) => q = v,
+                    Err(e) => return fail(self, e, cx),
                 }
-            };
-            if sql.is_empty() || self.demo {
+                hba = if ips != ips_orig {
+                    match &f.hba {
+                        Some(Ok(t)) => match crate::dbconf::write_script(inst.kind, &ctr, 1, &crate::dbconf::hba_apply(t, &user, &ips)) {
+                            Ok(sc) => Some(sc),
+                            Err(e) => return fail(self, e, cx),
+                        },
+                        _ => return fail(self, "读不到 pg_hba.conf,没法改授权 IP".into(), cx),
+                    }
+                } else {
+                    None
+                };
+            } else {
+                hba = None;
+                let res: Result<String, String> = (|| {
+                    let mut q = String::new();
+                    if ips.contains(&host) {
+                        q += &inst.kind.update_grants_sql(&user, &host, &orig, &f.grants)?;
+                    }
+                    for h in ips.iter().filter(|h| !ips_orig.contains(h)) {
+                        q += &inst.kind.clone_account_sql(&user, &host, h)?;
+                        q += &inst.kind.grants_sql(&user, h, &f.grants)?;
+                    }
+                    for h in ips_orig.iter().filter(|h| !ips.contains(h)) {
+                        q += &inst.kind.drop_user_sql(&user, h)?;
+                    }
+                    Ok(q)
+                })();
+                match res {
+                    Ok(v) => q = v,
+                    Err(e) => return fail(self, e, cx),
+                }
+            }
+            if (q.is_empty() && hba.is_none()) || self.demo {
                 self.dock.dbm.uform = None;
                 cx.notify();
                 return;
             }
-            let tag = format!("dbm:updateuser:{}", inst.container.name);
-            if let Some(d) = self.dbm_docker() {
-                d.db_run(&tag, inst.kind.exec_args(&inst.container.name), Some(sql));
-                let m = &mut self.dock.dbm;
-                m.inflight.push(tag);
-                m.busy = true;
-                m.form_err = None;
-            }
-            cx.notify();
-            return;
-        }
-        let name = f.name.read(cx).value().trim().to_string();
-        let host = if inst.kind == DbKind::Postgres { String::new() } else { f.host.read(cx).value().trim().to_string() };
-        let pw = f.password.read(cx).value().to_string();
-        let req = if f.save_pw {
-            match dbsecret::key(&name, &host) {
-                Some(k) => Some((k, zeroize::Zeroizing::new(dbsecret::content(&name, &host, &pw)), false)),
-                None => {
-                    self.dock.dbm.form_err = Some("用户名或主机里有不能用于保存的字符(只支持字母、数字和 _ . % -),请改一下,或关掉「保存密码」".into());
-                    cx.notify();
-                    return;
-                }
-            }
+            tag = format!("dbm:updateuser:{ctr}");
+            sql = q;
         } else {
-            None
-        };
-        self.dock.dbm.done_save = DoneSave::No;
-        let sql = match inst.kind.create_user_with_grants_sql(&name, &host, &pw, &f.grants) {
-            Ok(q) => q,
-            Err(e) => {
-                self.dock.dbm.form_err = Some(e);
+            let name = f.name.read(cx).value().trim().to_string();
+            let host = if pg { String::new() } else { ips[0].clone() };
+            let pw = f.password.read(cx).value().to_string();
+            let req = if f.save_pw {
+                match dbsecret::key(&name, &host) {
+                    Some(k) => Some((k, zeroize::Zeroizing::new(dbsecret::content(&name, &host, &pw)), false)),
+                    None => return fail(self, "用户名或主机里有不能用于保存的字符(只支持字母、数字和 _ . % -),请改一下,或关掉「保存密码」".into(), cx),
+                }
+            } else {
+                None
+            };
+            let q = if pg {
+                inst.kind.create_user_with_grants_sql(&name, "", &pw, &f.grants)
+            } else {
+                ips.iter().try_fold(String::new(), |acc, h| inst.kind.create_user_with_grants_sql(&name, h, &pw, &f.grants).map(|x| acc + &x))
+            };
+            let q = match q {
+                Ok(q) => q,
+                Err(e) => return fail(self, e, cx),
+            };
+            hba = if pg && !ips.is_empty() {
+                match &f.hba {
+                    Some(Ok(t)) => match crate::dbconf::write_script(inst.kind, &ctr, 1, &crate::dbconf::hba_apply(t, &name, &ips)) {
+                        Ok(sc) => Some(sc),
+                        Err(e) => return fail(self, e, cx),
+                    },
+                    Some(Err(e)) => return fail(self, format!("读不到 pg_hba.conf,没法限制授权 IP:{e}"), cx),
+                    None => return fail(self, "正在读取 pg_hba.conf,稍等再试".into(), cx),
+                }
+            } else {
+                None
+            };
+            self.dock.dbm.done_save = DoneSave::No;
+            if self.demo {
+                let m = &mut self.dock.dbm;
+                m.uform = None;
+                m.done = Some((f.grants.iter().map(|g| g.db.as_str()).collect::<Vec<_>>().join(", "), name, pw));
+                m.done_kind = 2;
+                if let Some((k, _, _)) = req {
+                    m.saved.get_or_insert_with(Default::default).insert(k);
+                    m.done_save = DoneSave::Saved;
+                }
                 cx.notify();
                 return;
             }
-        };
-        if self.demo {
+            tag = format!("dbm:newuser:{ctr}");
+            sql = q;
             let m = &mut self.dock.dbm;
-            m.uform = None;
-            m.done = Some((f.grants.iter().map(|g| g.db.as_str()).collect::<Vec<_>>().join(", "), name, pw));
-            m.done_kind = 2;
-            if let Some((k, _, _)) = req {
-                m.saved.get_or_insert_with(Default::default).insert(k);
-                m.done_save = DoneSave::Saved;
-            }
-            cx.notify();
-            return;
-        }
-        let tag = format!("dbm:newuser:{}", inst.container.name);
-        if let Some(d) = self.dbm_docker() {
-            d.db_run(&tag, inst.kind.exec_args(&inst.container.name), Some(sql));
-            let m = &mut self.dock.dbm;
-            m.inflight.push(tag);
-            m.busy = true;
-            m.form_err = None;
             m.pending = Some((f.grants.iter().map(|g| g.db.as_str()).collect::<Vec<_>>().join(", "), name, pw));
             m.save_req = req;
         }
+        let Some(d) = self.dbm_docker() else { return };
+        let m_hba = hba.is_some();
+        match hba {
+            Some(script) => {
+                d.host_run(&format!("dbm:hbawrite:{ctr}"), script, 60);
+                let m = &mut self.dock.dbm;
+                m.inflight.push(format!("dbm:hbawrite:{ctr}"));
+                m.next_sql = (!sql.is_empty()).then(|| (tag.clone(), sql));
+            }
+            None => {
+                d.db_run(&tag, inst.kind.exec_args(&ctr), Some(sql));
+                self.dock.dbm.inflight.push(tag);
+            }
+        }
+        let m = &mut self.dock.dbm;
+        let _ = m_hba;
+        m.busy = true;
+        m.form_err = None;
         cx.notify();
     }
 
@@ -1133,11 +1280,37 @@ impl Home {
     }
 
     /// 「新建用户」弹窗:用户名、(MySQL)主机、密码,可选授权一个库
-    fn dbm_user_dialog(&mut self, _window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn dbm_user_dialog(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let f = self.dock.dbm.uform.clone()?;
         let inst = self.dbm_inst()?;
         let mysql = inst.kind != DbKind::Postgres;
         let busy = self.dock.dbm.busy;
+        // 读回来的现有授权 IP 填进输入框(要 &mut Window,放到本帧之后)
+        if let Some(txt) = self.dock.dbm.uform.as_mut().and_then(|f| f.ips_fill.take()) {
+            let a = f.ips.clone();
+            window.defer(cx, move |w, cx| a.update(cx, |s, cx| s.set_value(&txt, w, cx)));
+        }
+        let ips_loading = f.edit.is_some() && f.ips_orig.is_none() && !matches!(f.hba, Some(Err(_)));
+        let ips_box = {
+            let (label, hint) = if mysql {
+                ("允许连接的主机", "一行一个,% 表示任意。每个主机是一个独立账号,密码和权限相同".to_string())
+            } else {
+                ("允许连接的 IP", match &f.hba {
+                    Some(Err(e)) => format!("读不到 pg_hba.conf,不能设置:{e}"),
+                    _ => "一行一个 IP 或网段。0.0.0.0/0 表示授权所有(= 不限制,也可以留空)。只管 Otter 写的规则;经 Docker 端口映射进来时,PostgreSQL 看到的可能是网关地址".to_string(),
+                })
+            };
+            let area = div().h(px(72.0)).rounded(px(t::RADIUS_MD)).bg(c::field()).border_1().border_color(c::field_border()).text_size(px(t::TYPE_CONTROL)).child(Textarea::new(&f.ips).appearance(false).with_size(px(12.0 / 0.875)).h_full());
+            div()
+                .w_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(label))
+                .child(if ips_loading { div().py(px(8.0)).child(loading("正在读取现有授权 IP…")).into_any_element() } else { area.into_any_element() })
+                .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::ghost()).child(hint))
+        };
         let input = |i: &Entity<InputState>| div().flex_1().min_w_0().child(Input::new(i).appearance(false).with_size(px(12.0 / 0.875))).into_any_element();
         let col = |label: &'static str, inner: AnyElement| div().w_full().flex_none().child(super::composeedit::field_col_with(label, None, inner, false, false, None));
         let eye = super::syspages::tip(
@@ -1355,7 +1528,7 @@ impl Home {
             .when(busy, |d| d.opacity(0.6))
             .when(busy, |d| d.child(crate::ui::dot_spinner(("dbm-uf-spin", 0), c::on_accent())))
             .child(if f.edit.is_some() { if busy { "保存中" } else { "保存" } } else if busy { "创建中" } else { "创建" })
-            .when(f.edit.is_some() && f.orig.is_none(), |d| d.opacity(0.5))
+            .when(f.edit.is_some() && (f.orig.is_none() || ips_loading), |d| d.opacity(0.5))
             .on_click(cx.listener(|this, _, _, cx| this.dbm_user_submit(cx)));
         let body = div()
             .p(px(20.0))
@@ -1375,9 +1548,6 @@ impl Home {
                     .into_any_element()],
                 None => {
                     let mut v = vec![col("用户名", input(&f.name)).into_any_element()];
-                    if mysql {
-                        v.push(col("允许连接的主机(% 表示任意)", input(&f.host)).into_any_element());
-                    }
                     v.push(col("密码", pw_inner).into_any_element());
                     v.push(
                         Self::dbm_save_card(
@@ -1394,6 +1564,7 @@ impl Home {
                     v
                 }
             })
+            .child(ips_box)
             .child(if f.edit.is_some() && f.orig.is_none() && self.dock.dbm.form_err.is_none() { div().py(px(12.0)).child(loading("正在读取现有权限…")).into_any_element() } else { grant.into_any_element() })
             .child(
                 div()
@@ -1401,7 +1572,7 @@ impl Home {
                     .flex_row()
                     .items_center()
                     .gap(px(10.0))
-                    .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CAPTION)).text_color(if err.is_some() { c::danger() } else { c::ghost() }).child(err.unwrap_or_else(|| if f.edit.is_some() { "只改有变化的库的权限".into() } else { if f.save_pw { "创建后会显示一次密码,也已保存到服务器".into() } else { "密码只在创建成功后显示一次".into() } })))
+                    .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CAPTION)).text_color(if err.is_some() { c::danger() } else { c::ghost() }).child(err.unwrap_or_else(|| if f.edit.is_some() { "只改有变化的授权 IP 和库权限".into() } else { if f.save_pw { "创建后会显示一次密码,也已保存到服务器".into() } else { "密码只在创建成功后显示一次".into() } })))
                     .child(button("dbm-uf-cancel", IconName::X, "取消").on_click(cx.listener(|this, _, _, cx| this.dbm_close_uform(cx))))
                     .child(ok),
             );

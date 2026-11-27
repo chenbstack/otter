@@ -1373,6 +1373,9 @@ impl Home {
     }
 
     fn web_install_card(&self, st: &WebState, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(e) = self.api_job_empty(IconName::Globe, |id| id == "openresty", cx) {
+            return e;
+        }
         let blocker = st.install_blocker();
         let busy = self.web_ui().busy.is_some() || self.web_ui().job.is_some();
         let (desc, warn) = match (&blocker, st.panel.is_some()) {

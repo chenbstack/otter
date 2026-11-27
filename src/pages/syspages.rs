@@ -261,7 +261,7 @@ impl Home {
             Kind::Storage => keep_old(&mut s.storage, res.and_then(|t| sysops::parse_storage(&t))),
             Kind::Cron => keep_old(&mut s.cron, res.map(|t| sysops::parse_cron(&t))),
             Kind::Firewall => keep_old(&mut s.fw, res.map(|t| crate::firewall::parse(&t))),
-            Kind::ToolPorts | Kind::ToolNet | Kind::ToolTime | Kind::ToolSwap => self.tool_loaded(kind, res),
+            Kind::ToolPorts | Kind::ToolNet | Kind::ToolTime | Kind::ToolSwap | Kind::ToolHost | Kind::ToolSysctl | Kind::ToolSsh | Kind::ToolUsers | Kind::ToolF2b => self.tool_loaded(kind, res),
             Kind::Web => self.web_loaded(res, cx),
             Kind::WebOp => self.web_op_done(res, cx),
             Kind::WebPoll => self.web_polled(res, cx),
@@ -468,7 +468,7 @@ impl Home {
             Page::Websites => Some(self.web_subtitle()),
             Page::Cron => Some(format!("{n} 上的 crontab 和 systemd 定时器;只能改自己的 crontab")),
             Page::Firewall => Some(self.fw_subtitle()),
-            Page::Toolbox => Some(format!("{n} 上的常用小工具:端口检查、网络诊断、时间与时区、Swap")),
+            Page::Toolbox => Some(format!("{n} 上的常用小工具:端口检查、网络诊断、时间与时区、Swap、主机名、内核参数、SSH 与用户安全、fail2ban")),
             _ => None,
         }
     }

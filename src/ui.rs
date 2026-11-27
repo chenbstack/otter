@@ -43,6 +43,8 @@ pub mod c {
     pub fn dialog() -> Rgba { rgb(0x15141F) }
     /// 半透明的弹窗底(确认框用):和节点卡片同一色系的靛紫,约 93% 不透明,隐约透出下层
     pub fn dialog_glass() -> Rgba { rgba(0x1C1B32EE) }
+    /// 抽屉底:不透明的深墨紫,比弹窗底再偏黑
+    pub fn drawer() -> Rgba { rgb(0x111019) }
     pub fn dialog_border() -> Rgba { rgba(0x9A94E02A) }
     pub fn line() -> Rgba { rgba(0x9A94E016) }
     pub fn field() -> Rgba { rgba(0x9A94E00A) }
@@ -404,7 +406,7 @@ fn modal_panel(
 }
 
 /// 抽屉组件:铺满整个窗口(含标题栏)的遮罩 + 靠右的整高面板。
-/// - 面板底色是应用底色 `bg`,并铺一层和窗口一样的光团 `backdrop`,看起来和应用本身是同一块;左边一条描边加阴影和遮罩区分;
+/// - 面板底色是不透明的深墨紫 `surface.drawer`,纯色、不铺光团;左边不画描边,只靠 `shadow.drawer`(偏移 -14,0,模糊 36,黑 45%)和遮罩区分;
 /// - 点遮罩调用 `on_close`,点面板本身不会关闭;
 /// - 面板宽 `width`,内容用 flex 纵向排(`content` 里自己的区域用 `flex_1().min_h_0()` 撑满、自己滚动)。
 /// 必须作为根元素靠后的子元素渲染,盖在最上层。
@@ -437,12 +439,9 @@ pub fn drawer(
                 .w(px(width))
                 .flex()
                 .flex_col()
-                .bg(c::bg())
-                .border_l_1()
-                .border_color(c::dialog_border())
-                .shadow_lg()
+                .bg(c::drawer())
+                .shadow(vec![::gpui::BoxShadow { color: ::gpui::Hsla::from(rgba(0x00000073)), offset: point(px(-14.0), px(0.0)), blur_radius: px(36.0), spread_radius: px(0.0), inset: false }])
                 .on_click(|_, _, cx| cx.stop_propagation())
-                .child(backdrop())
                 .children(content),
         )
 }

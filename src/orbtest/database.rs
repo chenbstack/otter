@@ -47,6 +47,55 @@ fn wait<T>(what: &str, secs: u64, mut f: impl FnMut() -> Option<T>) -> T {
     }
 }
 
+/// 授权 IP:MySQL/MariaDB 按主机克隆/删除账号,PostgreSQL 写 pg_hba.conf 的 Otter 块
+fn user_ips(vm: &Vm, c: &Case) {
+    let k = c.kind;
+    let pw = "Ip-pw-12345";
+    if k == DbKind::Postgres {
+        let read = |vm: &Vm| {
+            let o = vm.exec("读 pg_hba", &crate::dbconf::read_script(k, c.ctr, 1).unwrap());
+            crate::dbconf::parse_read(&o).unwrap().1
+        };
+        sql_ok(vm, c, &k.create_user_with_grants_sql("ipuser", "", pw, &[]).unwrap());
+        let try_login = |vm: &Vm| vm.run(&format!("docker exec -e PGPASSWORD={pw} {} psql -h 127.0.0.1 -U ipuser -d postgres -tAc 'select 1' 2>&1", c.ctr));
+        assert_eq!(try_login(vm).1.trim(), "1", "没限制时应能连");
+        // 只放行 10.0.0.0/8:本机 127.0.0.1 被拒
+        let set = |vm: &Vm, ips: &[&str]| {
+            let ips: Vec<String> = ips.iter().map(|s| s.to_string()).collect();
+            let text = crate::dbconf::hba_apply(&read(vm), "ipuser", &ips);
+            let o = vm.exec("写 pg_hba", &crate::dbconf::write_script(k, c.ctr, 1, &text).unwrap());
+            assert!(o.trim().ends_with("OK"), "{o}");
+        };
+        set(vm, &["10.0.0.0/8"]);
+        assert_eq!(crate::dbconf::hba_ips(&read(vm), "ipuser"), ["10.0.0.0/8"]);
+        let (_, o) = try_login(vm);
+        assert!(o.contains("pg_hba.conf") || o.contains("no pg_hba"), "应被拒:{o}");
+        // 别的用户不受影响
+        let o = vm.sh(&format!("docker exec -e PGPASSWORD=Orbtest-pw-1 {} psql -h 127.0.0.1 -U postgres -tAc 'select 1' 2>&1", c.ctr));
+        assert_eq!(o.trim(), "1", "{o}");
+        // 加上 127.0.0.1 后能连;清空后回到原文
+        set(vm, &["10.0.0.0/8", "127.0.0.1/32"]);
+        assert_eq!(try_login(vm).1.trim(), "1");
+        set(vm, &[]);
+        assert!(crate::dbconf::hba_ips(&read(vm), "ipuser").is_empty());
+        assert!(!read(vm).contains("otter:begin"));
+        sql_ok(vm, c, &k.drop_user_sql("ipuser", "").unwrap());
+    } else {
+        sql_ok(vm, c, &k.create_user_with_grants_sql("ipuser", "%", pw, &[]).unwrap());
+        sql_ok(vm, c, &k.clone_account_sql("ipuser", "%", "10.9.9.%").unwrap());
+        let o = sql_ok(vm, c, "select host from mysql.user where user='ipuser' order by host;");
+        assert_eq!(o.lines().map(str::trim).collect::<Vec<_>>(), vec!["%", "10.9.9.%"], "{o}");
+        // 两个账号的密码哈希一样
+        let o = sql_ok(vm, c, "select count(distinct authentication_string) from mysql.user where user='ipuser';");
+        assert_eq!(o.trim(), "1", "克隆出的账号密码哈希应相同");
+        // 源账号不存在时整段中止
+        let (code, _) = sql(vm, c, &k.clone_account_sql("ipuser", "nohost", "1.1.1.1").unwrap());
+        assert_ne!(code, 0);
+        sql_ok(vm, c, &k.drop_user_sql("ipuser", "10.9.9.%").unwrap());
+        sql_ok(vm, c, &k.drop_user_sql("ipuser", "%").unwrap());
+    }
+}
+
 fn run_case(d: Distro, c: Case) {
     let vm = Vm::shared(d, "otter", RESET);
     let k = c.kind;
@@ -120,6 +169,8 @@ fn run_case(d: Distro, c: Case) {
     let o = vm.exec("删备份", &backup_delete_script(c.ctr, &f.name).unwrap());
     assert!(!o.contains("ERR"), "{o}");
     assert!(!backups(&vm, &c, "shop").files.iter().any(|x| x.name == f.name));
+
+    user_ips(&vm, &c);
 
     // 删库、删用户
     sql_ok(&vm, &c, &k.drop_db_sql("shop").unwrap());

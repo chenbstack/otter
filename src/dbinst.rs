@@ -168,6 +168,33 @@ pub fn valid_host(s: &str) -> bool {
     !s.is_empty() && s.len() <= 60 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '%' | ':' | '-' | '_'))
 }
 
+/// 弹窗里「授权 IP」多行输入 → 去重后的列表。MySQL 每行是账号的主机部分(`%`、IP、`10.0.0.%`、域名);
+/// PostgreSQL 每行是 IP 或网段,单个 IP 补成 /32、/128。空行忽略。
+pub fn parse_ips(kind: DbKind, text: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        // PostgreSQL:任意来源(0.0.0.0/0、::/0、all、*)就是不限制,整个列表当作空
+        if kind == DbKind::Postgres && matches!(l.to_lowercase().as_str(), "0.0.0.0/0" | "::/0" | "all" | "*") {
+            return Ok(Vec::new());
+        }
+        let v = if kind == DbKind::Postgres {
+            if !crate::toolbox::common::valid_ip_or_cidr(l) {
+                return Err(format!("「{l}」不是有效的 IP 或网段(如 203.0.113.5 或 10.0.0.0/8)"));
+            }
+            if l.contains('/') { l.to_string() } else if l.contains(':') { format!("{l}/128") } else { format!("{l}/32") }
+        } else {
+            if !valid_host(l) {
+                return Err(format!("「{l}」不是有效的主机(只能用字母、数字和 . % : - _)"));
+            }
+            l.to_string()
+        };
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    Ok(out)
+}
+
 pub fn valid_password(s: &str) -> Result<(), String> {
     if s.is_empty() {
         return Err("密码不能为空".into());
@@ -356,6 +383,19 @@ impl DbKind {
             }
             DbKind::Redis => return Err("Redis 不在这里管理用户".into()),
         })
+    }
+
+    /// MySQL/MariaDB:照 `user@src` 的密码哈希新建 `user@host`(经预处理语句拼 CREATE USER,哈希用 QUOTE 转义;`src` 不存在时 PREPARE 失败,整段 SQL 中止)
+    pub fn clone_account_sql(self, user: &str, src: &str, host: &str) -> Result<String, String> {
+        if self == DbKind::Postgres || self == DbKind::Redis {
+            return Err("只有 MySQL/MariaDB 按主机区分账号".into());
+        }
+        if !valid_ident(user) || !valid_host(src) || !valid_host(host) {
+            return Err("用户名或主机里有不支持的字符".into());
+        }
+        Ok(format!(
+            "SELECT CONCAT('CREATE USER ''{user}''@''{host}'' IDENTIFIED WITH ', plugin, ' AS ', QUOTE(authentication_string)) INTO @otter_s FROM mysql.user WHERE User = '{user}' AND Host = '{src}';\nPREPARE otter_p FROM @otter_s;\nEXECUTE otter_p;\nDEALLOCATE PREPARE otter_p;\n"
+        ))
     }
 
     /// 新建用户并按列表授权(每个库一档权限;只对现有的库授权,以后新建的库不会自动授权)
@@ -1253,6 +1293,25 @@ mod tests {
         assert_eq!(DbKind::Postgres.create_db_sql("shop", "app").unwrap(), "CREATE DATABASE \"shop\" OWNER \"app\";\n");
         assert_eq!(DbKind::Mysql.drop_user_sql("app", "%").unwrap(), "DROP USER 'app'@'%';\n");
         assert!(DbKind::Redis.create_db_sql("x", "").is_err());
+    }
+
+    #[test]
+    fn parses_ip_lines() {
+        assert_eq!(parse_ips(DbKind::Postgres, "1.2.3.4
+ 10.0.0.0/8 
+
+1.2.3.4/32
+::1").unwrap(), ["1.2.3.4/32", "10.0.0.0/8", "::1/128"]);
+        assert!(parse_ips(DbKind::Postgres, "1.2.3").is_err());
+        assert!(parse_ips(DbKind::Postgres, "10.0.0.0/8\n0.0.0.0/0").unwrap().is_empty());
+        assert!(parse_ips(DbKind::Postgres, "all").unwrap().is_empty());
+        assert!(parse_ips(DbKind::Postgres, "1.2.3.4/33").is_err());
+        assert_eq!(parse_ips(DbKind::Mysql, "%\n10.0.0.%\nlocalhost\n%").unwrap(), ["%", "10.0.0.%", "localhost"]);
+        assert!(parse_ips(DbKind::Mysql, "a'b").is_err());
+        assert!(parse_ips(DbKind::Mysql, "").unwrap().is_empty());
+        let q = DbKind::Mysql.clone_account_sql("app", "%", "10.0.0.%").unwrap();
+        assert!(q.contains("PREPARE otter_p") && q.contains("Host = '%'") && q.contains("''app''@''10.0.0.%''"));
+        assert!(DbKind::Mysql.clone_account_sql("a'b", "%", "x").is_err());
     }
 
     #[test]

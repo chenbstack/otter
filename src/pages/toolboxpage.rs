@@ -22,17 +22,29 @@ pub(crate) enum Tool {
     Net,
     Time,
     Swap,
+    Host,
+    Sysctl,
+    Keys,
+    Ssh,
+    Users,
+    Fail2ban,
 }
 
 impl Tool {
-    const ALL: [Tool; 4] = [Tool::Ports, Tool::Net, Tool::Time, Tool::Swap];
+    const ALL: [Tool; 10] = [Tool::Ports, Tool::Net, Tool::Time, Tool::Swap, Tool::Host, Tool::Sysctl, Tool::Keys, Tool::Ssh, Tool::Users, Tool::Fail2ban];
 
-    fn title(self) -> &'static str {
+    pub(super) fn title(self) -> &'static str {
         match self {
             Tool::Ports => "端口检查",
             Tool::Net => "网络诊断",
             Tool::Time => "时间与时区",
             Tool::Swap => "Swap",
+            Tool::Host => "主机名与 hosts/DNS",
+            Tool::Sysctl => "内核参数",
+            Tool::Keys => "SSH 公钥",
+            Tool::Ssh => "SSH 安全设置",
+            Tool::Users => "用户与 sudo",
+            Tool::Fail2ban => "fail2ban",
         }
     }
 
@@ -42,24 +54,41 @@ impl Tool {
             Tool::Net => "ping、路由追踪、DNS 解析、TCP 连通性、出口公网 IP",
             Tool::Time => "服务器时间和本机的差、时区、自动对时",
             Tool::Swap => "查看、创建、调整、停用和删除 swap,设置 swappiness",
+            Tool::Host => "改主机名、编辑 /etc/hosts、设置 DNS 服务器",
+            Tool::Sysctl => "转发、BBR、syncookies、连接数上限等常用开关",
+            Tool::Keys => "查看、添加、删除用户的 authorized_keys 公钥",
+            Tool::Ssh => "端口、root 登录、密码登录、尝试次数,改错自动回滚",
+            Tool::Users => "新建、删除、锁定用户,改密码,授予 sudo",
+            Tool::Fail2ban => "封禁暴力破解的 IP、白名单、解封;没装时可一键安装",
         }
     }
 
-    fn icon(self) -> IconName {
+    pub(super) fn icon(self) -> IconName {
         match self {
             Tool::Ports => IconName::Plug,
             Tool::Net => IconName::Network,
             Tool::Time => IconName::Clock,
             Tool::Swap => IconName::MemoryStick,
+            Tool::Host => IconName::Globe,
+            Tool::Sysctl => IconName::SlidersHorizontal,
+            Tool::Keys => IconName::KeyRound,
+            Tool::Ssh => IconName::ShieldCheck,
+            Tool::Users => IconName::Users,
+            Tool::Fail2ban => IconName::Ban,
         }
     }
 
-    fn kind(self) -> Kind {
+    pub(super) fn kind(self) -> Kind {
         match self {
             Tool::Ports => Kind::ToolPorts,
             Tool::Net => Kind::ToolNet,
             Tool::Time => Kind::ToolTime,
             Tool::Swap => Kind::ToolSwap,
+            Tool::Host => Kind::ToolHost,
+            Tool::Sysctl => Kind::ToolSysctl,
+            Tool::Keys | Tool::Ssh => Kind::ToolSsh,
+            Tool::Users => Kind::ToolUsers,
+            Tool::Fail2ban => Kind::ToolF2b,
         }
     }
 }
@@ -90,7 +119,8 @@ impl NetKind {
 
 #[derive(Default)]
 pub(crate) struct ToolUi {
-    tool: Option<Tool>,
+    pub(super) more: super::toolmore::MoreUi,
+    pub(super) tool: Option<Tool>,
     // 端口检查
     ports: Option<Result<Vec<toolbox::Listen>, String>>,
     port_in: Option<Entity<InputState>>,
@@ -133,15 +163,15 @@ fn level_style(l: Level) -> (IconName, Rgba) {
     }
 }
 
-fn card() -> Div {
+pub(super) fn card() -> Div {
     div().flex_shrink_0().flex().flex_col().gap(px(10.0)).p(px(16.0)).rounded(px(t::RADIUS_LG)).border_1().border_color(c::dialog_border())
 }
 
-fn section(title: &'static str) -> Div {
+pub(super) fn section(title: &'static str) -> Div {
     div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).child(title)
 }
 
-fn mono_text(s: impl Into<SharedString>) -> Div {
+pub(super) fn mono_text(s: impl Into<SharedString>) -> Div {
     div().text_size(px(t::TYPE_CONTROL)).font_family(MONO).text_color(c::muted()).child(s.into())
 }
 
@@ -194,13 +224,14 @@ impl Home {
             return;
         }
         let got: Vec<(Kind, Result<String, String>)> = match self.sys_docker() {
-            Some(d) => [Kind::ToolPorts, Kind::ToolNet, Kind::ToolTime, Kind::ToolSwap, Kind::Firewall].into_iter().filter_map(|k| d.sys_take(k).map(|r| (k, r))).collect(),
+            Some(d) => [Kind::ToolPorts, Kind::ToolNet, Kind::ToolTime, Kind::ToolSwap, Kind::ToolHost, Kind::ToolSysctl, Kind::ToolSsh, Kind::ToolUsers, Kind::ToolF2b, Kind::Firewall].into_iter().filter_map(|k| d.sys_take(k).map(|r| (k, r))).collect(),
             None => return,
         };
         for (k, r) in got {
             self.sys_store(k, r, window, cx);
         }
         let Some(tool) = self.dock.sys.tool.tool else { return };
+        self.more_sync(window, cx);
         if tool == Tool::Net {
             let t = &self.dock.sys.tool;
             if t.net_kind == NetKind::PublicIp && t.nics.is_none() && t.net_running.is_none() && !self.dock.sys.inflight.contains(&Kind::ToolNet) {
@@ -218,12 +249,13 @@ impl Home {
             Some(t) => window.is_window_active() && t.elapsed() >= Duration::from_secs(crate::prefs::page_secs()) && s.tool.swap_resize.is_none(),
         };
         if due && !s.inflight.contains(&kind) {
-            let (script, root) = match tool {
-                Tool::Ports => (toolbox::PORTS_SCRIPT, true),
-                Tool::Time => (toolbox::TIME_SCRIPT, false),
-                _ => (toolbox::SWAP_SCRIPT, true),
+            let (script, root): (String, bool) = match tool {
+                Tool::Ports => (toolbox::PORTS_SCRIPT.to_string(), true),
+                Tool::Time => (toolbox::TIME_SCRIPT.to_string(), false),
+                Tool::Swap => (toolbox::SWAP_SCRIPT.to_string(), true),
+                other => other.read_script().unwrap_or_default(),
             };
-            self.sys_ask(kind, script, root);
+            self.sys_ask(kind, &script, root);
             // 端口诊断要看防火墙:进页读一次
             if tool == Tool::Ports && self.dock.sys.fw.is_none() && !self.dock.sys.inflight.contains(&Kind::Firewall) {
                 self.sys_ask(Kind::Firewall, crate::firewall::READ_SCRIPT, true);
@@ -234,6 +266,7 @@ impl Home {
     pub(super) fn tool_loaded(&mut self, kind: Kind, res: Result<String, String>) {
         let t = &mut self.dock.sys.tool;
         match kind {
+            Kind::ToolHost | Kind::ToolSysctl | Kind::ToolSsh | Kind::ToolUsers | Kind::ToolF2b => self.more_loaded(kind, res),
             Kind::ToolPorts => {
                 let r = res.map(|s| toolbox::parse_listens(&s));
                 if r.is_ok() || !matches!(t.ports, Some(Ok(_))) {
@@ -273,10 +306,15 @@ impl Home {
         t.tool = tool;
         t.diag = None;
         t.swap_resize = None;
+        self.more_reset_forms();
         if let Some(tl) = tool {
             self.dock.sys.asked.remove(&tl.kind());
         }
         cx.notify();
+    }
+
+    pub(super) fn tool_notice_pub(&mut self, msg: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.tool_notice(msg, cx)
     }
 
     fn tool_notice(&mut self, msg: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -313,6 +351,12 @@ impl Home {
             Tool::Net => self.net_tool(cx),
             Tool::Time => self.time_tool(cx),
             Tool::Swap => self.swap_tool(cx),
+            Tool::Host => self.host_tool(cx),
+            Tool::Sysctl => self.sysctl_tool(cx),
+            Tool::Keys => self.keys_tool(cx),
+            Tool::Ssh => self.ssh_tool(cx),
+            Tool::Users => self.users_tool(cx),
+            Tool::Fail2ban => self.f2b_tool(cx),
         };
         div().flex_grow(1.0).flex_shrink_0().pb(px(14.0)).flex().flex_col().gap(px(12.0)).child(head_row).child(body).into_any_element()
     }
@@ -956,8 +1000,16 @@ impl Home {
             }
             Ok("time") => t.tool = Some(Tool::Time),
             Ok("swap") => t.tool = Some(Tool::Swap),
+            Ok("host") => t.tool = Some(Tool::Host),
+            Ok("sysctl") => t.tool = Some(Tool::Sysctl),
+            Ok("keys") => t.tool = Some(Tool::Keys),
+            Ok("ssh") => t.tool = Some(Tool::Ssh),
+            Ok("users") => t.tool = Some(Tool::Users),
+            Ok("f2b") => t.tool = Some(Tool::Fail2ban),
             _ => {}
         }
+        self.more_demo();
+        let t = &mut self.dock.sys.tool;
         if t.tool == Some(Tool::Ports) {
             let listens = toolbox::parse_listens("tcp LISTEN 0 4096 127.0.0.1:5432 0.0.0.0:* users:((\"postgres\",pid=900,fd=5))\n");
             t.diag = Some((5432, "tcp".into(), toolbox::diagnose(5432, "tcp", &listens, &[], None)));

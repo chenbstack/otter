@@ -6,6 +6,13 @@
 use crate::docker::Container;
 use crate::firewall::{self, Action as FwAction, FwInfo};
 
+pub mod common;
+pub mod fail2ban;
+pub mod host;
+pub mod ssh;
+pub mod sysctl;
+pub mod users;
+
 const PATH_FIX: &str = "PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH\n";
 
 /// 脚本里按需加超时:有 `timeout` 就用,没有就直接跑

@@ -71,6 +71,10 @@ impl Home {
         let cur = self.db_tab.min(DB_TABS.len() - 1);
         let list: Vec<DbInstance> = all.into_iter().filter(|d| DB_TABS[cur].1.contains(&d.kind)).collect();
         if list.is_empty() {
+            let ids: &[&str] = match cur { 1 => &["mysql", "mariadb"], 2 => &["redis"], _ => &["postgres"] };
+            if let Some(e) = self.api_job_empty(IconName::Database, |id| ids.contains(&id), cx) {
+                return e;
+            }
             return div().flex_1().flex().flex_col().child(empty(IconName::Database, "没有这类数据库")
                     .desc("这台服务器上没有运行这类数据库容器")
                     .action(button("db-install", IconName::Plus, "安装数据库").on_click(cx.listener(|this, _, window, cx| { let id = match this.db_tab { 1 => "mysql", 2 => "redis", _ => "postgres" }; this.api_open(id, window, cx) })))).into_any_element();

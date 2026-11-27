@@ -16,6 +16,7 @@ pub mod cronform;
 pub mod mountform;
 pub mod firewallpage;
 pub mod toolboxpage;
+pub mod toolmore;
 pub mod ctpanel;
 pub mod composeedit;
 pub mod spacelens;

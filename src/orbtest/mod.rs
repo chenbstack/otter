@@ -52,6 +52,7 @@ mod mounts;
 mod provision;
 mod system;
 mod toolbox;
+mod toolmore;
 mod web;
 
 pub use harness::{gate, gate_slow, Distro, Lease, Vm};

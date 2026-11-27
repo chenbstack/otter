@@ -302,7 +302,7 @@ impl Home {
                 // 脚本里排了定时回滚:做完后由本机检查新连接,连得上才取消回滚
                 if job.script.contains(firewall::GUARD_MARK) {
                     let (_, host, port) = crate::ctl::split_user_host(&self.node().user_host);
-                    job.guard = Some(crate::sysops::Guard { host, port, secs: firewall::GUARD_SECS, cancel: firewall::guard_cancel() });
+                    job.guard = Some(crate::sysops::Guard { host, port, secs: firewall::GUARD_SECS, cancel: firewall::guard_cancel(), what: "防火墙".into() });
                 }
                 self.ask(DockAsk { title, tile: IconName::Shield, name: name.clone(), detail: "防火墙", body, label: verb, action: DockAction::Sys(job), list }, cx)
             }

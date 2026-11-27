@@ -98,6 +98,76 @@ echo OK
     ))
 }
 
+/// pg_hba.conf 里 Otter 给某个用户写的来源限制,夹在这两行标记之间
+fn hba_marks(user: &str) -> (String, String) {
+    (format!("# otter:begin user={user}"), format!("# otter:end user={user}"))
+}
+
+/// 读出 Otter 给 `user` 写的允许来源(规范化后的 IP/网段),没有限制返回空
+pub fn hba_ips(text: &str, user: &str) -> Vec<String> {
+    let (b, e) = hba_marks(user);
+    let mut on = false;
+    let mut out = Vec::new();
+    for l in text.lines().map(str::trim) {
+        if l == b {
+            on = true;
+        } else if l == e {
+            on = false;
+        } else if on {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() >= 5 && f[0] == "host" && f[4] != "reject" && f[3] != "all" {
+                out.push(f[3].to_string());
+            }
+        }
+    }
+    out
+}
+
+/// 认证方式:跟着文件里现有的 host 规则走(md5 / scram-sha-256),找不到用 scram-sha-256
+fn hba_method(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            (f.len() >= 5 && f[0] == "host" && f[1] == "all" && f[2] == "all" && matches!(f[4], "md5" | "scram-sha-256" | "password")).then(|| f[4].to_string())
+        })
+        .next()
+        .unwrap_or_else(|| "scram-sha-256".into())
+}
+
+/// 把 `user` 的来源限制改成 `ips`(空 = 去掉限制):旧的 Otter 块删掉,新块放在文件最前(pg_hba 先匹配先生效)。
+/// 块内:每个允许的来源一条 host 规则,最后一条把这个用户的其它 TCP 来源拒绝。本地套接字(type local)不受影响。
+pub fn hba_apply(text: &str, user: &str, ips: &[String]) -> String {
+    let (b, e) = hba_marks(user);
+    let mut rest: Vec<&str> = Vec::new();
+    let mut skip = false;
+    for l in text.lines() {
+        let t = l.trim();
+        if t == b {
+            skip = true;
+        } else if t == e {
+            skip = false;
+        } else if !skip {
+            rest.push(l);
+        }
+    }
+    let mut out = String::new();
+    if !ips.is_empty() {
+        let m = hba_method(text);
+        out += &format!("{b}\n");
+        for ip in ips {
+            out += &format!("host all \"{user}\" {ip} {m}\n");
+        }
+        out += &format!("host all \"{user}\" all reject\n{e}\n");
+    }
+    out += &rest.join("\n");
+    if !rest.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
 /// 把已装实例(Otter 创建的,带 `otter.managed=db` 标签)的 `conf.d` 挂到主机:在 compose 里加 `./conf:/etc/mysql/conf.d`,
 /// 先把容器里现有的 `otter.cnf` 拷到 `./conf`,再 `up -d` 重建容器(数据在 `./data` 不丢,会重启一次);起不来就还原 compose。输出 `OK` 或 `ERR:原因`
 pub fn mount_script(container: &str) -> Result<String, String> {
@@ -131,6 +201,25 @@ echo OK
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hba_block() {
+        let base = "# header\nlocal all all trust\nhost all all all scram-sha-256\n";
+        let ips = vec!["10.0.0.0/8".to_string(), "1.2.3.4/32".to_string()];
+        let t = hba_apply(base, "app", &ips);
+        assert!(t.starts_with("# otter:begin user=app\nhost all \"app\" 10.0.0.0/8 scram-sha-256\n"));
+        assert!(t.contains("host all \"app\" all reject\n# otter:end user=app\n# header"));
+        assert_eq!(hba_ips(&t, "app"), ips);
+        assert!(hba_ips(&t, "other").is_empty());
+        // 再改一次:旧块被替换,其它用户的块不动
+        let t2 = hba_apply(&t, "bob", &["5.5.5.5/32".to_string()]);
+        let t3 = hba_apply(&t2, "app", &["9.9.9.9/32".to_string()]);
+        assert_eq!(hba_ips(&t3, "app"), ["9.9.9.9/32"]);
+        assert_eq!(hba_ips(&t3, "bob"), ["5.5.5.5/32"]);
+        // 清空 = 回到原文
+        assert_eq!(hba_apply(&hba_apply(base, "app", &ips), "app", &[]), base);
+        assert_eq!(hba_method("host all all all md5\n"), "md5");
+    }
 
     #[test]
     fn read_parse() {

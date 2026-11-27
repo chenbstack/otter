@@ -26,6 +26,12 @@ pub enum Kind {
     ToolNet,
     ToolTime,
     ToolSwap,
+    /// 工具箱新增:主机名与 hosts/DNS、内核参数、SSH(设置和公钥共用)、用户、fail2ban
+    ToolHost,
+    ToolSysctl,
+    ToolSsh,
+    ToolUsers,
+    ToolF2b,
     /// 堆栈的 compose 文件内容
     ComposeFile,
     /// 堆栈的 env 文件内容
@@ -41,6 +47,8 @@ pub struct Guard {
     /// 服务器上回滚前等多少秒
     pub secs: u32,
     pub cancel: String,
+    /// 回滚的是什么,用在提示里:「防火墙」「SSH 设置」
+    pub what: String,
 }
 
 /// 一次要在服务器上执行的操作(结束进程、重启服务、保存 crontab……),完成后可以顺带重读一份数据

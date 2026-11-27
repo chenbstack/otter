@@ -1820,12 +1820,12 @@ async fn guard_check(r: &Runner, sh: &Shared, g: &crate::sysops::Guard, done: St
     }
     if !ok {
         logs::push(logs::Level::Warn, "服务器", format!("{addr} 新建连接失败,等待服务器自动回滚"));
-        return format!("{done}。但新连接连不上 {addr},服务器会在 {} 秒内自动回滚防火墙", g.secs);
+        return format!("{done}。但新连接连不上 {addr},服务器会在 {} 秒内自动回滚{}", g.secs, g.what);
     }
     set_progress(sh, Some("正在取消自动回滚".into()));
     match sys_exec(r, &g.cancel, true, None, Duration::from_secs(20)).await {
         Ok(o) if o.code == 0 => format!("{done}(已确认能新建 SSH 连接,自动回滚已取消)"),
-        _ => format!("{done}。能新建连接,但取消自动回滚失败:{} 秒后服务器会关闭防火墙,请重新启用", g.secs),
+        _ => format!("{done}。能新建连接,但取消自动回滚失败:{} 秒后服务器会自动回滚{},请重新操作", g.secs, g.what),
     }
 }
 

@@ -16,10 +16,12 @@ const LOG_LINES: usize = 14;
 const T_START: &str = "appjob-start";
 const T_POLL: &str = "appjob-poll";
 const T_CTL: &str = "appjob-ctl";
+const T_ADOPT: &str = "appjob-adopt";
 const FLAG_IDS: [&str; 8] = ["api-flag-0", "api-flag-1", "api-flag-2", "api-flag-3", "api-flag-4", "api-flag-5", "api-flag-6", "api-flag-7"];
 
 /// 一次安装 / 升级 / 卸载任务的界面状态
 pub(crate) struct AppJob {
+    app_id: String,
     title: String,
     app_name: String,
     container: String,
@@ -73,6 +75,8 @@ pub(crate) struct AppUi {
     tag_errs: HashMap<String, (u8, u8)>,
     tag_fail: Vec<String>,
     pub(super) job: Option<AppJob>,
+    /// 进页面探测服务器上已有的安装任务:0 没探测,1 在路上,2 探测过了
+    adopt: u8,
     pub(super) st: super::storepage::StoreUi,
     /// 装完要跳到并选中的数据库实例名;容器出现在列表里后由数据库页取走
     pub(super) jump: Option<String>,
@@ -207,17 +211,17 @@ impl Home {
         self.api_fetch_tags(&app, cx);
     }
 
-    /// 截图用:OTTER_SHOT_JOB=run|ok|fail 直接显示任务页
+    /// 截图用:OTTER_SHOT_JOB=run|ok|fail 直接显示任务页;加 -bg(如 run-bg)不开抽屉,看页面空状态里的进度
     pub(super) fn api_demo_job(&mut self, mode: &str) {
         let now = Instant::now();
-        let (log, done): (&str, Option<i32>) = match mode {
+        let (log, done): (&str, Option<i32>) = match mode.trim_end_matches("-bg") {
             "run" => ("==> 检查环境\n==> 拉取镜像\n Image openresty/openresty:1.31.9.1-alpine Pulling\n", None),
             "fail" => ("==> 检查环境\n==> 拉取镜像\nError response from daemon: pull access denied for minio/minio, repository does not exist\n", Some(1)),
             _ => ("==> 检查环境\n==> 拉取镜像\n Image openresty/openresty:1.31.9.1-alpine Pulled\n==> 启动容器\n Container otter-openresty Started\n==> OpenResty 已启动\n", Some(0)),
         };
         self.dock.api.app = "openresty".into();
-        self.dock.api.open = true;
-        self.dock.api.job = Some(AppJob { title: "安装 OpenResty".into(), app_name: "OpenResty".into(), container: "otter-openresty".into(), kind: Some("website".into()), starting: false, inflight: false, offset: 0, log: log.into(), started: now, last: now, done, secrets: vec![], notes: String::new(), url: "http://192.168.64.5:80".into(), close_on_ok: false });
+        self.dock.api.open = !mode.ends_with("-bg");
+        self.dock.api.job = Some(AppJob { app_id: "openresty".into(), title: "安装 OpenResty".into(), app_name: "OpenResty".into(), container: "otter-openresty".into(), kind: Some("website".into()), starting: false, inflight: false, offset: 0, log: log.into(), started: now, last: now, done, secrets: vec![], notes: String::new(), url: "http://192.168.64.5:80".into(), close_on_ok: false });
     }
 
     pub(super) fn api_close(&mut self, cx: &mut Context<Self>) {
@@ -329,6 +333,7 @@ impl Home {
 
     /// 每次渲染前:堆栈名变了,没手改过的容器名跟着变;收版本列表;推进后台任务
     pub(crate) fn api_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.api_adopt(cx);
         self.api_pump(cx);
         self.store_sync(window, cx);
         if !self.dock.api.open || self.dock.api.job.is_some() {
@@ -448,7 +453,9 @@ impl Home {
         self.dock.api.open = true;
         let now = Instant::now();
         let demo = self.demo;
+        let title_for_meta = title.clone();
         self.dock.api.job = Some(AppJob {
+            app_id: app.id.clone(),
             title,
             app_name: app.name.clone(),
             container: container.to_string(),
@@ -467,10 +474,56 @@ impl Home {
         });
         if !demo {
             if let Some(d) = self.api_docker() {
-                d.host_run(T_START, appstore::job_start_script(&script), 60);
+                d.host_run(T_START, appstore::job_start_script(&format!("{}{script}", appstore::job_meta_line(&app.id, container, &title_for_meta))), 60);
             }
         }
         cx.notify();
+    }
+
+    /// 页面空状态里的安装进度:有属于这一类的安装任务在跑(或刚装完、列表还没刷新出来)时,
+    /// 代替「没有 xxx / 安装」显示当前步骤、已运行时间和最近一行输出(拉镜像的下载进度在里面),按钮打开安装抽屉看详细输出。
+    /// `mine` 判断任务的应用 id 是不是这一页要的。
+    pub(super) fn api_job_empty(&self, icon_name: IconName, mine: impl Fn(&str) -> bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let j = self.dock.api.job.as_ref().filter(|j| mine(&j.app_id) && j.done.is_none_or(|c| c == 0))?;
+        let running = j.done.is_none();
+        let steps: Vec<&str> = j.log.lines().filter(|l| l.starts_with("==>")).map(|l| l.trim_start_matches("==>").trim()).collect();
+        let last = j.log.lines().rev().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("==>")).unwrap_or("");
+        let secs = j.started.elapsed().as_secs();
+        let title = if running { j.title.clone() } else { format!("{} 完成", j.title) };
+        let n = steps.len();
+        let list = steps.iter().enumerate().skip(n.saturating_sub(4)).map(|(i, st)| {
+            let cur = running && i + 1 == n;
+            div()
+                .h(px(22.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(div().size(px(13.0)).flex_shrink_0().flex().items_center().justify_center().child(if cur { crate::ui::dot_spinner(("api-empty-spin", 0), c::accent()).into_any_element() } else { icon(IconName::Check, 13.0, c::online()).into_any_element() }))
+                .child(div().text_size(px(t::TYPE_CONTROL)).text_color(if cur { c::text() } else { c::muted() }).child(SharedString::from(st.to_string())))
+        });
+        let app_id = j.app_id.clone();
+        Some(
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .pb(px(72.0))
+                .gap(px(10.0))
+                .child(icon(icon_name, 34.0, c::accent()))
+                .child(div().mt(px(4.0)).text_size(px(t::TYPE_TITLE_SM)).font_weight(FontWeight::SEMIBOLD).text_color(c::secondary()).child(SharedString::from(title)))
+                .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child(if running { format!("已运行 {secs} 秒,在服务器上后台进行,关掉 Otter 也不会中断") } else { "正在刷新列表…".to_string() }))
+                .child(div().mt(px(6.0)).flex().flex_col().children(list))
+                .children((!last.is_empty() && running).then(|| div().max_w(px(520.0)).truncate().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::ghost()).child(SharedString::from(last.to_string()))))
+                .child(div().mt(px(6.0)).child(button("api-job-view", IconName::Terminal, "查看详情").on_click(cx.listener(move |this, _, _, cx| {
+                    this.dock.api.app = app_id.clone();
+                    this.dock.api.open = true;
+                    cx.notify();
+                }))))
+                .into_any_element(),
+        )
     }
 
     /// 服务器地址(给「访问地址」用);取不到就留占位
@@ -482,7 +535,58 @@ impl Home {
 
     /// 页面前台时要不要重绘:后台任务到了该轮询的时间
     pub(crate) fn api_due(&self) -> bool {
-        !self.demo && self.dock.api.job.as_ref().is_some_and(|j| j.done.is_none() && (j.starting || j.last.elapsed() >= POLL_EVERY) && !j.inflight)
+        !self.demo && (self.dock.api.adopt == 1 || self.dock.api.job.as_ref().is_some_and(|j| j.done.is_none() && (j.starting || j.last.elapsed() >= POLL_EVERY) && !j.inflight))
+    }
+
+    /// 连上服务器后探测一次:有安装任务在跑(比如装到一半重启了 Otter)就接上它,页面空状态里显示进度
+    fn api_adopt(&mut self, cx: &mut Context<Self>) {
+        if self.demo || self.dock.api.job.is_some() || self.dock.api.adopt == 2 {
+            return;
+        }
+        let Some(d) = self.api_docker() else { return };
+        if self.dock.api.adopt == 0 {
+            d.host_run(T_ADOPT, appstore::job_probe_script(), 30);
+            self.dock.api.adopt = 1;
+            return;
+        }
+        let Some(r) = d.db_take(T_ADOPT) else { return };
+        self.dock.api.adopt = 2;
+        let Ok(raw) = r else { return };
+        let p = web::parse_job_poll(&raw);
+        if !(p.has && p.status.is_none() && p.alive) {
+            return;
+        }
+        // 新版本写了标记;老任务从日志里认应用
+        let (id, container, title) = match appstore::parse_job_meta(&raw) {
+            Some(m) => m,
+            None => {
+                let low = p.log.to_lowercase();
+                let Some((id, name)) = [("postgres", "PostgreSQL"), ("mariadb", "MariaDB"), ("mysql", "MySQL"), ("redis", "Redis"), ("openresty", "OpenResty")].into_iter().find(|(k, _)| low.contains(k)) else { return };
+                (id.to_string(), String::new(), format!("安装 {name}"))
+            }
+        };
+        let Some(app) = appstore::current().apps.iter().find(|a| a.id == id).cloned() else { return };
+        let now = Instant::now();
+        let post = app.post.clone().unwrap_or_default();
+        self.dock.api.job = Some(AppJob {
+            app_id: id,
+            title,
+            app_name: app.name.clone(),
+            container,
+            kind: app.kind.clone(),
+            starting: false,
+            inflight: false,
+            offset: p.log.len(),
+            log: p.log,
+            started: now,
+            last: now,
+            done: None,
+            secrets: Vec::new(),
+            notes: post.notes,
+            url: String::new(),
+            close_on_ok: false,
+        });
+        cx.notify();
     }
 
     /// 推进后台任务:收启动结果、收轮询结果、到时间发下一次轮询
@@ -495,6 +599,13 @@ impl Home {
         let mut finished = false;
         if j.starting {
             match d.db_take(T_START) {
+                // 服务器上已经有任务在跑(比如装到一半重启了 Otter):不报错,接上它的进度
+                Some(Ok(out)) if out.contains("ERR:已经有一个任务在进行") => {
+                    j.starting = false;
+                    j.offset = 0;
+                    j.log = "==> 服务器上已有一个任务在进行,接上它的进度(这次的请求没有再启动)\n".to_string();
+                    j.last = Instant::now() - POLL_EVERY;
+                }
                 Some(Ok(out)) if out.contains("ERR:") => {
                     j.log = out.lines().find_map(|l| l.strip_prefix("ERR:")).unwrap_or("启动失败").to_string();
                     j.done = Some(1);
@@ -550,7 +661,7 @@ impl Home {
             d.host_run(T_CTL, appstore::job_clear_script(), 30);
         }
         if ok {
-            if kind.as_deref() == Some("database") {
+            if kind.as_deref() == Some("database") && !name.is_empty() {
                 self.dock.api.jump = Some(name);
             }
             if kind.as_deref() == Some("website") {
@@ -835,7 +946,7 @@ impl Home {
                         .rounded(px(t::RADIUS_MD))
                         .bg(c::warn_soft())
                         .child(icon(IconName::TriangleAlert, 14.0, c::warn()))
-                        .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child("密码只在这里显示这一次,Otter 不会保存。请现在复制;之后可以在服务器上该堆栈目录的 .env 里找到。")),
+                        .child(div().flex_1().min_w_0().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(if j.kind.as_deref() == Some("database") { "密码也写在服务器该堆栈目录的 .env 里(仅 root 可读),之后可以在「数据库」页的「连接信息」里查看,这里不必急着抄。" } else { "密码只在这里显示这一次,Otter 不会保存。请现在复制;之后可以在服务器上该堆栈目录的 .env 里找到。" })),
                 );
             }
             if !j.notes.is_empty() && !(!j.secrets.is_empty() && j.notes.contains("只显示这一次")) {

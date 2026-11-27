@@ -1037,7 +1037,7 @@ pub fn install_script(a: &App, plan: &Plan, rec: &Record, purge: bool) -> String
     );
     s += &profile_pre(a, plan);
     // 从这里开始如果失败,清掉这次建的目录和容器(没动过数据卷)
-    s += "CREATED=1\ntrap 'rc=$?; if [ $rc -ne 0 ] && [ \"$CREATED\" = 1 ] && [ -n \"$D\" ] && [ \"$D\" != / ]; then cd /; [ -f \"$D/compose.yml\" ] && (cd \"$D\" && $DC down >/dev/null 2>&1) || true; rm -rf \"$D\"; echo \"安装失败,已清理 $D\"; fi' EXIT\n";
+    s += "CREATED=1\ntrap 'rc=$?; if [ $rc -ne 0 ] && [ \"$CREATED\" = 1 ] && [ -n \"$D\" ] && [ \"$D\" != / ]; then cd /; [ -f \"$D/compose.yml\" ] && (cd \"$D\" && $DC down >/dev/null 2>&1) || true; docker rm -f \"$N\" >/dev/null 2>&1 || true; docker network rm \"${P}_default\" >/dev/null 2>&1 || true; rm -rf \"$D\"; echo \"安装失败,已清理 $D\"; fi' EXIT\n";
     s += "echo \"==> 写入配置\"\nmkdir -p \"$D\"\n";
     for (path, content, mode) in &plan.files {
         s += &format!("mkdir -p \"$D/$(dirname {p})\"\n{w}\n", p = quote(path), w = write_file_cmd(&format!("{}/{path}", plan.dir), content, mode));
@@ -1127,6 +1127,24 @@ pub fn job_poll_script(offset: usize) -> String {
     )
 }
 
+/// 进页面时探测服务器上有没有在跑的任务:先输出 `META=`(任务脚本第一行的 `# otter-job: 应用id|容器名|标题`,老任务没有),再是 `job_poll_script(0)` 的内容
+pub fn job_probe_script() -> String {
+    format!("D={JOB_DIR}\necho \"META=$(head -n1 $D/run.sh 2>/dev/null)\"\n{}", job_poll_script(0).replacen(&format!("D={JOB_DIR}\n"), "", 1))
+}
+
+/// 任务脚本第一行的标记(`job_probe_script` 读它,接上服务器上已有的任务)
+pub fn job_meta_line(app_id: &str, container: &str, title: &str) -> String {
+    format!("# otter-job: {app_id}|{container}|{}\n", title.replace(['|', '\n'], " "))
+}
+
+/// `job_probe_script` 的 META 行 → (应用 id, 容器名, 标题)
+pub fn parse_job_meta(raw: &str) -> Option<(String, String, String)> {
+    let line = raw.lines().find_map(|l| l.strip_prefix("META="))?;
+    let rest = line.trim().strip_prefix("# otter-job:")?.trim();
+    let mut it = rest.splitn(3, '|');
+    Some((it.next()?.to_string(), it.next()?.to_string(), it.next()?.to_string()))
+}
+
 pub fn job_cancel_script() -> String {
     format!("D={JOB_DIR}; pid=$(cat $D/pid 2>/dev/null); [ -n \"$pid\" ] && {{ kill -s TERM -- -$pid 2>/dev/null || kill -s TERM $pid 2>/dev/null; }}; sleep 1; echo OK")
 }
@@ -1155,6 +1173,15 @@ mod tests {
         v.params.insert("password".into(), "abcDEF123-_xyz".into());
         v.params.insert("public".into(), public.to_string());
         v
+    }
+
+    #[test]
+    fn job_meta_roundtrip() {
+        let m = job_meta_line("postgres", "pg-main", "安装 PostgreSQL");
+        assert_eq!(parse_job_meta(&format!("META={}ST=\n", m)), Some(("postgres".into(), "pg-main".into(), "安装 PostgreSQL".into())));
+        assert_eq!(parse_job_meta("META=\nST=\n"), None);
+        let p = job_probe_script();
+        assert!(p.starts_with("D=") && p.contains("META=") && p.contains("--LOG--") && p.matches("D=").count() == 1);
     }
 
     #[test]
