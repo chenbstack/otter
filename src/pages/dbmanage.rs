@@ -1612,7 +1612,7 @@ impl Home {
             )
             .child(super::syspages::tip(super::dockerpages::icon_btn(("dbm-cred-x", 0), IconName::X, c::muted()).on_click(cx.listener(move |this, _, _, cx| do_close(this, cx))), "关闭"));
 
-        // 主机行:复制按钮前面多一个「复制连接串」,点开选用哪个地址(本机 / 内网 / 公网)
+        // 地址:本机 / 内网 / 公网各占一行,每行两个按钮——复制地址、复制用这个地址拼好的连接串
         let node_host = host.clone();
         let (private, public) = self.dock.dbm.conn_addrs.as_deref().map(|o| dbinst::classify_addrs(o, &node_host)).unwrap_or_default();
         let mut addrs: Vec<(String, &'static str)> = vec![("127.0.0.1".into(), "本机")];
@@ -1620,50 +1620,26 @@ impl Home {
             addrs.extend(private.into_iter().map(|a| (a, "内网")));
             addrs.extend(public.into_iter().map(|a| (a, "公网")));
         }
-        let uri_btn = ready.then(|| {
-            super::syspages::tip(super::dockerpages::icon_btn(("dbm-cred-uri", 0), IconName::Link, c::muted()), "复制连接串")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.dock.dbm.conn_menu = !this.dock.dbm.conn_menu;
-                    cx.notify();
-                }))
-                .into_any_element()
-        });
+        // 节点连接地址不在列表里(例如读地址失败、或是 IPv6)时也要有一行
+        if !local_only && !addrs.iter().any(|(a, _)| *a == host) {
+            addrs.push((host.clone(), "主机"));
+        }
         let port = inst_port(&inst);
         let secret = std::rc::Rc::new(zeroize::Zeroizing::new(pw.clone().unwrap_or_default()));
-        let menu = (self.dock.dbm.conn_menu && ready).then(|| {
-            let (t1, t2) = (cx.entity(), cx.entity());
-            let items: Vec<crate::ui::MenuItem> = addrs.iter().map(|(a, k)| crate::ui::MenuItem::new(a.clone()).sub(*k)).collect();
-            let (kind, port, user, secret) = (inst.kind, port.clone(), user.clone(), secret.clone());
-            crate::ui::dropdown_menu(
-                "dbm-cred-menu",
-                items,
-                None,
-                crate::ui::MenuSide::Below,
-                46.0,
-                move |i, _, cx| {
-                    t1.update(cx, |h, cx| {
-                        if let Some((a, _)) = addrs.get(i) {
-                            cx.write_to_clipboard(ClipboardItem::new_string(dbinst::conn_uri(kind, &user, &secret, a, &port, false)));
-                        }
-                        h.dock.dbm.conn_menu = false;
-                        cx.notify();
-                    })
-                },
-                move |_, cx| {
-                    t2.update(cx, |h, cx| {
-                        h.dock.dbm.conn_menu = false;
-                        cx.notify();
-                    })
-                },
-            )
-        });
         let mut fields = div().flex().flex_col().gap(px(8.0));
         if let Some(db) = db.filter(|d| !d.is_empty()) {
             fields = fields.child(row("dbm-cred-db", "数据库", db.clone(), Some(db), None));
         }
-        fields = fields.child(div().relative().child(row("dbm-cred-host", "主机", host.clone(), Some(host.clone()), uri_btn)).children(menu));
-        if host != "127.0.0.1" {
-            fields = fields.child(row("dbm-cred-local", "本机地址", "127.0.0.1".into(), Some("127.0.0.1".into()), None));
+        const ADDR_IDS: [&str; 8] = ["dbm-cred-a0", "dbm-cred-a1", "dbm-cred-a2", "dbm-cred-a3", "dbm-cred-a4", "dbm-cred-a5", "dbm-cred-a6", "dbm-cred-a7"];
+        const URI_IDS: [&str; 8] = ["dbm-cred-u0", "dbm-cred-u1", "dbm-cred-u2", "dbm-cred-u3", "dbm-cred-u4", "dbm-cred-u5", "dbm-cred-u6", "dbm-cred-u7"];
+        for (i, (a, label)) in addrs.iter().take(8).enumerate() {
+            let uri_btn = ready.then(|| {
+                let (kind, port, user, secret, a) = (inst.kind, port.clone(), user.clone(), secret.clone(), a.clone());
+                super::syspages::tip(super::dockerpages::icon_btn((URI_IDS[i], 0), IconName::Link, c::muted()), "复制连接串")
+                    .on_click(cx.listener(move |_, _, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(dbinst::conn_uri(kind, &user, &secret, &a, &port, false)))))
+                    .into_any_element()
+            });
+            fields = fields.child(row(ADDR_IDS[i], label, a.clone(), Some(a.clone()), uri_btn));
         }
         fields = fields.child(row("dbm-cred-port", "端口", port.clone(), Some(port), None));
         match &status {
