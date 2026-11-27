@@ -488,4 +488,4 @@ fn busy_border(window: &mut Window, cx: &mut App, tab_id: u64, radius: f32, colo
 }
 
 /// 标签边框「忙」亮光的重绘间隔(ms),约 15fps;实测刷屏场景:全帧率 ~27%,30fps ~21%,15fps ~16%,1fps ~4%
-const BUSY_FRAME_MS: u64 = 33;
+const BUSY_FRAME_MS: u64 = 16;
