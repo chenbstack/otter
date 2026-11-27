@@ -459,7 +459,7 @@ pub fn demo_snapshot() -> MonSnapshot {
         cpu_user: 24.0,
         cpu_sys: 9.0,
         cpu_wait: 3.0,
-        cores: (0..16).map(|i| (20.0 + 60.0 * ((i as f32 * 1.7).sin().abs())).min(98.0)).collect(),
+        cores: (0..std::env::var("OTTER_DEMO_CORES").ok().and_then(|v| v.parse().ok()).unwrap_or(16)).map(|i| (20.0 + 60.0 * ((i as f32 * 1.7).sin().abs())).min(98.0)).collect(),
         mem_total: 16 << 30,
         mem_used: (10.2 * (1u64 << 30) as f64) as u64,
         mem_free: (1.8 * (1u64 << 30) as f64) as u64,
