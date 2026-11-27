@@ -72,11 +72,39 @@ pub struct Job {
     pub calm: bool,
 }
 
-pub const PROCS_SCRIPT: &str = "ps -eo pid=,user:20=,pcpu=,pmem=,rss=,etime=,args= --sort=-pcpu 2>&1 | head -400";
+/// 先用 procps 的 `ps -eo`;BusyBox(Alpine、OpenWrt 等)的 ps 不认 `-e`/`--sort`,
+/// 这时改读 /proc,输出同样的列(CPU 是进程整个生命周期的平均,和 procps 的 pcpu 定义一致)
+pub const PROCS_SCRIPT: &str = r#"if out=$(ps -eo pid=,user:20=,pcpu=,pmem=,rss=,etime=,args= --sort=-pcpu 2>/dev/null) && [ -n "$out" ]; then echo "$out" | head -400; exit 0; fi
+[ -r /proc/self/stat ] || { ps -eo pid=,user:20=,pcpu=,pmem=,rss=,etime=,args= 2>&1 | head -3; exit 0; }
+hz=$(getconf CLK_TCK 2>/dev/null || echo 100); up=$(cut -d' ' -f1 /proc/uptime | cut -d. -f1); mt=$(awk '/^MemTotal/{print $2}' /proc/meminfo)
+for d in /proc/[0-9]*; do
+  p=${d#/proc/}; st=$(cat "$d/stat" 2>/dev/null) || continue
+  comm=${st#*(}; comm=${comm%)*}; set -- ${st##*) }
+  [ -n "${20}" ] || continue
+  info=$(awk '/^Uid:/{u=$2} /^VmRSS:/{r=$2} END{print u+0, r+0}' "$d/status" 2>/dev/null)
+  cmd=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)
+  [ -n "$(echo $cmd)" ] || cmd="[$comm]"
+  echo "$p $info $((${12} + ${13})) ${20} $cmd"
+done | awk -v hz="$hz" -v up="$up" -v mt="$mt" 'BEGIN { while ((getline l < "/etc/passwd") > 0) { split(l, a, ":"); u[a[3]] = a[1] } }
+{ pid = $1; uid = $2; rss = $3; tt = $4; sta = $5; $1 = $2 = $3 = $4 = $5 = ""; sub(/^ +/, "")
+  el = up - sta / hz; if (el < 1) el = 1; cpu = tt / hz / el * 100; mem = mt > 0 ? rss / mt * 100 : 0
+  usr = (uid in u) ? u[uid] : uid; d = int(el / 86400); h = int(el % 86400 / 3600); m = int(el % 3600 / 60); s = int(el % 60)
+  et = d > 0 ? sprintf("%d-%02d:%02d:%02d", d, h, m, s) : (h > 0 ? sprintf("%02d:%02d:%02d", h, m, s) : sprintf("%02d:%02d", m, s))
+  printf "%d %s %.1f %.1f %d %s %s\n", pid, usr, cpu, mem, rss, et, $0 }' | sort -k3,3nr | head -400"#;
 
-pub const SERVICES_SCRIPT: &str = "systemctl list-units --type=service --all --no-pager --no-legend --plain 2>&1; echo '@@FILES'; systemctl list-unit-files --type=service --no-pager --no-legend --plain 2>/dev/null";
+pub const SERVICES_SCRIPT: &str = r#"if command -v systemctl >/dev/null 2>&1; then
+systemctl list-units --type=service --all --no-pager --no-legend --plain 2>&1; echo '@@FILES'; systemctl list-unit-files --type=service --no-pager --no-legend --plain 2>/dev/null
+elif [ -f /etc/rc.common ]; then
+# OpenWrt(procd):/etc/init.d/<名> running|enabled,输出成和 systemd 一样的行,复用同一个解析
+T=; command -v timeout >/dev/null 2>&1 && T='timeout 5'
+for f in /etc/init.d/*; do [ -x "$f" ] && head -n 1 "$f" | grep -q rc.common || continue; n=${f##*/}
+if $T "$f" running >/dev/null 2>&1; then echo "$n.service loaded active running"; else echo "$n.service loaded inactive dead"; fi; done
+echo '@@FILES'
+for f in /etc/init.d/*; do [ -x "$f" ] && head -n 1 "$f" | grep -q rc.common || continue; n=${f##*/}
+if ls /etc/rc.d/S[0-9][0-9]$n >/dev/null 2>&1; then echo "$n.service enabled"; else echo "$n.service disabled"; fi; done
+else echo '这台服务器没有 systemd,也不是 OpenWrt(可能是 Alpine/OpenRC 等),暂不支持服务管理' >&2; exit 1; fi"#;
 
-pub const STORAGE_SCRIPT: &str = "X='-x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs'; df -PT $X 2>&1; echo '@@INODES'; df -Pi $X 2>/dev/null; echo '@@FSTAB'; cat /etc/fstab 2>/dev/null";
+pub const STORAGE_SCRIPT: &str = r#"X='-x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs'; df -PT $X 2>/dev/null || df -P 2>&1 | awk 'NR==1{print;next} $1 ~ /^(tmpfs|devtmpfs|overlay|shm|none|udev|squashfs)$/{next} {printf "%s -", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}'; echo '@@INODES'; df -Pi $X 2>/dev/null || df -Pi 2>/dev/null; echo '@@FSTAB'; cat /etc/fstab 2>/dev/null"#;
 
 pub const CRON_SCRIPT: &str = "echo '@@USER'; crontab -l 2>/dev/null; for f in /etc/crontab /etc/cron.d/*; do [ -f \"$f\" ] && { echo \"@@FILE $f\"; cat \"$f\" 2>/dev/null; }; done; echo '@@TIMERS'; systemctl list-timers --all --no-pager --no-legend --plain 2>/dev/null";
 
@@ -199,6 +227,11 @@ pub fn parse_lens_line(line: &str) -> Option<(u64, String, LineKind)> {
 }
 
 /// systemd 单元名:只允许这些字符,避免拼进 shell 命令时出事
+/// 服务操作命令:有 systemd 用 systemctl,否则(OpenWrt)走 /etc/init.d/<名>
+pub fn svc_cmd(action: &str, name: &str) -> String {
+    format!("if command -v systemctl >/dev/null 2>&1; then systemctl {action} {name}.service; else /etc/init.d/{name} {action}; fi")
+}
+
 pub fn safe_unit(s: &str) -> bool {
     !s.is_empty() && s.len() <= 200 && !s.starts_with('-') && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '@' | '-' | '\\'))
 }

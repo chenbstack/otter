@@ -172,8 +172,8 @@ fn job(label: &str, target: &str, script: String, reload: (Kind, &str)) -> Job {
 }
 
 fn svc_ask(title: &'static str, body: &'static str, verb: &'static str, cmd: &str, ic: IconName, name: String) -> DockAsk {
-    let j = job(verb, &name, format!("systemctl {cmd} {name}.service"), (Kind::Services, sysops::SERVICES_SCRIPT));
-    DockAsk { title, tile: ic, name, detail: "systemd 服务", body, label: verb, action: Action::Sys(j), list: Vec::new() }
+    let j = job(verb, &name, sysops::svc_cmd(cmd, &name), (Kind::Services, sysops::SERVICES_SCRIPT));
+    DockAsk { title, tile: ic, name, detail: "服务", body, label: verb, action: Action::Sys(j), list: Vec::new() }
 }
 
 fn usage_color(pct: u8) -> Rgba {
@@ -463,7 +463,7 @@ impl Home {
         let n = &self.node().name;
         match self.page {
             Page::Processes => Some(format!("{n} 上正在运行的进程,每 {} 秒刷新", crate::prefs::proc_secs())),
-            Page::Services => Some(format!("{n} 上的 systemd 服务")),
+            Page::Services => Some(format!("{n} 上的服务")),
             Page::Storage => Some(format!("{n} 的磁盘和挂载点,点一行看里面最大的目录")),
             Page::Websites => Some(self.web_subtitle()),
             Page::Cron => Some(format!("{n} 上的 crontab 和 systemd 定时器;只能改自己的 crontab")),
@@ -503,14 +503,18 @@ impl Home {
         let total = v.len();
         v.truncate(200);
         let narrow = self.dock.view_w < 900.0;
-        let mut header = div().child(head("PID").w(px(64.0))).child(head("用户").w(px(96.0))).child(head("CPU").w(px(56.0))).child(head("内存").w(px(56.0))).child(head("占用").w(px(76.0)));
+        // 列:PID | 程序 | 命令(撑满) | 用户 | 内存 | CPU | 运行时长 | 操作;行内一条淡色占比条表示当前排序依据(CPU 或内存)的相对大小
+        let mut header = div().child(head("PID").w(px(64.0))).child(head("程序").w(px(120.0))).child(head("命令").flex_1().min_w_0()).child(head("用户").w(px(80.0))).child(head("内存").w(px(72.0))).child(head("CPU").w(px(56.0)));
         if !narrow {
             header = header.child(head("运行时长").w(px(88.0)));
         }
-        header = header.child(head("命令").flex_1().min_w_0()).child(div().w(px(60.0)));
+        header = header.child(div().w(px(60.0)));
+        let by_mem = self.dock.sys.sort == ProcSort::Mem;
+        let max_cpu = v.iter().map(|p| p.cpu).fold(1.0_f32, f32::max);
+        let max_rss = v.iter().map(|p| p.rss_kb).max().unwrap_or(1).max(1) as f32;
         let mut rows = Vec::new();
         for (i, p) in v.iter().enumerate() {
-            let name = p.cmd.split_whitespace().next().map(|s| s.rsplit('/').next().unwrap_or(s)).unwrap_or("进程").to_string();
+            let name = p.cmd.split_whitespace().next().map(|s| s.rsplit('/').next().unwrap_or(s).trim_end_matches(':')).unwrap_or("进程").to_string();
             let target = p.pid.to_string();
             let mut act = div().w(px(60.0)).flex_shrink_0().flex().flex_row().justify_end().gap(px(2.0));
             let pending = self.dock.sys.killed.get(&p.pid).map(|t| t.elapsed());
@@ -530,17 +534,25 @@ impl Home {
                     this.ask(DockAsk { title: "结束进程", tile: IconName::Cpu, name: format!("{n1} · PID {pid}"), detail: "进程", body: "向进程发送 SIGTERM,让它正常退出", label: "结束进程", action: Action::Sys(j), list: Vec::new() }, cx);
                 })));
             }
-            let cpu_color = if p.cpu >= 80.0 { c::danger() } else if p.cpu >= 40.0 { c::warn() } else { c::secondary() };
+            let cpu_color = if p.cpu >= 80.0 { c::danger() } else if p.cpu >= 40.0 { c::warn() } else { c::text() };
+            let idle = p.cpu < 0.05;
+            let dim = |col: Rgba| if idle { col.opacity(0.55) } else { col };
+            let frac = if by_mem { p.rss_kb as f32 / max_rss } else { p.cpu / max_cpu };
+            let user_color = if p.user == "root" { c::warn().opacity(0.8) } else { c::secondary() };
             let mut r = row(("pr", i))
-                .child(mono_cell(64.0, target, c::muted()))
-                .child(cell(96.0, p.user.clone()))
-                .child(mono_cell(56.0, format!("{:.1}", p.cpu), cpu_color))
-                .child(mono_cell(56.0, format!("{:.1}", p.mem), c::secondary()))
-                .child(mono_cell(76.0, sysops::fmt_kb(p.rss_kb), c::secondary()));
+                .relative()
+                .h(px(36.0))
+                .child(div().absolute().left_0().top_0().bottom_0().w(relative(frac.clamp(0.0, 1.0))).bg(c::accent().opacity(0.10)))
+                .child(mono_cell(64.0, target, c::ghost()))
+                .child(div().w(px(120.0)).flex_shrink_0().truncate().text_size(px(t::TYPE_CONTROL)).font_weight(FontWeight::MEDIUM).text_color(dim(c::text())).child(name.clone()))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(dim(c::muted())).child(p.cmd.clone()))
+                .child(div().w(px(80.0)).flex_shrink_0().truncate().text_size(px(t::TYPE_CONTROL)).text_color(dim(user_color)).child(p.user.clone()))
+                .child(mono_cell(72.0, sysops::fmt_kb(p.rss_kb), dim(c::secondary())))
+                .child(mono_cell(56.0, format!("{:.1}", p.cpu), dim(cpu_color)));
             if !narrow {
                 r = r.child(mono_cell(88.0, p.etime.clone(), c::muted()));
             }
-            rows.push(r.child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CONTROL)).font_family(MONO).text_color(c::text()).child(p.cmd.clone())).child(act));
+            rows.push(r.child(act));
         }
         if rows.is_empty() {
             return empty_state(IconName::Search, "没有匹配的进程", "换个关键字试试").into_any_element();
@@ -553,7 +565,7 @@ impl Home {
 
     fn services_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let list = match &self.dock.sys.services {
-            None => return reading("读取服务器上的 systemd 服务"),
+            None => return reading("读取服务器上的服务"),
             Some(Err(e)) => return message(IconName::TriangleAlert, "读取不了服务列表", e.clone()),
             Some(Ok(l)) => l,
         };
@@ -622,7 +634,7 @@ impl Home {
                         let spin = busy == "启用自启";
                         let b = tip(icon_btn_busy(("sv-en", i), IconName::Power, c::ghost(), spin), "设为开机自启");
                         act = act.child(if spin { b } else { b.on_click(cx.listener(move |this, _, _, cx| {
-                            let j = job("启用自启", &n, format!("systemctl enable {n}.service"), reload);
+                            let j = job("启用自启", &n, sysops::svc_cmd("enable", &n), reload);
                             this.sys_run(j, cx);
                         })) });
                     }
@@ -646,7 +658,7 @@ impl Home {
                     let spin = busy == "启动服务";
                     let b = tip(icon_btn_busy(("sv-go", i), IconName::Play, c::online(), spin), "启动");
                     act = act.child(if spin { b } else { b.on_click(cx.listener(move |this, _, _, cx| {
-                        let j = job("启动服务", &n, format!("systemctl start {n}.service"), reload);
+                        let j = job("启动服务", &n, sysops::svc_cmd("start", &n), reload);
                         this.sys_run(j, cx);
                     })) });
                 }

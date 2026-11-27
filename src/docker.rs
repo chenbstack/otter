@@ -1137,14 +1137,21 @@ impl Runner {
     /// 以 root 身份跑一段 shell:已经是 root 就直接跑,否则走 sudo(免密,或用节点保存的密码)。`input` 通过 stdin 传给脚本。
     async fn root(&self, script: &str, input: Option<&str>, timeout: Duration) -> Result<Output, String> {
         let q = shell_quote(script);
-        match self.sudo {
+        let r = match self.sudo {
             Sudo::WithPassword => {
                 let pw = self.password.as_deref().map(String::as_str).unwrap_or("");
                 let data = format!("{pw}\n{}", input.unwrap_or(""));
-                exec(&self.session, &format!("sudo -k; sudo -S -p '' sh -c {q}"), Some(data.as_bytes()), timeout).await
+                exec(&self.session, &format!("if [ \"$(id -u)\" = 0 ]; then read -r _pw; sh -c {q}; else sudo -k; sudo -S -p '' sh -c {q}; fi"), Some(data.as_bytes()), timeout).await
             }
             _ => exec(&self.session, &format!("if [ \"$(id -u)\" = 0 ]; then sh -c {q}; else sudo -n sh -c {q}; fi"), input.map(str::as_bytes), timeout).await,
-        }
+        };
+        // 精简系统(Alpine、最小化镜像)没有 sudo:别只丢一句 shell 报错,告诉用户怎么办
+        r.map(|mut o| {
+            if o.stderr.contains("sudo: command not found") || o.stderr.contains("sudo: not found") {
+                o.stderr = "服务器上没有 sudo,当前用户又不是 root:请改用 root 登录,或先在服务器上安装 sudo 并给当前用户授权".into();
+            }
+            o
+        })
     }
 }
 
@@ -1666,7 +1673,7 @@ async fn lens_run(r: &Runner, sh: &Shared, path: &str, depth: u32, scan: u64, fi
     // 以 root 统计:已经是 root 直接跑,否则 sudo(免密,或经 stdin 交密码)
     let (cmd, pw) = match (root, &r.sudo) {
         (false, _) => (base, None),
-        (true, Sudo::WithPassword) => (format!("sudo -k; sudo -S -p '' {base}"), Some(format!("{}\n", r.password.as_deref().map(String::as_str).unwrap_or("")))),
+        (true, Sudo::WithPassword) => (format!("if [ \"$(id -u)\" = 0 ]; then read -r _pw; {base}; else sudo -k; sudo -S -p '' {base}; fi"), Some(format!("{}\n", r.password.as_deref().map(String::as_str).unwrap_or("")))),
         (true, _) => (format!("if [ \"$(id -u)\" = 0 ]; then {base}; else sudo -n {base}; fi"), None),
     };
     if let Err(e) = ch.exec(true, cmd).await {

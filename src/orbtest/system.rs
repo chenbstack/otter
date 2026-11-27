@@ -26,6 +26,21 @@ fn procs(d: Distro) {
 }
 per_distro!(procs_read, procs);
 
+/// BusyBox 式的 ps 不认 `-e`(报 "unrecognized option: e"):用一个会失败的假 ps 顶在 PATH 前面,脚本要改读 /proc 并输出同样的列
+fn procs_fallback(d: Distro) {
+    let vm = vm(d);
+    let out = vm.exec("读进程(ps 不可用)", &format!("mkdir -p /tmp/orbtest-sys/bin && printf '#!/bin/sh\\necho \"ps: unrecognized option: e\" >&2\\nexit 1\\n' > /tmp/orbtest-sys/bin/ps && chmod +x /tmp/orbtest-sys/bin/ps && PATH=/tmp/orbtest-sys/bin:$PATH && {PROCS_SCRIPT}"));
+    let list = parse_procs(&out).unwrap_or_else(|e| panic!("解析失败:{e}\n{out}"));
+    assert!(list.len() > 10, "进程太少:{}", list.len());
+    let init = list.iter().find(|p| p.pid == 1).expect("没有 pid 1");
+    assert_eq!(init.user, "root");
+    assert!(init.cmd.contains("init") || init.cmd.contains("systemd"), "{}", init.cmd);
+    // 内存和运行时长要有值;按 CPU 降序
+    assert!(list.iter().any(|p| p.rss_kb > 0) && list.iter().all(|p| !p.etime.is_empty()));
+    assert!(list.windows(2).all(|w| w[0].cpu >= w[1].cpu), "没按 CPU 排序");
+}
+per_distro!(procs_read_fallback, procs_fallback);
+
 fn services(d: Distro) {
     let vm = vm(d);
     let out = vm.exec("读服务", SERVICES_SCRIPT);

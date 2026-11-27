@@ -328,14 +328,14 @@ fn body() -> Div {
     div().min_h(px(DETAIL_BODY_H)).flex().flex_col().justify_between().gap(px(4.0))
 }
 
-/// 核心:8 个以内一核一行(名字 + 占用条 + 数值);更多时换成热力格(亮度 = 占用),格子随核心数变小,底部给最高的核心和过载个数
+/// 核心:4 个以内一核一行(名字 + 占用条 + 数值);更多时换成热力格(亮度 = 占用),格子随核心数变小,底部给最高的核心和过载个数
 fn cores_tile(m: &MonSnapshot) -> Stateful<Div> {
     let n = &m.now;
     let tone = c::cpu();
     let cnt = n.cores.len();
     let avg = if cnt == 0 { 0.0 } else { n.cores.iter().sum::<f32>() / cnt as f32 };
     let t0 = tile("hud-cores", tone).child(tag("CORES", "核心", tone, format!("{cnt} 核 · 平均 {avg:.0}%")));
-    if cnt <= 8 {
+    if cnt <= 4 {
         let mut rows = body().justify_center().gap(px(14.0));
         for (i, v) in n.cores.iter().enumerate() {
             let col = alert(tone, *v);
