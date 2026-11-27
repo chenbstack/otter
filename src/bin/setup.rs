@@ -63,62 +63,232 @@ fn default_dir() -> PathBuf {
     }
 }
 
-/// 在 Windows 上跑一段 PowerShell(不弹窗);其它平台什么也不做。
-fn powershell(script: &str) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let out = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
-            .creation_flags(0x0800_0000)
-            .output()
-            .map_err(|e| format!("运行 PowerShell 失败:{e}"))?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = script;
-    Ok(())
-}
-
-/// PowerShell 单引号字符串里的路径转义。
-fn q(p: &Path) -> String {
-    p.to_string_lossy().replace('\'', "''")
-}
-
 /// 结束正在运行的 Otter(否则文件被占用,覆盖/删除会失败)。
 fn kill_running() {
-    let _ = powershell("Get-Process otter-gui,otter -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Milliseconds 400");
+    #[cfg(windows)]
+    winsys::kill_running();
+}
+
+
+/// 其它 Windows 系统调用(结束进程、快捷方式、提权运行)。全部直接调系统 API,不经 PowerShell:
+/// 个别电脑的安全软件会拦截 PowerShell 进程(报「拒绝访问」),安装程序不依赖它。
+#[cfg(windows)]
+mod winsys {
+    use std::path::{Path, PathBuf};
+    use windows::core::{Interface, HSTRING};
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, IPersistFile};
+    use windows::Win32::UI::Shell::{FOLDERID_Desktop, FOLDERID_Programs, IShellLinkW, SHGetKnownFolderPath, ShellLink, KF_FLAG_DEFAULT};
+
+    /// 开始菜单「程序」目录或桌面目录(桌面可能被 OneDrive 重定向,所以不拼路径,问系统)。
+    fn known_folder(desktop: bool) -> Option<PathBuf> {
+        let id = if desktop { &FOLDERID_Desktop } else { &FOLDERID_Programs };
+        // SAFETY: 返回的字符串由系统分配,读完用 CoTaskMemFree 释放
+        unsafe {
+            let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
+            let s = p.to_string().ok();
+            CoTaskMemFree(Some(p.0 as *const _));
+            s.map(PathBuf::from)
+        }
+    }
+
+    fn create_shortcut(lnk: &Path, dir: &Path) -> Result<(), String> {
+        let err = |e: windows::core::Error| format!("创建快捷方式 {} 失败:{e}", lnk.display());
+        // SAFETY: 标准的 COM 用法;安装在后台线程里跑,这个线程自己初始化 COM
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(err)?;
+            link.SetPath(&HSTRING::from(dir.join("otter-gui.exe").as_path())).map_err(err)?;
+            link.SetWorkingDirectory(&HSTRING::from(dir)).map_err(err)?;
+            link.SetIconLocation(&HSTRING::from(dir.join("otter.ico").as_path()), 0).map_err(err)?;
+            let file: IPersistFile = link.cast().map_err(err)?;
+            file.Save(&HSTRING::from(lnk), true).map_err(err)?;
+        }
+        Ok(())
+    }
+
+    pub fn create_shortcuts(dir: &Path, desktop: bool) -> Result<(), String> {
+        let start = known_folder(false).ok_or("找不到开始菜单目录")?;
+        create_shortcut(&start.join("Otter.lnk"), dir)?;
+        if desktop {
+            let d = known_folder(true).ok_or("找不到桌面目录")?;
+            create_shortcut(&d.join("Otter.lnk"), dir)?;
+        }
+        Ok(())
+    }
+
+    pub fn remove_shortcuts() {
+        for desktop in [false, true] {
+            if let Some(f) = known_folder(desktop) {
+                let _ = std::fs::remove_file(f.join("Otter.lnk"));
+            }
+        }
+    }
+
+    /// 结束所有 otter-gui.exe / otter.exe 进程,等它们真正退出(最多 3 秒)。
+    pub fn kill_running() {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
+        // SAFETY: 遍历进程快照;PROCESSENTRY32W 先清零并设置 dwSize,句柄都在用完后关闭
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return;
+            }
+            let mut e: PROCESSENTRY32W = std::mem::zeroed();
+            e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut ok = Process32FirstW(snap, &mut e) != 0;
+            while ok {
+                let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+                let name = String::from_utf16_lossy(&e.szExeFile[..len]);
+                if name.eq_ignore_ascii_case("otter-gui.exe") || name.eq_ignore_ascii_case("otter.exe") {
+                    let h = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, e.th32ProcessID);
+                    if !h.is_null() {
+                        TerminateProcess(h, 1);
+                        WaitForSingleObject(h, 3000);
+                        CloseHandle(h);
+                    }
+                }
+                ok = Process32NextW(snap, &mut e) != 0;
+            }
+            CloseHandle(snap);
+        }
+    }
+
+    /// 以管理员身份运行 `exe <mode> --dir "<dir>"`(弹 UAC),等它结束,退出码非 0 或用户拒绝授权都算失败。
+    pub fn run_elevated_wait(exe: &Path, mode: &str, dir: &Path) -> Result<(), String> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+        use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+        let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() };
+        let d = dir.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
+        let verb = wide("runas");
+        let file = wide(&exe.to_string_lossy());
+        let params = wide(&format!("{mode} --dir \"{d}\""));
+        // SAFETY: 结构体先清零再填必要字段,字符串缓冲区在调用期间有效;hProcess 用完关闭
+        unsafe {
+            let mut info: SHELLEXECUTEINFOW = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+            info.fMask = SEE_MASK_NOCLOSEPROCESS;
+            info.lpVerb = verb.as_ptr();
+            info.lpFile = file.as_ptr();
+            info.lpParameters = params.as_ptr();
+            info.nShow = 0; // SW_HIDE
+            if ShellExecuteExW(&mut info) == 0 || info.hProcess.is_null() {
+                return Err("未获得管理员授权".into());
+            }
+            WaitForSingleObject(info.hProcess, INFINITE);
+            let mut code = 1u32;
+            GetExitCodeProcess(info.hProcess, &mut code);
+            CloseHandle(info.hProcess);
+            if code != 0 {
+                return Err(format!("提权进程失败,退出码 {code}"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 注册表操作直接调系统 API,不借 PowerShell:个别电脑的安全软件会拦截带「修改 PATH」命令行的 PowerShell 进程(报「拒绝访问」)。
+#[cfg(windows)]
+mod winreg_ops {
+    use std::borrow::Cow;
+    use std::path::Path;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_EXPAND_SZ};
+    use winreg::{RegKey, RegValue};
+
+    const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
+
+    fn to_utf16(s: &str) -> Vec<u8> {
+        s.encode_utf16().chain(Some(0)).flat_map(|u| u.to_le_bytes()).collect()
+    }
+
+    fn from_utf16(b: &[u8]) -> String {
+        let v: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&v).trim_end_matches('\0').to_string()
+    }
+
+    /// 通知资源管理器等进程环境变量变了,新开的终端才读得到新 PATH。
+    fn broadcast_env_change() {
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE};
+        let env: Vec<u16> = "Environment".encode_utf16().chain(Some(0)).collect();
+        let mut result = 0usize;
+        // SAFETY: env 以 0 结尾并在调用期间有效;HWND_BROADCAST 是系统定义的广播句柄
+        unsafe {
+            SendMessageTimeoutW(HWND_BROADCAST as HWND, WM_SETTINGCHANGE, 0, env.as_ptr() as isize, SMTO_ABORTIFHUNG, 2000, &mut result);
+        }
+    }
+
+    pub fn set_path(dir: &Path, add: bool) -> Result<(), String> {
+        let err = |e: std::io::Error| format!("修改用户 PATH 失败:{e}");
+        let env = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE).map_err(err)?;
+        // 保留原来的值类型(多数是 REG_EXPAND_SZ,里面可能有 %USERPROFILE% 之类),没有 Path 时新建一个
+        let (cur, vtype) = match env.get_raw_value("Path") {
+            Ok(v) => (from_utf16(&v.bytes), v.vtype),
+            Err(_) => (String::new(), REG_EXPAND_SZ),
+        };
+        let d = dir.to_string_lossy().to_string();
+        let mut parts: Vec<&str> = cur.split(';').filter(|p| !p.is_empty() && !p.eq_ignore_ascii_case(&d)).collect();
+        if add {
+            parts.push(&d);
+        }
+        env.set_raw_value("Path", &RegValue { bytes: Cow::Owned(to_utf16(&parts.join(";"))), vtype }).map_err(err)?;
+        broadcast_env_change();
+        Ok(())
+    }
+
+    pub fn register(dir: &Path, version: &str) -> Result<(), String> {
+        let err = |e: std::io::Error| format!("写入卸载入口失败:{e}");
+        let (k, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(format!(r"{UNINSTALL}\Otter")).map_err(err)?;
+        let d = dir.to_string_lossy().to_string();
+        let join = |f: &str| dir.join(f).to_string_lossy().to_string();
+        k.set_value("DisplayName", &"Otter").map_err(err)?;
+        k.set_value("DisplayVersion", &version).map_err(err)?;
+        k.set_value("Publisher", &"Otter").map_err(err)?;
+        k.set_value("InstallLocation", &d).map_err(err)?;
+        k.set_value("DisplayIcon", &join("otter.ico")).map_err(err)?;
+        k.set_value("UninstallString", &format!("\"{}\" --uninstall", join("uninstall.exe"))).map_err(err)?;
+        k.set_value("NoModify", &1u32).map_err(err)?;
+        k.set_value("NoRepair", &1u32).map_err(err)?;
+        Ok(())
+    }
+
+    pub fn unregister() {
+        if let Ok(k) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(UNINSTALL, KEY_READ | KEY_WRITE) {
+            let _ = k.delete_subkey_all("Otter");
+        }
+    }
 }
 
 fn set_path(dir: &Path, add: bool) -> Result<(), String> {
-    let d = q(dir);
-    let tail = if add { "$parts += $d; " } else { "" };
-    powershell(&format!(
-        "$d='{d}'; $p=[Environment]::GetEnvironmentVariable('Path','User'); $parts=@(); if($p){{$parts=@($p.Split(';') | Where-Object {{ $_ -and $_ -ne $d }})}}; {tail}[Environment]::SetEnvironmentVariable('Path',($parts -join ';'),'User')"
-    ))
+    #[cfg(windows)]
+    return winreg_ops::set_path(dir, add);
+    #[cfg(not(windows))]
+    {
+        let _ = (dir, add);
+        Ok(())
+    }
 }
 
 fn shortcuts(dir: &Path, desktop: bool) -> Result<(), String> {
-    let d = q(dir);
-    let desk = if desktop { "mk ([Environment]::GetFolderPath('Desktop'));" } else { "" };
-    powershell(&format!(
-        "$d='{d}'; $w=New-Object -ComObject WScript.Shell; \
-         function mk($folder){{ $s=$w.CreateShortcut((Join-Path $folder 'Otter.lnk')); $s.TargetPath=(Join-Path $d 'otter-gui.exe'); $s.WorkingDirectory=$d; $s.IconLocation=(Join-Path $d 'otter.ico'); $s.Save() }}; \
-         mk ([Environment]::GetFolderPath('Programs')); {desk}"
-    ))
+    #[cfg(windows)]
+    return winsys::create_shortcuts(dir, desktop);
+    #[cfg(not(windows))]
+    {
+        let _ = (dir, desktop);
+        Ok(())
+    }
 }
 
 fn register(dir: &Path) -> Result<(), String> {
-    let d = q(dir);
-    powershell(&format!(
-        "$d='{d}'; $k='HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Otter'; New-Item -Path $k -Force | Out-Null; \
-         Set-ItemProperty $k DisplayName 'Otter'; Set-ItemProperty $k DisplayVersion '{VERSION}'; Set-ItemProperty $k Publisher 'Otter'; \
-         Set-ItemProperty $k InstallLocation $d; Set-ItemProperty $k DisplayIcon (Join-Path $d 'otter.ico'); \
-         Set-ItemProperty $k UninstallString ('\"' + (Join-Path $d 'uninstall.exe') + '\" --uninstall'); \
-         Set-ItemProperty $k NoModify 1 -Type DWord; Set-ItemProperty $k NoRepair 1 -Type DWord"
-    ))
+    #[cfg(windows)]
+    return winreg_ops::register(dir, VERSION);
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -126,29 +296,91 @@ struct Options {
     dir: PathBuf,
     add_path: bool,
     desktop: bool,
+    /// 卸载时同时删除应用数据(节点、设置、日志和凭据库里的主密钥);默认不删
+    purge: bool,
 }
 
 const INSTALL_STEPS: &[&str] = &["关闭正在运行的 Otter", "复制程序文件", "创建快捷方式", "配置 otter 命令", "注册卸载入口"];
 const UNINSTALL_STEPS: &[&str] = &["关闭正在运行的 Otter", "删除快捷方式", "移除 otter 命令", "清理卸载入口", "删除程序文件"];
+const UNINSTALL_PURGE_STEPS: &[&str] = &["关闭正在运行的 Otter", "删除快捷方式", "移除 otter 命令", "清理卸载入口", "删除应用数据", "删除程序文件"];
 
-fn install(o: &Options, step: &dyn Fn(usize)) -> Result<(), String> {
-    step(0);
-    kill_running();
-    step(1);
-    std::fs::create_dir_all(&o.dir).map_err(|e| format!("创建目录 {} 失败:{e}", o.dir.display()))?;
+/// 把程序文件写进安装目录(解压内置的两个程序、图标、卸载程序)。
+fn write_files(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建目录 {} 失败:{e}", dir.display()))?;
     let (gui, cli) = if cfg!(windows) { ("otter-gui.exe", "otter.exe") } else { ("otter-gui", "otter") };
     for (name, gz) in [(gui, GUI_GZ), (cli, CLI_GZ)] {
-        let p = o.dir.join(name);
+        let p = dir.join(name);
         let mut bytes = Vec::new();
         if !gz.is_empty() {
             std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(gz), &mut bytes).map_err(|e| format!("解压 {name} 失败:{e}"))?;
         }
         std::fs::write(&p, bytes).map_err(|e| format!("写入 {} 失败:{e}", p.display()))?;
     }
-    let p = o.dir.join("otter.ico");
+    let p = dir.join("otter.ico");
     std::fs::write(&p, ICON).map_err(|e| format!("写入 {} 失败:{e}", p.display()))?;
     if let Ok(me) = std::env::current_exe() {
-        let _ = std::fs::copy(me, o.dir.join(if cfg!(windows) { "uninstall.exe" } else { "uninstall" }));
+        let _ = std::fs::copy(me, dir.join(if cfg!(windows) { "uninstall.exe" } else { "uninstall" }));
+    }
+    Ok(())
+}
+
+/// 当前用户能不能写这个目录(会顺手创建它);只在「没有权限」时返回 false,其它错误留给后面写文件时报。
+fn can_write(dir: &Path) -> bool {
+    match std::fs::create_dir_all(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return false,
+        Err(_) => return true,
+        Ok(()) => {}
+    }
+    let probe = dir.join(".otter-write-test");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(e) => e.kind() != std::io::ErrorKind::PermissionDenied,
+    }
+}
+
+/// 以管理员身份重新运行自己(弹系统的 UAC 授权窗口),做完 `mode` 指定的事,等它结束。用户点了「否」或写入失败都返回错误。
+fn run_elevated(mode: &str, dir: &Path) -> Result<(), String> {
+    let fail = || format!("没有拿到管理员权限,或写入 {} 失败。请在授权窗口里点「是」,或换一个不需要管理员权限的安装位置", dir.display());
+    #[cfg(windows)]
+    {
+        let me = std::env::current_exe().map_err(|e| format!("找不到安装程序自身:{e}"))?;
+        winsys::run_elevated_wait(&me, mode, dir).map_err(|_| fail())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (mode, fail);
+        Err(format!("没有权限写入 {}", dir.display()))
+    }
+}
+
+/// 提权后的自己干的活(没有界面,退出码 0 成功):`--elevated-copy` 写程序文件,`--elevated-remove` 删安装目录。
+fn elevated_main(mode: &str, dir: &Path) -> Result<(), String> {
+    kill_running();
+    if mode == "--elevated-copy" {
+        write_files(dir)
+    } else {
+        // 只删确实是 Otter 安装目录的地方,不让这个提权入口被用来删任意目录
+        let is_otter = dir.join("otter-gui.exe").exists() && dir.join("uninstall.exe").exists();
+        if !is_otter {
+            return Err(format!("{} 不是 Otter 的安装目录", dir.display()));
+        }
+        std::fs::remove_dir_all(dir).map_err(|e| format!("删除 {} 失败:{e}", dir.display()))
+    }
+}
+
+fn install(o: &Options, step: &dyn Fn(usize)) -> Result<(), String> {
+    step(0);
+    kill_running();
+    step(1);
+    // 目标目录当前用户写不进去(比如 C:\\Program Files):只把写文件这一步交给管理员权限的自己做,
+    // 快捷方式、PATH、卸载入口属于当前用户,仍在这里写(提权的可能是另一个账号,HKCU 不一样)
+    if cfg!(windows) && !can_write(&o.dir) {
+        run_elevated("--elevated-copy", &o.dir)?;
+    } else {
+        write_files(&o.dir)?;
     }
     step(2);
     shortcuts(&o.dir, o.desktop)?;
@@ -162,28 +394,64 @@ fn install(o: &Options, step: &dyn Fn(usize)) -> Result<(), String> {
     Ok(())
 }
 
+/// 删除应用数据:数据 / 配置 / 缓存目录,以及系统凭据库里的主密钥。删掉后已保存的节点、密码、私钥都无法找回。
+fn purge_data() -> Result<(), String> {
+    if let Some(d) = directories::ProjectDirs::from("", "", "otter") {
+        for p in [d.data_dir(), d.config_dir(), d.cache_dir()] {
+            match std::fs::remove_dir_all(p) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("删除 {} 失败:{e}", p.display())),
+            }
+            // 上一层(Windows 上是 %APPDATA%\otter)空了就一起删,非空时忽略
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+    }
+    // 主密钥不存在算成功;凭据库不可用时不阻断卸载
+    if let Ok(entry) = keyring::Entry::new("otter", "master-key") {
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(e) => return Err(format!("删除系统凭据库里的主密钥失败:{e}")),
+        }
+    }
+    Ok(())
+}
+
 /// 卸载:最后一步删除目录。卸载程序自己就在目录里,所以交给一个延后执行的 cmd 去删。
-fn uninstall(dir: &Path, step: &dyn Fn(usize)) -> Result<(), String> {
+fn uninstall(dir: &Path, purge: bool, step: &dyn Fn(usize)) -> Result<(), String> {
     step(0);
     kill_running();
     step(1);
-    powershell("foreach($f in @([Environment]::GetFolderPath('Programs'),[Environment]::GetFolderPath('Desktop'))){ Remove-Item (Join-Path $f 'Otter.lnk') -ErrorAction SilentlyContinue }")?;
+    #[cfg(windows)]
+    winsys::remove_shortcuts();
     step(2);
     set_path(dir, false)?;
     step(3);
-    powershell("Remove-Item 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Otter' -Recurse -ErrorAction SilentlyContinue")?;
+    #[cfg(windows)]
+    winreg_ops::unregister();
     step(4);
+    if purge {
+        purge_data()?;
+        step(5);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", &format!("ping -n 3 127.0.0.1 >nul & rmdir /s /q \"{}\"", dir.display())])
-            .creation_flags(0x0800_0000)
-            .spawn();
+        if can_write(dir) {
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", &format!("ping -n 3 127.0.0.1 >nul & rmdir /s /q \"{}\"", dir.display())])
+                .creation_flags(0x0800_0000)
+                .spawn();
+        } else {
+            // 装在需要管理员权限的目录(如 Program Files):请求授权后由提权的自己删除
+            run_elevated("--elevated-remove", dir)?;
+        }
     }
     #[cfg(not(windows))]
     let _ = std::fs::remove_dir_all(dir);
-    step(5);
+    step(if purge { 6 } else { 5 });
     Ok(())
 }
 
@@ -211,7 +479,11 @@ struct Setup {
 
 impl Setup {
     fn steps(&self) -> &'static [&'static str] {
-        if self.uninstall { UNINSTALL_STEPS } else { INSTALL_STEPS }
+        match (self.uninstall, self.opts.purge) {
+            (true, true) => UNINSTALL_PURGE_STEPS,
+            (true, false) => UNINSTALL_STEPS,
+            _ => INSTALL_STEPS,
+        }
     }
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -229,7 +501,7 @@ impl Setup {
                 std::thread::sleep(Duration::from_millis(220));
             };
             let r = if un {
-                uninstall(&opts.dir, &|i| slow(i))
+                uninstall(&opts.dir, opts.purge, &|i| slow(i))
             } else {
                 install(&opts, &|i| slow(i))
             };
@@ -290,6 +562,50 @@ fn shorten(p: &str, max: usize) -> String {
     let head = max / 3;
     let tail = max - head - 1;
     format!("{}…{}", chars[..head].iter().collect::<String>(), chars[chars.len() - tail..].iter().collect::<String>())
+}
+
+/// 带说明的复选框卡片:左边方框,右边标题 + 说明(说明里的 `\n` 换行)。`warn` 时勾选后整张卡片变红(卸载删数据用)。
+fn check_row(id: &'static str, on: bool, warn: bool, title: &'static str, desc: &'static str) -> Stateful<Div> {
+    let tone = if warn { danger() } else { accent() };
+    div()
+        .id(id)
+        .w_full()
+        .px(px(14.0))
+        .py(px(13.0))
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(12.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(if on { tone.opacity(0.6) } else { field_border() })
+        .bg(if on && warn { tone.opacity(0.08) } else { field() })
+        .cursor_pointer()
+        .hover(|s| s.border_color(tone.opacity(0.6)))
+        .child(
+            div()
+                .mt(px(1.0))
+                .size(px(18.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .border_1()
+                .border_color(if on { tone } else { field_border() })
+                .bg(if on { tone } else { rgba(0x00000000) })
+                .when(on, |d| d.child(Icon::new(IconName::Check).size(px(12.0)).text_color(rgb(0xFFFFFF)))),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(text()).child(title))
+                .child(div().text_size(px(12.5)).line_height(px(18.0)).text_color(if on && warn { danger() } else { muted() }).child(desc)),
+        )
 }
 
 fn primary(id: &'static str, label: impl Into<SharedString>) -> Stateful<Div> {
@@ -360,109 +676,110 @@ impl Render for Setup {
         let un = self.uninstall;
         let body: Div = match self.stage.clone() {
             Stage::Welcome => {
-                let (title, sub) = if un { ("卸载 Otter", "将删除程序文件、快捷方式和 otter 命令".to_string()) } else { ("Otter", format!("SSH 与 Docker 管理器  ·  {VERSION}")) };
-                let mut d = div().size_full().flex().flex_col().justify_between().child(hero(title, sub));
+                let btn = |id: &'static str, label: &'static str| primary(id, label);
                 if un {
-                    d = d
-                        .child(div().text_size(px(12.5)).text_color(muted()).text_center().child("你的节点和设置不会被删除,保存在应用数据目录里"))
+                    let on = self.opts.purge;
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .justify_between()
+                        .child(hero("卸载 Otter", "将删除程序文件、快捷方式和 otter 命令"))
+                        .child(
+                            check_row(
+                                "o-purge",
+                                on,
+                                true,
+                                "同时删除我的数据",
+                                if on {
+                                    "节点、设置、日志，以及已保存的服务器密码和私钥都会被删除，无法恢复"
+                                } else {
+                                    "节点、设置、日志，以及已保存的服务器密码和私钥\n不勾选则全部保留，重新安装后可以继续使用"
+                                },
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.opts.purge = !this.opts.purge;
+                                cx.notify();
+                            })),
+                        )
                         .child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .gap(px(10.0))
-                                .child(primary("go", "卸载").bg(danger()).on_click(cx.listener(|this, _, window, cx| this.start(window, cx))))
+                                .child(btn("go", "卸载").bg(danger()).on_click(cx.listener(|this, _, window, cx| this.start(window, cx))))
                                 .child(secondary_btn("cancel", "取消").on_click(cx.listener(|_, _, _, cx| cx.quit()))),
-                        );
+                        )
                 } else {
-                    let opt = |id: &'static str, on: bool, label: &'static str, f: fn(&mut Setup)| {
-                        div()
-                            .id(id)
-                            .h(px(40.0))
-                            .px(px(12.0))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(10.0))
-                            .cursor_pointer()
-                            .child(
-                                div()
-                                    .size(px(18.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(5.0))
-                                    .border_1()
-                                    .border_color(if on { accent() } else { field_border() })
-                                    .bg(if on { accent() } else { rgba(0x00000000) })
-                                    .when(on, |d| d.child(Icon::new(IconName::Check).size(px(12.0)).text_color(rgb(0xFFFFFF)))),
-                            )
-                            .child(div().text_size(px(13.5)).text_color(secondary()).child(label))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                f(this);
-                                cx.notify();
-                            }))
-                    };
                     let dir = self.opts.dir.display().to_string();
-                    d = d
+                    // 安装位置:一行路径 + 「更改」按钮,下面一行小字说明权限
+                    let location = div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(div().px(px(2.0)).text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(muted()).child("安装位置"))
                         .child(
                             div()
+                                .id("pick")
                                 .w_full()
+                                .h(px(46.0))
+                                .pl(px(14.0))
+                                .pr(px(6.0))
                                 .flex()
-                                .flex_col()
-                                .gap(px(18.0))
+                                .flex_row()
+                                .items_center()
+                                .gap(px(10.0))
+                                .rounded(px(10.0))
+                                .bg(field())
+                                .border_1()
+                                .border_color(field_border())
+                                .cursor_pointer()
+                                .hover(|s| s.border_color(accent().opacity(0.6)))
+                                .child(Icon::new(IconName::Folder).size(px(16.0)).text_color(muted()))
+                                .child(div().flex_1().min_w_0().truncate().text_size(px(13.0)).text_color(text()).child(shorten(&dir, 40)))
                                 .child(
                                     div()
+                                        .h(px(32.0))
+                                        .px(px(12.0))
                                         .flex()
-                                        .flex_col()
-                                        .gap(px(8.0))
-                                        .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(muted()).child("安装位置"))
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .h(px(42.0))
-                                                .pl(px(14.0))
-                                                .pr(px(5.0))
-                                                .flex()
-                                                .flex_row()
-                                                .items_center()
-                                                .gap(px(8.0))
-                                                .rounded(px(10.0))
-                                                .bg(rgba(0x00000066))
-                                                .border_1()
-                                                .border_color(field_border())
-                                                .child(div().flex_1().min_w_0().truncate().text_size(px(13.0)).text_color(text()).child(shorten(&dir, 42)))
-                                                .child(
-                                                    div()
-                                                        .id("pick")
-                                                        .size(px(32.0))
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .rounded(px(7.0))
-                                                        .cursor_pointer()
-                                                        .hover(|s| s.bg(rgba(0x9A94E022)))
-                                                        .child(Icon::new(IconName::FolderOpen).size(px(17.0)).text_color(accent()))
-                                                        .on_click(cx.listener(|this, _, window, cx| this.pick_dir(window, cx))),
-                                                ),
-                                        ),
+                                        .items_center()
+                                        .rounded(px(7.0))
+                                        .bg(accent().opacity(0.14))
+                                        .text_size(px(12.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(accent())
+                                        .child("更改"),
                                 )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .rounded(px(10.0))
-                                        .border_1()
-                                        .border_color(field_border())
-                                        .bg(field())
-                                        .py(px(4.0))
-                                        .child(opt("o-path", self.opts.add_path, "把 otter 命令加入 PATH(给 agent / 终端用)", |s| s.opts.add_path = !s.opts.add_path))
-                                        .child(div().h(px(1.0)).mx(px(12.0)).bg(rgba(0x9A94E016)))
-                                        .child(opt("o-desk", self.opts.desktop, "创建桌面快捷方式", |s| s.opts.desktop = !s.opts.desktop)),
-                                ),
+                                .on_click(cx.listener(|this, _, window, cx| this.pick_dir(window, cx))),
                         )
-                        .child(primary("go", "安装").on_click(cx.listener(|this, _, window, cx| this.start(window, cx))));
+                        .child(div().px(px(2.0)).text_size(px(12.0)).text_color(muted()).child("默认装到当前用户目录；选择需要权限的位置时会请求管理员授权"));
+                    let options = div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(
+                            check_row("o-path", self.opts.add_path, false, "把 otter 命令加入 PATH", "供终端和 AI agent 直接调用，新开的终端里生效")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.opts.add_path = !this.opts.add_path;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            check_row("o-desk", self.opts.desktop, false, "创建桌面快捷方式", "开始菜单里的快捷方式始终会创建")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.opts.desktop = !this.opts.desktop;
+                                    cx.notify();
+                                })),
+                        );
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .justify_between()
+                        .child(hero("Otter", format!("SSH 与 Docker 管理器  ·  {VERSION}")))
+                        .child(div().flex().flex_col().gap(px(20.0)).child(location).child(options))
+                        .child(btn("go", "安装").on_click(cx.listener(|this, _, window, cx| this.start(window, cx))))
                 }
-                d
             }
             Stage::Working => {
                 let steps = self.steps();
@@ -506,7 +823,7 @@ impl Render for Setup {
                         )
                         .child(div().mt(px(10.0)).text_size(px(22.0)).font_weight(FontWeight::BOLD).text_color(text()).child(if un { "已卸载" } else { "安装完成" }))
                         .child(div().text_size(px(13.0)).text_color(muted()).child(if un {
-                            "Otter 已从这台电脑移除".to_string()
+                            if self.opts.purge { "Otter 及其数据已从这台电脑移除" } else { "Otter 已从这台电脑移除,数据已保留" }.to_string()
                         } else if self.opts.add_path {
                             "新开的终端里可以直接用 otter 命令".to_string()
                         } else {
@@ -612,9 +929,14 @@ fn main() {
     }
     let dir = arg("--dir").map(PathBuf::from).unwrap_or(dir);
 
+    // 提权后的自己:不弹界面,只做一件事,用退出码告诉上面的进程成败
+    if let Some(mode) = ["--elevated-copy", "--elevated-remove"].into_iter().find(|m| args.iter().any(|a| a == m)) {
+        std::process::exit(if elevated_main(mode, &dir).is_ok() { 0 } else { 1 });
+    }
+
     // 应用内自动更新用:不弹界面,直接覆盖安装到 --dir(不动 PATH 和桌面快捷方式),装完启动新版
     if !uninstall && args.iter().any(|a| a == "--silent") {
-        let opts = Options { dir: dir.clone(), add_path: false, desktop: false };
+        let opts = Options { dir: dir.clone(), add_path: false, desktop: false, purge: false };
         if install(&opts, &|_| {}).is_ok() {
             let _ = std::process::Command::new(dir.join(if cfg!(windows) { "otter-gui.exe" } else { "otter-gui" })).spawn();
         }
@@ -646,7 +968,7 @@ fn main() {
             cx.new(|_| {
                 let mut s = Setup {
                     uninstall,
-                    opts: Options { dir: dir.clone(), add_path: true, desktop: false },
+                    opts: Options { dir: dir.clone(), add_path: true, desktop: false, purge: false },
                     stage: Stage::Welcome,
                     progress: Arc::new(Mutex::new(Progress { step: 0, result: None })),
                     shot: shot.clone().map(|p| (p, 0)),

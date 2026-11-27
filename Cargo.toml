@@ -62,7 +62,11 @@ gpui-macos = { package = "gpui-pre-macos", version = "=0.3.12", features = ["tes
 
 [target.'cfg(windows)'.dependencies]
 # 命名管道对端进程号:GetNamedPipeClientProcessId
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Pipes"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Pipes", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Registry"] }
+# 安装程序创建快捷方式(IShellLink)
+windows = { version = "0.61", features = ["Win32_System_Com", "Win32_UI_Shell"] }
+# 安装程序直接读写注册表(PATH、卸载入口)
+winreg = "0.56"
 
 [build-dependencies]
 flate2 = "1"
