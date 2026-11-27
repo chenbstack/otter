@@ -2,7 +2,7 @@
 //!
 //! 支持 ufw 和 firewalld(完整读写),nftables/iptables 只读显示。全程 SSH + root 命令,服务器上不装东西;
 //! 规则持久化交给 ufw/firewalld 自己。所有写入脚本里的值先过校验(端口、IP/网段、区域名),不拼未校验的文本。
-//! 防锁死:启用、改默认策略前先放行 SSH 端口;删除放行 SSH 端口的规则由调用方挡住(`is_ssh_rule`)。
+//! 防锁死:启用前先放行 SSH 端口;删除放行 SSH 端口的规则由调用方挡住(`is_ssh_rule`)。
 
 use std::net::IpAddr;
 
@@ -29,6 +29,25 @@ esac
 echo "@@IPT"; cat /opt/otter/firewall/iptables.conf 2>/dev/null
 echo "@@POL $(iptables -w -S INPUT 2>/dev/null | sed -n 's/^-P INPUT //p')"
 iptables -w -C INPUT -j OTTER-INPUT >/dev/null 2>&1 && echo "@@IPTON"
+case "$on" in *ufw*|*firewalld*) ;; *)
+  echo "@@IPTX"
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -w -S INPUT 2>/dev/null | head -n 200
+    seen=" INPUT OTTER-INPUT "
+    todo=$(iptables -w -S INPUT 2>/dev/null | sed -n 's/^-A INPUT.* -j \([A-Za-z0-9_.-]*\).*$/\1/p' | sort -u)
+    for pass in 1 2; do
+      next=
+      for ch in $todo; do
+        case "$ch" in ACCEPT|DROP|REJECT|RETURN|LOG|QUEUE|NFQUEUE|MASQUERADE|DNAT|SNAT) continue;; esac
+        case "$seen" in *" $ch "*) continue;; esac
+        seen="$seen$ch "
+        iptables -w -S "$ch" 2>/dev/null | head -n 200
+        next="$next $(iptables -w -S "$ch" 2>/dev/null | sed -n 's/^-A [^ ]*.* -j \([A-Za-z0-9_.-]*\).*$/\1/p' | sort -u)"
+      done
+      todo="$next"
+    done
+  fi;;
+esac
 echo "@@DU"; cat /opt/otter/firewall/docker-ports.conf 2>/dev/null
 echo "@@DUL"; command -v iptables >/dev/null 2>&1 && iptables -w -S DOCKER-USER 2>/dev/null | grep 'otter:dp'
 exit 0
@@ -98,6 +117,116 @@ pub struct Rule {
     pub key: String,
 }
 
+/// 服务器上别人(面板、手写脚本)写在 iptables 里的端口规则,只读显示
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveRule {
+    /// 规则所在的链:`INPUT`、面板自己的链……
+    pub chain: String,
+    pub proto: String,
+    pub port: String,
+    pub action: Action,
+    /// 来源地址;空表示任意
+    pub from: String,
+}
+
+/// 一条链里「按来源封禁」的规则合起来(安全软件自动封爆破 IP 会写很多条)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BanGroup {
+    pub chain: String,
+    /// 被封的不同来源个数
+    pub sources: usize,
+    /// 涉及的端口/协议,如 `22/tcp`
+    pub targets: Vec<String>,
+    pub rules: Vec<LiveRule>,
+}
+
+impl BanGroup {
+    pub fn summary(&self) -> String {
+        let mut t: Vec<String> = self.targets.iter().take(4).cloned().collect();
+        if self.targets.len() > 4 {
+            t.push(format!("等 {} 项", self.targets.len()));
+        }
+        format!("封禁了 {} 个来源 · {}", self.sources, t.join("、"))
+    }
+}
+
+/// 拆成:普通规则(放行、不限来源的拒绝)和按链合并的封禁组(拒绝/丢弃且指定了来源)。保持读到的顺序
+pub fn group_live(rules: &[LiveRule]) -> (Vec<LiveRule>, Vec<BanGroup>) {
+    let (mut normal, mut groups): (Vec<LiveRule>, Vec<BanGroup>) = (Vec::new(), Vec::new());
+    for r in rules {
+        if r.action == Action::Allow || r.from.is_empty() {
+            normal.push(r.clone());
+            continue;
+        }
+        let g = match groups.iter().position(|g| g.chain == r.chain) {
+            Some(i) => &mut groups[i],
+            None => {
+                groups.push(BanGroup { chain: r.chain.clone(), sources: 0, targets: Vec::new(), rules: Vec::new() });
+                groups.last_mut().unwrap()
+            }
+        };
+        g.rules.push(r.clone());
+    }
+    for g in &mut groups {
+        let mut srcs: Vec<&str> = g.rules.iter().map(|r| r.from.as_str()).collect();
+        srcs.sort_unstable();
+        srcs.dedup();
+        g.sources = srcs.len();
+        for r in &g.rules {
+            let t = format!("{}/{}", r.port, r.proto);
+            if !g.targets.contains(&t) {
+                g.targets.push(t);
+            }
+        }
+    }
+    (normal, groups)
+}
+
+/// 读 `iptables -S` 的输出:带端口的放行/丢弃/拒绝规则 → 列表;其余放行/丢弃/拒绝规则(状态跟踪、回环等)只数个数
+pub fn parse_ipt_live(text: &str) -> (Vec<LiveRule>, usize) {
+    let (mut rules, mut other) = (Vec::new(), 0usize);
+    for line in text.lines() {
+        let t: Vec<&str> = line.split_whitespace().collect();
+        if t.len() < 3 || t[0] != "-A" || t[1] == "OTTER-INPUT" {
+            continue;
+        }
+        let (mut proto, mut src, mut dport, mut target, mut odd) = (String::new(), String::new(), String::new(), "", false);
+        let mut i = 2;
+        while i < t.len() {
+            let val = t.get(i + 1).copied().unwrap_or("");
+            match t[i] {
+                "-p" | "--protocol" => proto = val.to_string(),
+                "-s" | "--source" => src = val.to_string(),
+                "--dport" | "--dports" | "--destination-port" | "--destination-ports" => dport = val.to_string(),
+                "-j" | "--jump" | "-g" => target = val,
+                "!" | "-i" | "-o" | "--sport" | "--sports" | "--match-set" | "--set" => {
+                    // 取反、网卡、源端口、ipset 这些:不当成简单的端口规则
+                    if t[i] != "--sport" && t[i] != "--sports" {
+                        odd = true;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let action = match target {
+            "ACCEPT" => Action::Allow,
+            "DROP" => Action::Deny,
+            "REJECT" => Action::Reject,
+            _ => continue,
+        };
+        let src = if src == "0.0.0.0/0" { String::new() } else { src };
+        if odd || dport.is_empty() || !matches!(proto.as_str(), "tcp" | "udp") {
+            other += 1;
+            continue;
+        }
+        for p in dport.split(',').filter(|p| !p.is_empty()) {
+            rules.push(LiveRule { chain: t[1].to_string(), proto: proto.clone(), port: p.replace(':', "-"), action, from: src.clone() });
+        }
+    }
+    (rules, other)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FwInfo {
     pub ufw_installed: bool,
@@ -121,6 +250,10 @@ pub struct FwInfo {
     pub input_policy: String,
     /// `OTTER-INPUT` 链在 iptables 里并被 INPUT 链调用
     pub ipt_live: bool,
+    /// 服务器 iptables 里已有的端口规则(面板等写的),只读
+    pub ext_rules: Vec<LiveRule>,
+    /// 已有的不含端口的放行/丢弃规则个数(状态跟踪、回环等)
+    pub ext_other: usize,
 }
 
 impl FwInfo {
@@ -137,10 +270,13 @@ impl FwInfo {
         self.ufw_active && self.firewalld_active
     }
 
-    /// 页面管理哪个:生效的那个;都没生效就取装了的(ufw 优先)
+    /// 页面管理哪个:生效的那个;都没生效就取 Otter 正在用的 iptables 规则链,再取装了的(ufw 优先)
     pub fn manage(&self) -> Option<Front> {
         self.active().or(if self.conflict() {
             None
+        } else if self.ipt_live {
+            // Otter 的 iptables 规则链正在生效:不因为另装了个没启用的 ufw / firewalld 就换掉它
+            Some(Front::Iptables)
         } else if self.ufw_installed {
             Some(Front::Ufw)
         } else if self.firewalld_installed {
@@ -159,7 +295,7 @@ pub fn parse(out: &str) -> FwInfo {
     let mut ufw_verbose = String::new();
     let mut ufw_num = String::new();
     let mut zone_text: Vec<(String, String)> = Vec::new();
-    let (mut du_conf, mut du_live, mut ipt_conf) = (String::new(), String::new(), String::new());
+    let (mut du_conf, mut du_live, mut ipt_conf, mut ipt_ext) = (String::new(), String::new(), String::new(), String::new());
     for line in out.lines() {
         if let Some(rest) = line.strip_prefix("@@") {
             let (tag, arg) = rest.split_once(' ').unwrap_or((rest, ""));
@@ -217,6 +353,10 @@ pub fn parse(out: &str) -> FwInfo {
                 ipt_conf.push_str(line);
                 ipt_conf.push('\n');
             }
+            "IPTX" => {
+                ipt_ext.push_str(line);
+                ipt_ext.push('\n');
+            }
             "DU" => {
                 du_conf.push_str(line);
                 du_conf.push('\n');
@@ -232,6 +372,7 @@ pub fn parse(out: &str) -> FwInfo {
         info.default_in = l.trim().split_whitespace().next().unwrap_or("").to_string();
     }
     info.du = parse_du(&du_conf, &du_live);
+    (info.ext_rules, info.ext_other) = parse_ipt_live(&ipt_ext);
     if info.manage() == Some(Front::Iptables) {
         info.rules = parse_ipt(&ipt_conf);
     }
@@ -564,15 +705,6 @@ pub fn ufw_disable() -> String {
     "PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH\nufw disable\n".into()
 }
 
-/// 改默认入站策略(`allow` / `deny`);改成 deny 前先放行 SSH 端口
-pub fn ufw_default(allow: bool, ssh: &[u16]) -> Result<String, String> {
-    if !allow {
-        ssh_ports_ok(ssh)?;
-    }
-    let pre = if allow { String::new() } else { format!("{}{}{}", ufw_preflight(ssh), guard_arm("ufw default allow incoming"), ufw_ssh_lines(ssh)) };
-    Ok(format!("PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH\nset -e\n{pre}ufw default {} incoming\n", if allow { "allow" } else { "deny" }))
-}
-
 // ---- firewalld 写入 ----
 
 pub fn valid_zone(z: &str) -> bool {
@@ -634,6 +766,198 @@ pub fn fwd_enable(ssh: &[u16]) -> Result<String, String> {
 
 pub fn fwd_disable() -> String {
     format!("{FWD_PATH}systemctl disable --now firewalld\n")
+}
+
+// ---- 切换防火墙(必要时先安装)-----------------------------------------------------------
+//
+// ufw ↔ firewalld,以及从 Otter 的 iptables 规则 / 什么都没有 切到 ufw 或 firewalld。
+// 顺序:安装(可能很慢)→ 预检 → 排定时回滚 → 停旧的 → 放行 SSH 端口 + 迁移规则 → 启用新的。
+// 回滚 = 停掉新的、把旧的恢复回来。只迁移简单的端口规则,其余列出来让用户知道会丢。
+
+/// 脚本里带这个标记的操作会往 `PROGRESS_FILE` 写当前阶段,执行器边跑边读,显示在页面上
+pub const PROGRESS_MARK: &str = "# otter-progress";
+pub const PROGRESS_FILE: &str = "/run/otter-fw-progress";
+
+/// 脚本里的一行:记下现在做到哪一步(写不进去也不影响操作)
+pub fn stage(text: &str) -> String {
+    format!("printf '%s' {} >{PROGRESS_FILE} 2>/dev/null || true\n", quote(text))
+}
+
+/// 给任何防火墙操作的脚本加上进度标记和第一个阶段
+pub fn with_progress(first: &str, script: &str) -> String {
+    format!("{PROGRESS_MARK}\n{}{script}", stage(first))
+}
+
+/// 脚本里带这个标记的操作可能要装软件,执行器给更长的超时
+pub const SLOW_MARK: &str = "# otter-slow";
+
+/// 常见 firewalld 服务名对应的端口
+fn service_ports(name: &str) -> Option<&'static [(&'static str, &'static str)]> {
+    Some(match name {
+        "ssh" => &[("22", "tcp")],
+        "http" => &[("80", "tcp")],
+        "https" => &[("443", "tcp")],
+        "ftp" => &[("21", "tcp")],
+        "smtp" => &[("25", "tcp")],
+        "dns" => &[("53", "tcp"), ("53", "udp")],
+        "mysql" => &[("3306", "tcp")],
+        "postgresql" => &[("5432", "tcp")],
+        "redis" => &[("6379", "tcp")],
+        _ => return None,
+    })
+}
+
+/// 现有规则里能带到新防火墙的 → (规则, 带不走的说明)
+pub fn migrate_rules(rules: &[Rule], ssh: &[u16], to: Front) -> (Vec<NewRule>, Vec<String>) {
+    let (mut ok, mut skip): (Vec<NewRule>, Vec<String>) = (Vec::new(), Vec::new());
+    let mut push = |n: NewRule, what: &str, ok: &mut Vec<NewRule>, skip: &mut Vec<String>| {
+        if n.validate().is_err() {
+            skip.push(format!("{what}(格式不支持)"));
+        } else if to == Front::Iptables && !n.from.is_empty() && !valid_du_source(&n.from) {
+            skip.push(format!("{what}(iptables 只支持 IPv4 来源)"));
+        } else if blocks_ssh(&n, ssh) {
+            skip.push(format!("{what}(会挡住 SSH 端口)"));
+        } else if !ok.contains(&n) {
+            ok.push(n);
+        }
+    };
+    for r in rules {
+        if r.v6 {
+            continue;
+        }
+        let from = if r.from.eq_ignore_ascii_case("anywhere") { String::new() } else { r.from.clone() };
+        let what = format!("{} {} 来自{}", r.action.label(), r.to, if from.is_empty() { "任意地址" } else { &from });
+        match r.kind {
+            RuleKind::Ufw(_) | RuleKind::Ipt | RuleKind::Port => {
+                let (port, proto) = match r.to.split_once('/') {
+                    Some((p, "tcp")) => (p, Proto::Tcp),
+                    Some((p, "udp")) => (p, Proto::Udp),
+                    Some(_) => {
+                        skip.push(format!("{what}(协议不支持)"));
+                        continue;
+                    }
+                    None => (r.to.as_str(), Proto::Both),
+                };
+                if r.action == Action::Limit || parse_port(port).is_none() {
+                    skip.push(format!("{what}(不是简单的端口规则)"));
+                    continue;
+                }
+                push(NewRule { action: r.action, port: port.replace(':', "-"), proto, from }, &what, &mut ok, &mut skip);
+            }
+            RuleKind::Service => match service_ports(&r.to) {
+                Some(ps) => {
+                    for (port, pr) in ps {
+                        let proto = if *pr == "tcp" { Proto::Tcp } else { Proto::Udp };
+                        push(NewRule { action: Action::Allow, port: port.to_string(), proto, from: String::new() }, &what, &mut ok, &mut skip);
+                    }
+                }
+                None => skip.push(format!("服务 {}(没有对应的端口)", r.to)),
+            },
+            RuleKind::Source => skip.push(format!("来源 {}(整个来源放行)", r.to)),
+            RuleKind::Rich => skip.push(format!("富规则 {}", r.key)),
+        }
+    }
+    (ok, skip)
+}
+
+fn install_snippet(to: Front) -> String {
+    let (cmd, pkg) = match to {
+        Front::Ufw => ("ufw", "ufw"),
+        _ => ("firewall-cmd", "firewalld"),
+    };
+    let st = stage(&format!("正在安装 {pkg}(可能要几分钟)"));
+    // 安装器的输出写进日志文件,失败时只报最后几行(不然最后一行是「Processing triggers…」这种看不出原因的内容)
+    format!(
+        r#"{SLOW_MARK}
+if ! command -v {cmd} >/dev/null 2>&1; then
+  {st}L=/tmp/otter-fw-install.log; : >"$L"
+  if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get install -y {pkg} >>"$L" 2>&1 || {{ apt-get update >>"$L" 2>&1 && apt-get install -y {pkg} >>"$L" 2>&1; }}
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y {pkg} >>"$L" 2>&1
+  elif command -v yum >/dev/null 2>&1; then yum install -y {pkg} >>"$L" 2>&1
+  elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install {pkg} >>"$L" 2>&1
+  elif command -v apk >/dev/null 2>&1; then apk add {pkg} >>"$L" 2>&1
+  else echo "没有支持的包管理器,请手动安装 {pkg}" >&2; exit 1; fi || true
+  command -v {cmd} >/dev/null 2>&1 || {{ tail -n 3 "$L" >&2; echo "安装 {pkg} 失败(上面是安装器的最后几行)" >&2; exit 1; }}
+fi
+"#
+    )
+}
+
+/// 切换:`from` 是现在管理的前端(没有就是 None)
+pub fn switch_script(from: Option<Front>, to: Front, rules: &[Rule], ssh: &[u16]) -> Result<String, String> {
+    if from == Some(to) || (to == Front::Iptables && from.is_none()) {
+        return Err("不需要切换".into());
+    }
+    ssh_ports_ok(ssh)?;
+    let (moved, _) = migrate_rules(rules, ssh, to);
+    // 停旧的 / 回滚时恢复旧的
+    let (stop_old, restore_old) = match from {
+        Some(Front::Ufw) => ("ufw disable >/dev/null 2>&1 || true\n", "ufw --force enable"),
+        Some(Front::Firewalld) => ("systemctl disable --now firewalld\n", "systemctl enable --now firewalld"),
+        Some(Front::Iptables) => (&*ipt_disable_cmds(), "sh /opt/otter/firewall/iptables.sh; systemctl enable otter-iptables.service"),
+        None => ("", "true"),
+    };
+    let undo_new = match to {
+        Front::Ufw => "ufw disable".to_string(),
+        Front::Firewalld => "systemctl disable --now firewalld".to_string(),
+        Front::Iptables => ipt_disable_cmds().trim_end().replace('\n', "; "),
+    };
+    let rollback = format!("{undo_new}; {restore_old}");
+    let mut s = format!("{PROGRESS_MARK}\n{FWD_PATH}{}", if to == Front::Iptables { String::new() } else { install_snippet(to) });
+    let old_name = from.map(Front::label).unwrap_or("");
+    let stop_stage = if from.is_some() { stage(&format!("正在停用 {old_name}")) } else { String::new() };
+    let move_stage = stage(&format!("正在放行 SSH 端口并带过去 {} 条规则", moved.len()));
+    match to {
+        Front::Iptables => {
+            s.push_str(&stage("正在设置自动回滚保险"));
+            s.push_str(&guard_arm(&rollback));
+            s.push_str(&stop_stage);
+            s.push_str(stop_old);
+            s.push_str(&move_stage);
+            let mut all: Vec<NewRule> = ssh.iter().map(|p| NewRule { action: Action::Allow, port: p.to_string(), proto: Proto::Tcp, from: String::new() }).collect();
+            all.extend(moved.iter().cloned());
+            s.push_str(&ipt_add_many(&all, &[])?);
+        }
+        Front::Ufw => {
+            s.push_str(&stage("正在检查有没有规则挡住 SSH 端口"));
+            s.push_str(&ufw_preflight(ssh));
+            s.push_str(&stage("正在设置自动回滚保险"));
+            s.push_str(&guard_arm(&rollback));
+            s.push_str(&stop_stage);
+            s.push_str(stop_old);
+            s.push_str(&move_stage);
+            s.push_str(&ufw_ssh_lines(ssh));
+            for n in &moved {
+                s.push_str(&ufw_add(n)?.lines().filter(|l| l.starts_with("ufw ")).map(|l| format!("{l} >/dev/null\n")).collect::<String>());
+            }
+            s.push_str(&stage("正在启用 ufw"));
+            s.push_str("ufw --force enable\n");
+        }
+        _ => {
+            s.push_str(&stage("正在检查有没有规则挡住 SSH 端口"));
+            s.push_str(&fwd_preflight(ssh));
+            s.push_str(&stage("正在设置自动回滚保险"));
+            s.push_str(&guard_arm(&rollback));
+            s.push_str(&stop_stage);
+            s.push_str(stop_old);
+            s.push_str(&stage("正在启用 firewalld"));
+            s.push_str("systemctl enable --now firewalld\nz=$(firewall-cmd --get-default-zone)\n");
+            s.push_str(&move_stage);
+            for p in ssh {
+                s.push_str(&format!("firewall-cmd --permanent --add-port={p}/tcp >/dev/null\n"));
+            }
+            for n in &moved {
+                s.push_str(&fwd_add("public", n)?.lines().filter(|l| l.starts_with("firewall-cmd --permanent")).map(|l| format!("{} >/dev/null\n", l.replace("--zone=public", "--zone=\"$z\""))).collect::<String>());
+            }
+            s.push_str("firewall-cmd --reload\n");
+        }
+    }
+    Ok(s)
+}
+
+/// 停掉 Otter 的 iptables 规则链。每行后面加 `|| true`:单元不存在时 `systemctl disable` 会失败,不能让 `set -e` 在这里退出
+fn ipt_disable_cmds() -> String {
+    ipt_disable().lines().skip(1).filter(|l| !l.starts_with("exit")).map(|l| format!("{l} || true\n")).collect()
 }
 
 // ---- iptables(没有 ufw / firewalld 时)------------------------------------------------
@@ -1031,8 +1355,7 @@ mod tests {
         assert!(blocks_ssh(&nr(Action::Deny, "20-30", Proto::Tcp, ""), &[22]));
         assert!(!blocks_ssh(&nr(Action::Deny, "22", Proto::Tcp, "1.2.3.4"), &[22]));
         assert!(!blocks_ssh(&nr(Action::Allow, "22", Proto::Tcp, ""), &[22]));
-        assert!(ufw_enable(&[]).is_err() && fwd_enable(&[]).is_err() && ufw_default(false, &[]).is_err());
-        assert!(ufw_default(true, &[]).is_ok());
+        assert!(ufw_enable(&[]).is_err() && fwd_enable(&[]).is_err());
     }
 
     fn sh_ok(script: &str) {
@@ -1077,14 +1400,113 @@ mod tests {
     }
 
     #[test]
+    fn switch_and_migrate() {
+        let ufw = parse("@@HAS ufw\n@@ON ufw\n@@SSH 22\n@@UFW\nStatus: active\nDefault: deny (incoming), allow (outgoing), disabled (routed)\n@@UFWN\nStatus: active\n\n     To                         Action      From\n     --                         ------      ----\n[ 1] 22/tcp                     ALLOW IN    Anywhere\n[ 2] 80/tcp                     ALLOW IN    Anywhere\n[ 3] 3306/tcp                   ALLOW IN    10.0.0.0/8\n[ 4] 22/tcp (v6)                ALLOW IN    Anywhere (v6)\n[ 5] OpenSSH                    ALLOW IN    Anywhere\n");
+        let (ok, skip) = migrate_rules(&ufw.rules, &[22], Front::Firewalld);
+        assert!(ok.iter().any(|n| n.port == "80" && n.proto == Proto::Tcp && n.from.is_empty()), "{ok:?} {skip:?}");
+        assert!(ok.iter().any(|n| n.port == "3306" && n.from == "10.0.0.0/8"));
+        assert!(!skip.is_empty());
+        let s = switch_script(Some(Front::Ufw), Front::Firewalld, &ufw.rules, &[22]).unwrap();
+        assert!(s.contains(SLOW_MARK) && s.contains(GUARD_MARK) && s.contains("ufw disable") && s.contains("--add-port=80/tcp") && s.contains("--zone=\"$z\""), "{s}");
+        sh_ok(&s);
+        let s = switch_script(Some(Front::Firewalld), Front::Ufw, &[], &[22]).unwrap();
+        assert!(s.contains("apt-get install -y ufw") && s.contains("systemctl disable --now firewalld") && s.contains("ufw --force enable"));
+        sh_ok(&s);
+        sh_ok(&switch_script(Some(Front::Iptables), Front::Ufw, &[], &[22]).unwrap());
+        sh_ok(&switch_script(None, Front::Firewalld, &[], &[22, 2222]).unwrap());
+        let s = switch_script(Some(Front::Ufw), Front::Iptables, &ufw.rules, &[22]).unwrap();
+        assert!(s.contains(GUARD_MARK) && s.contains("ufw disable") && s.contains("allow tcp 80 -") && s.contains("allow tcp 3306 10.0.0.0/8") && s.contains("ufw --force enable"), "{s}");
+        sh_ok(&s);
+        assert!(switch_script(None, Front::Iptables, &[], &[22]).is_err());
+        assert!(switch_script(Some(Front::Ufw), Front::Ufw, &[], &[22]).is_err());
+        assert!(switch_script(None, Front::Ufw, &[], &[]).is_err());
+    }
+
+    #[test]
+    fn stopping_iptables_survives_set_e() {
+        // 单元不存在时 systemctl disable 失败,脚本不能因此退出
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("otter-fws-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        std::fs::create_dir_all(&dir).unwrap();
+        for c in ["systemctl", "iptables"] {
+            std::fs::write(dir.join(c), "#!/bin/sh\nexit 1\n").unwrap();
+            std::process::Command::new("chmod").arg("+x").arg(dir.join(c)).status().unwrap();
+        }
+        let script = format!("set -e\n{}echo reached\n", ipt_disable_cmds());
+        std::fs::write(dir.join("t.sh"), script).unwrap();
+        let out = std::process::Command::new("sh").arg(dir.join("t.sh")).env("PATH", format!("{}:/usr/bin:/bin", dir.display())).output().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(String::from_utf8_lossy(&out.stdout).contains("reached"), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    #[test]
+    fn live_iptables_not_replaced_by_installed_ufw() {
+        let i = FwInfo { ufw_installed: true, iptables: true, ipt_live: true, ..Default::default() };
+        assert_eq!(i.manage(), Some(Front::Iptables));
+        let i = FwInfo { ufw_installed: true, iptables: true, ..Default::default() };
+        assert_eq!(i.manage(), Some(Front::Ufw));
+        let i = FwInfo { ufw_installed: true, ufw_active: true, iptables: true, ipt_live: true, ..Default::default() };
+        assert_eq!(i.manage(), Some(Front::Ufw));
+    }
+
+    #[test]
+    fn existing_iptables_rules() {
+        let text = "-P INPUT ACCEPT\n-A INPUT -j 1PANEL-INPUT\n-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT\n-A INPUT -i lo -j ACCEPT\n-A 1PANEL-INPUT -p tcp -m tcp --dport 22 -j ACCEPT\n-A 1PANEL-INPUT -p tcp -m tcp --dport 28000 -s 10.0.0.0/8 -j ACCEPT\n-A 1PANEL-INPUT -p udp -m multiport --dports 443,8000:8100 -j ACCEPT\n-A 1PANEL-INPUT -p tcp -m tcp --dport 3306 -j DROP\n-A OTTER-INPUT -p tcp --dport 80 -j ACCEPT\n";
+        let (r, other) = parse_ipt_live(text);
+        assert_eq!(other, 2);
+        assert_eq!(r.len(), 5, "{r:?}");
+        assert_eq!((r[0].chain.as_str(), r[0].port.as_str(), r[0].action, r[0].from.as_str()), ("1PANEL-INPUT", "22", Action::Allow, ""));
+        assert_eq!(r[1].from, "10.0.0.0/8");
+        assert_eq!((r[2].proto.as_str(), r[2].port.as_str()), ("udp", "443"));
+        assert_eq!(r[3].port, "8000-8100");
+        assert_eq!(r[4].action, Action::Deny);
+        // 读取脚本语法
+        sh_ok(READ_SCRIPT);
+        let i = parse("@@HAS iptables\n@@ON\n@@SSH 22\n@@IPTX\n-A 1PANEL-INPUT -p tcp -m tcp --dport 22 -j ACCEPT\n@@DU\n");
+        assert_eq!(i.ext_rules.len(), 1);
+    }
+
+    #[test]
+    fn read_script_finds_other_chains() {
+        // 假 iptables:INPUT 里只有一条直接跳到面板链的规则(没有别的条件),面板链里有端口规则
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("otter-fwr-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = "#!/bin/sh\ncase \"$*\" in\n*\"-S INPUT\"*) printf '%s\\n' '-P INPUT ACCEPT' '-A INPUT -j 1PANEL_INPUT' '-A INPUT -m state --state ESTABLISHED -j ACCEPT';;\n*\"-S 1PANEL_INPUT\"*) printf '%s\\n' '-N 1PANEL_INPUT' '-A 1PANEL_INPUT -p tcp -m tcp --dport 22 -j ACCEPT' '-A 1PANEL_INPUT -p tcp -m tcp --dport 28000 -j ACCEPT';;\nesac\nexit 0\n";
+        std::fs::write(dir.join("iptables"), fake).unwrap();
+        std::fs::write(dir.join("t.sh"), READ_SCRIPT).unwrap();
+        std::process::Command::new("chmod").arg("+x").arg(dir.join("iptables")).status().unwrap();
+        let out = std::process::Command::new("sh").arg(dir.join("t.sh")).env("PATH", format!("{}:/usr/bin:/bin", dir.display())).output().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let info = parse(&String::from_utf8_lossy(&out.stdout));
+        let ports: Vec<&str> = info.ext_rules.iter().map(|r| r.port.as_str()).collect();
+        assert_eq!(ports, ["22", "28000"], "{}", String::from_utf8_lossy(&out.stdout));
+        assert_eq!(info.ext_other, 1);
+    }
+
+    #[test]
+    fn ban_groups() {
+        let mk = |chain: &str, port: &str, proto: &str, a: Action, from: &str| LiveRule { chain: chain.into(), proto: proto.into(), port: port.into(), action: a, from: from.into() };
+        let rules = vec![
+            mk("1PANEL_BASIC", "443", "tcp", Action::Allow, ""),
+            mk("YJ", "22", "tcp", Action::Reject, "1.1.1.1/32"),
+            mk("YJ", "22", "udp", Action::Reject, "1.1.1.1/32"),
+            mk("YJ", "22", "tcp", Action::Reject, "2.2.2.2/32"),
+            mk("YJ", "22", "udp", Action::Reject, "2.2.2.2/32"),
+            mk("X", "3306", "tcp", Action::Deny, ""),
+        ];
+        let (normal, groups) = group_live(&rules);
+        assert_eq!(normal.len(), 2);
+        assert_eq!(groups.len(), 1);
+        assert_eq!((groups[0].sources, groups[0].rules.len()), (2, 4));
+        assert_eq!(groups[0].summary(), "封禁了 2 个来源 · 22/tcp、22/udp");
+    }
+
+    #[test]
     fn guard_scripts() {
         let u = ufw_enable(&[22]).unwrap();
         assert!(u.contains(GUARD_MARK) && u.contains("systemd-run") && u.contains("ufw disable"));
         sh_ok(&u);
-        let d = ufw_default(false, &[22]).unwrap();
-        assert!(d.contains(GUARD_MARK) && d.contains("ufw default allow incoming"));
-        sh_ok(&d);
-        assert!(!ufw_default(true, &[22]).unwrap().contains(GUARD_MARK));
         let f = fwd_enable(&[22]).unwrap();
         assert!(f.contains(GUARD_MARK) && f.contains("disable --now firewalld"));
         sh_ok(&f);
@@ -1104,7 +1526,6 @@ mod tests {
         assert!(ufw_delete(3, "x'y").is_err());
         sh_ok(&ufw_enable(&[22, 2222]).unwrap());
         sh_ok(&ufw_disable());
-        sh_ok(&ufw_default(false, &[22]).unwrap());
         let f = fwd_add("public", &nr(Action::Allow, "80", Proto::Tcp, "")).unwrap();
         assert!(f.contains("--add-port=80/tcp"));
         let f = fwd_add("public", &nr(Action::Deny, "3306", Proto::Tcp, "")).unwrap();

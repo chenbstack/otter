@@ -892,11 +892,12 @@ pub struct Tag {
     mono: bool,
     size: f32,
     color: Rgba,
+    bg: Rgba,
     decorate: Option<Box<dyn FnOnce(Div) -> AnyElement>>,
 }
 
 pub fn tag(label: impl Into<SharedString>) -> Tag {
-    Tag { label: label.into(), mono: false, size: t::TYPE_CAPTION, color: c::secondary(), decorate: None }
+    Tag { label: label.into(), mono: false, size: t::TYPE_CAPTION, color: c::secondary(), bg: c::idle_soft(), decorate: None }
 }
 
 impl Tag {
@@ -914,6 +915,11 @@ impl Tag {
         self.color = color;
         self
     }
+    /// 换底色(状态类标签:放行绿、丢弃红……),和 `color` 配成一对。
+    pub fn bg(mut self, bg: Rgba) -> Self {
+        self.bg = bg;
+        self
+    }
     /// 给标签本体加东西(id、悬停、提示、光标),返回最终元素。
     pub fn decorate(mut self, f: impl FnOnce(Div) -> AnyElement + 'static) -> Self {
         self.decorate = Some(Box::new(f));
@@ -925,7 +931,7 @@ impl IntoElement for Tag {
     type Element = Div;
 
     fn into_element(self) -> Div {
-        let pill = div().flex_shrink_0().px(px(7.0)).py(px(2.0)).rounded(px(t::RADIUS_SM)).bg(c::idle_soft()).text_size(px(self.size)).text_color(self.color).when(self.mono, |d| d.font_family(crate::MONO)).child(self.label);
+        let pill = div().flex_shrink_0().px(px(7.0)).py(px(2.0)).rounded(px(t::RADIUS_SM)).bg(self.bg).text_size(px(self.size)).text_color(self.color).when(self.mono, |d| d.font_family(crate::MONO)).child(self.label);
         let inner = match self.decorate {
             Some(f) => f(pill),
             None => pill.into_any_element(),

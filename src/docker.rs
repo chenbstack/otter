@@ -660,6 +660,8 @@ struct Shared {
     /// 正在进行的操作,键是 `动作:目标`
     busy: Mutex<HashSet<String>>,
     notice: Mutex<Option<String>>,
+    /// 防火墙操作当前做到哪一步;有值表示有防火墙操作在执行
+    progress: Mutex<Option<String>>,
     /// 读到的 daemon.json:(文件是否存在, 内容) 或失败原因;界面取走后清空
     daemon: Mutex<Option<Result<(bool, String), String>>>,
     /// 读到的已登录仓库;界面取走后清空
@@ -741,6 +743,7 @@ impl Docker {
             install: Mutex::new(InstallView::default()),
             install_following: AtomicBool::new(false),
             notice: Mutex::new(None),
+            progress: Mutex::new(None),
             daemon: Mutex::new(None),
             registries: Mutex::new(None),
             sys: Mutex::new(HashMap::new()),
@@ -1005,6 +1008,11 @@ impl Docker {
 
     pub fn install_view(&self) -> InstallView {
         self.sh.install.lock().unwrap().clone()
+    }
+
+    /// 防火墙操作当前的阶段(没有操作在执行则 None)
+    pub fn progress(&self) -> Option<String> {
+        self.sh.progress.lock().ok().and_then(|p| p.clone())
     }
 
     /// 这个目标上正在进行的操作的动词(没有则 None)
@@ -1729,7 +1737,28 @@ async fn sys_job(r: &Runner, sh: &Shared, job: crate::sysops::Job) {
     let key = format!("{}:{}", job.label, job.target);
     sh.busy.lock().unwrap().insert(key.clone());
     sh.bump();
-    let res = sys_exec(r, &job.script, job.root, job.input.as_deref(), Duration::from_secs(60)).await;
+    let secs = if job.script.contains(crate::firewall::SLOW_MARK) { 600 } else { 60 };
+    let track = job.script.contains(crate::firewall::PROGRESS_MARK);
+    if track {
+        set_progress(sh, Some(format!("正在{}", job.label)));
+    }
+    let run = sys_exec(r, &job.script, job.root, job.input.as_deref(), Duration::from_secs(secs));
+    tokio::pin!(run);
+    // 脚本跑着的时候,每隔一会儿读一次它写下的阶段
+    let res = loop {
+        tokio::select! {
+            out = &mut run => break out,
+            _ = tokio::time::sleep(Duration::from_millis(1200)), if track => {
+                let cmd = format!("cat {} 2>/dev/null", crate::firewall::PROGRESS_FILE);
+                if let Ok(o) = sys_exec(r, &cmd, false, None, Duration::from_secs(8)).await {
+                    let t = o.stdout.trim();
+                    if o.code == 0 && !t.is_empty() {
+                        set_progress(sh, Some(t.to_string()));
+                    }
+                }
+            }
+        }
+    };
     sh.busy.lock().unwrap().remove(&key);
     let mut msg = match res {
         Ok(ref o) if o.code == 0 => format!("已{}:{}", job.label, job.target),
@@ -1738,24 +1767,43 @@ async fn sys_job(r: &Runner, sh: &Shared, job: crate::sysops::Job) {
     };
     if let (Some(g), Ok(o)) = (&job.guard, &res) {
         if o.code == 0 {
-            msg = guard_check(r, g, msg).await;
+            msg = guard_check(r, sh, g, msg).await;
         }
     }
     logs::push(logs::Level::Info, "服务器", msg.clone());
     *sh.notice.lock().unwrap() = Some(msg);
     sh.bump();
     if let Some((kind, script, root)) = job.reload {
+        if track {
+            set_progress(sh, Some("正在读取最新状态".into()));
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
         sys_load(r, sh, kind, &script, root).await;
+    }
+    if track {
+        set_progress(sh, None);
+        let _ = sys_exec(r, &format!("rm -f {}", crate::firewall::PROGRESS_FILE), true, None, Duration::from_secs(8)).await;
+    }
+}
+
+fn set_progress(sh: &Shared, text: Option<String>) {
+    let mut p = sh.progress.lock().unwrap();
+    if *p != text {
+        *p = text;
+        drop(p);
+        sh.bump();
     }
 }
 
 /// 高风险操作做完后:隔几秒新建一次 TCP 连接,连得上就取消服务器上的定时回滚,一直连不上就让它回滚
-async fn guard_check(r: &Runner, g: &crate::sysops::Guard, done: String) -> String {
+async fn guard_check(r: &Runner, sh: &Shared, g: &crate::sysops::Guard, done: String) -> String {
     let addr = format!("{}:{}", g.host, g.port);
     let deadline = Instant::now() + Duration::from_secs(u64::from(g.secs.saturating_sub(40)));
     let mut ok = false;
+    let mut n = 0;
     loop {
+        n += 1;
+        set_progress(sh, Some(format!("正在确认能新建 SSH 连接(第 {n} 次)")));
         let c = tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(&addr)).await;
         if matches!(c, Ok(Ok(_))) {
             ok = true;
@@ -1770,6 +1818,7 @@ async fn guard_check(r: &Runner, g: &crate::sysops::Guard, done: String) -> Stri
         logs::push(logs::Level::Warn, "服务器", format!("{addr} 新建连接失败,等待服务器自动回滚"));
         return format!("{done}。但新连接连不上 {addr},服务器会在 {} 秒内自动回滚防火墙", g.secs);
     }
+    set_progress(sh, Some("正在取消自动回滚".into()));
     match sys_exec(r, &g.cancel, true, None, Duration::from_secs(20)).await {
         Ok(o) if o.code == 0 => format!("{done}(已确认能新建 SSH 连接,自动回滚已取消)"),
         _ => format!("{done}。能新建连接,但取消自动回滚失败:{} 秒后服务器会关闭防火墙,请重新启用", g.secs),
