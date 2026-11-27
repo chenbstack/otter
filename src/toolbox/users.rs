@@ -11,7 +11,7 @@ pub const USERS_SCRIPT: &str = r#"PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; expo
 echo '@@GROUP'; for g in sudo wheel admin; do getent group $g >/dev/null 2>&1 && { echo $g; break; }; done
 today=$(( $(date +%s) / 86400 ))
 echo '@@USERS'
-getent passwd | while IFS=: read -r n x u g gecos h s; do
+{ getent passwd 2>/dev/null || cat /etc/passwd; } | while IFS=: read -r n x u g gecos h s; do
   if [ "$u" = 0 ] || { [ "$u" -ge 1000 ] 2>/dev/null && [ "$u" -lt 60000 ]; }; then
     sh=$(awk -F: -v n="$n" '$1==n{print $2 ":" $8}' /etc/shadow 2>/dev/null)
     hash=${sh%%:*}; exp=${sh#*:}

@@ -13,6 +13,7 @@ use crate::sysops::quote;
 pub const SSH_SCRIPT: &str = r#"PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH
 echo '@@SSHD'
 { sshd -T 2>/dev/null || sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null; } | grep -iE '^(port|permitrootlogin|passwordauthentication|pubkeyauthentication|maxauthtries|clientaliveinterval) '
+echo '@@DROPBEAR'; if ! command -v sshd >/dev/null 2>&1 && command -v dropbear >/dev/null 2>&1; then echo yes; fi
 echo '@@UNIT'; if systemctl cat ssh.service >/dev/null 2>&1; then echo ssh; else echo sshd; fi
 echo '@@SOCKET'; if systemctl is-active ssh.socket >/dev/null 2>&1; then echo yes; else echo no; fi
 echo '@@INCLUDE'; if grep -qiE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config 2>/dev/null; then echo yes; else echo no; fi
@@ -84,6 +85,9 @@ fn yes(v: &str) -> bool {
 pub fn parse_ssh(out: &str) -> Result<SshInfo, String> {
     let m = sections(out);
     let sshd = m.get("SSHD").cloned().unwrap_or_default();
+    if sshd.is_empty() && first(&m, "DROPBEAR") == "yes" {
+        return Err("这台服务器用 dropbear(OpenWrt 等精简系统),暂不支持 SSH 设置和公钥管理".into());
+    }
     if sshd.is_empty() {
         return Err("读不到 sshd 的有效配置(服务器上没有 sshd,或没有 root 权限)".into());
     }

@@ -21,7 +21,16 @@ const T_FN: &str = "T() { s=$1; shift; if command -v timeout >/dev/null 2>&1; th
 // ================= 端口检查 =================
 
 /// 读监听的端口(需要 root 才能看到别的用户的进程名)
-pub const PORTS_SCRIPT: &str = "PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH\ncommand -v ss >/dev/null 2>&1 || { echo '服务器上没有 ss 命令(iproute2),没法读取监听端口' >&2; exit 127; }\nss -tulnpH 2>&1\n";
+pub const PORTS_SCRIPT: &str = r#"PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH
+if command -v ss >/dev/null 2>&1; then
+ss -tulnpH 2>&1
+elif command -v netstat >/dev/null 2>&1; then
+# BusyBox(OpenWrt、Alpine)没有 ss:读 netstat,改写成 ss 的行格式
+netstat -tulnp 2>/dev/null | awk '/^(tcp|udp)/ { p = substr($1, 1, 3); if (p == "tcp") { if ($6 != "LISTEN") next; prog = $7 } else prog = $6
+  split(prog, a, "/"); u = ""; if (a[1] ~ /^[0-9]+$/) u = " users:((\"" a[2] "\",pid=" a[1] ",fd=0))"
+  print p, "LISTEN 0 0", $4, "0.0.0.0:*" u }'
+else echo '服务器上既没有 ss(iproute2)也没有 netstat,没法读取监听端口' >&2; exit 127; fi
+"#;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Listen {
@@ -870,6 +879,16 @@ pub fn fmt_kb(kb: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn netstat_fallback_awk_gives_ss_lines() {
+        let net = "Proto Recv-Q Send-Q Local Address Foreign Address State PID/Program name\ntcp 0 0 192.168.11.1:22 0.0.0.0:* LISTEN 3399/dropbear\ntcp 0 0 192.168.1.5:5000 1.2.3.4:80 ESTABLISHED 9/x\ntcp 0 0 :::80 :::* LISTEN 77/nginx\nudp 0 0 0.0.0.0:53 0.0.0.0:* 14981/dnsmasq\nudp 0 0 0.0.0.0:68 0.0.0.0:* -\n";
+        let awk = PORTS_SCRIPT.split("awk '").nth(1).unwrap().split("'\nelse").next().unwrap();
+        let out = std::process::Command::new("sh").arg("-c").arg(format!("printf '%s' \"$N\" | awk '{awk}'")).env("N", net).output().unwrap();
+        let v = parse_listens(&String::from_utf8_lossy(&out.stdout));
+        let got: Vec<(String, u16, Vec<(String, u32)>)> = v.iter().map(|l| (l.proto.clone(), l.port, l.procs.clone())).collect();
+        assert_eq!(got, vec![("tcp".into(), 22, vec![("dropbear".into(), 3399)]), ("tcp".into(), 80, vec![("nginx".into(), 77)]), ("udp".into(), 53, vec![("dnsmasq".into(), 14981)]), ("udp".into(), 68, vec![])]);
+    }
 
     const SS: &str = "tcp   LISTEN 0 4096 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=744,fd=3))\ntcp   LISTEN 0 4096 [::]:22 [::]:* users:((\"sshd\",pid=744,fd=4))\ntcp   LISTEN 0 4096 127.0.0.1:5432 0.0.0.0:* users:((\"postgres\",pid=900,fd=5))\nudp   UNCONN 0 0 127.0.0.53%lo:53 0.0.0.0:*\ntcp   LISTEN 0 511 *:8080 *:* users:((\"docker-proxy\",pid=1,fd=4),(\"x\",pid=2,fd=1))\n";
 
