@@ -2209,9 +2209,10 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
     tokio::spawn(monitor_task(session.clone(), sh.clone()));
     // 运维页(进程、服务、存储、计划任务)和 Docker 也互不依赖;要 root 的操作走 sudo(免密,或用节点保存的密码)
     let sys = Arc::new(Runner { session: session.clone(), sudo: if conn.auth.password.is_some() { Sudo::WithPassword } else { Sudo::Passwordless }, password: conn.auth.password.clone() });
-    io.begin_step("检测 Docker");
-    let runner = match probe(&session, conn).await {
-        Ok(r) => r,
+    let runner = 'probe: loop {
+        io.begin_step("检测 Docker");
+        match probe(&session, conn).await {
+        Ok(r) => break r,
         Err(p) => {
             // 能连上但跑不了 docker:不是连接失败,留在页面里按问题类型解释
             io.done_step();
@@ -2221,7 +2222,8 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
             // 保持连接,等界面点「重试」
             while let Some(cmd) = rx.recv().await {
                 match cmd {
-                    Cmd::Refresh => return Err("请重新进入页面重试".into()),
+                    // 点「重试」:重新检测,通过就进入正常流程,没通过就更新问题说明,连接不断
+                    Cmd::Refresh => continue 'probe,
                     Cmd::InstallProbe => {
                         let (r, sh2, pw) = (sys.clone(), sh.clone(), conn.auth.password.is_some());
                         tokio::spawn(async move { run_install_probe(&r, &sh2, pw).await });
@@ -2253,8 +2255,10 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
             }
             return Ok(());
         }
+        }
     };
     io.done_step();
+    *sh.problem.lock().unwrap() = None;
     *sh.status.lock().unwrap() = Status::Ready;
     sh.bump();
     logs::push(logs::Level::Debug, label, "Docker 已就绪");

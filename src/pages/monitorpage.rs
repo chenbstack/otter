@@ -276,23 +276,25 @@ fn foot(el: impl IntoElement) -> Div {
 
 fn cpu_card(m: &MonSnapshot) -> Stateful<Div> {
     let n = &m.now;
+    let (cpu, user, sys, wait) = (tw("cpu", n.cpu as f64) as f32, tw("cpu-u", n.cpu_user as f64) as f32, tw("cpu-s", n.cpu_sys as f64) as f32, tw("cpu-w", n.cpu_wait as f64) as f32);
     let tone = alert(c::cpu(), n.cpu);
     tile("hud-cpu", tone)
         .child(tag("CPU", "处理器", tone, n.host.cpu_model.clone()))
-        .child(head(big(format!("{:.0}", n.cpu), "%", tone)))
+        .child(head(big(format!("{cpu:.0}"), "%", tone)))
         .child(block_graph(m.cpu_h.clone(), ("cpu-g", "CPU", pct), Some(100.0), 100.0, CARD_GRAPH_H, Palette::fixed(tone), false))
-        .child(foot(div().flex().flex_row().gap_x(px(16.0)).child(kv("用户", format!("{:.0}%", n.cpu_user), c::text())).child(kv("系统", format!("{:.0}%", n.cpu_sys), c::text())).child(kv("等待", format!("{:.0}%", n.cpu_wait), c::text())).children(n.temp_c.map(|t| kv("温度", format!("{t:.0}°C"), alert(c::text(), t))))))
+        .child(foot(div().flex().flex_row().gap_x(px(16.0)).child(kv("用户", format!("{user:.0}%"), c::text())).child(kv("系统", format!("{sys:.0}%"), c::text())).child(kv("等待", format!("{wait:.0}%"), c::text())).children(n.temp_c.map(|t| kv("温度", format!("{:.0}°C", tw("temp", t as f64)), alert(c::text(), t))))))
 }
 
 fn mem_card(m: &MonSnapshot) -> Stateful<Div> {
     let n = &m.now;
     let p = pct_of(n.mem_used, n.mem_total);
+    let (shown_p, used, free) = (tw("mem", p as f64), tw("mem-used", n.mem_used as f64), tw("mem-free", n.mem_total.saturating_sub(n.mem_used) as f64));
     let tone = alert(c::mem(), p);
     tile("hud-mem", tone)
         .child(tag("MEM", "内存", tone, format!("共 {}", monitor::fmt_bytes(n.mem_total as f64))))
-        .child(head(big(format!("{p:.0}"), "%", tone)))
+        .child(head(big(format!("{shown_p:.0}"), "%", tone)))
         .child(mem_graph(m.mem_s.clone(), n.mem_total.max(1) as f32, CARD_GRAPH_H, tone))
-        .child(foot(div().flex().flex_row().gap_x(px(16.0)).child(kv("已用", monitor::fmt_bytes(n.mem_used as f64), c::text())).child(kv("可用", monitor::fmt_bytes(n.mem_total.saturating_sub(n.mem_used) as f64), c::text()))))
+        .child(foot(div().flex().flex_row().gap_x(px(16.0)).child(kv("已用", monitor::fmt_bytes(used), c::text())).child(kv("可用", monitor::fmt_bytes(free), c::text()))))
 }
 
 fn disk_card(m: &MonSnapshot) -> Stateful<Div> {
@@ -303,7 +305,7 @@ fn disk_card(m: &MonSnapshot) -> Stateful<Div> {
     let top = pr.max(pw).max(1_048_576.0);
     tile("hud-disk", tone)
         .child(tag("DISK·IO", "磁盘读写", tone, format!("繁忙 {:.0}%", n.disk_util)))
-        .child(head(div().flex().flex_row().gap(px(18.0)).child(kv("↑ 读", monitor::fmt_rate(n.disk_r), c::disk())).child(kv("↓ 写", monitor::fmt_rate(n.disk_w), c::cpu()))))
+        .child(head(div().flex().flex_row().gap(px(18.0)).child(kv("↑ 读", monitor::fmt_rate(tw("disk-r", n.disk_r as f64) as _), c::disk())).child(kv("↓ 写", monitor::fmt_rate(tw("disk-w", n.disk_w as f64) as _), c::cpu()))))
         .child(mirror_graph("io-g", ("↑ 读", &m.rd_h, c::disk()), ("↓ 写", &m.wr_h, c::cpu()), top, (CARD_GRAPH_H - 1.0) / 2.0))
         .child(foot(note(format!("IOPS 读 {:.0} · 写 {:.0}", n.disk_riops, n.disk_wiops))))
 }
@@ -316,7 +318,7 @@ fn net_card(m: &MonSnapshot) -> Stateful<Div> {
     let top = peak_rx.max(peak_tx).max(10_240.0);
     tile("hud-net", tone)
         .child(tag("NET", "网络", tone, format!("峰值 ↓{} ↑{}", monitor::fmt_rate(peak_rx), monitor::fmt_rate(peak_tx))))
-        .child(head(div().flex().flex_row().gap(px(18.0)).child(kv("↓ 下载", monitor::fmt_rate(n.net_rx), c::net())).child(kv("↑ 上传", monitor::fmt_rate(n.net_tx), c::mem()))))
+        .child(head(div().flex().flex_row().gap(px(18.0)).child(kv("↓ 下载", monitor::fmt_rate(tw("net-rx", n.net_rx as f64) as _), c::net())).child(kv("↑ 上传", monitor::fmt_rate(tw("net-tx", n.net_tx as f64) as _), c::mem()))))
         .child(mirror_graph("net-g", ("↓ 下载", &m.rx_h, c::net()), ("↑ 上传", &m.tx_h, c::mem()), top, (CARD_GRAPH_H - 1.0) / 2.0))
         .child(foot(note(format!("负载 {:.2}  {:.2}  {:.2}", n.load[0], n.load[1], n.load[2]))))
 }
@@ -339,6 +341,7 @@ fn cores_tile(m: &MonSnapshot) -> Stateful<Div> {
         let mut rows = body().justify_center().gap(px(14.0));
         for (i, v) in n.cores.iter().enumerate() {
             let col = alert(tone, *v);
+            let v = &(tw(&format!("core-{i}"), *v as f64) as f32);
             rows = rows.child(
                 div()
                     .flex()
@@ -386,6 +389,7 @@ fn mem_tile(m: &MonSnapshot) -> Stateful<Div> {
     let tot = n.mem_total.max(1) as f32;
     let mc = mem_colors(tone);
     let row = |name: &'static str, v: u64, total: f32, col: Rgba| {
+        let v = tw(&format!("mm-{name}"), v as f64);
         let f = (v as f32 / total).clamp(0.0, 1.0);
         div()
             .flex()
@@ -395,7 +399,7 @@ fn mem_tile(m: &MonSnapshot) -> Stateful<Div> {
             .child(div().size(px(8.0)).flex_shrink_0().rounded(px(2.0)).bg(col))
             .child(div().w(px(36.0)).flex_shrink_0().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(name))
             .child(div().flex_1().min_w_0().child(segbar(6.0, vec![(f, col), (1.0 - f, c::field_border())])))
-            .child(div().w(px(64.0)).flex_shrink_0().flex().justify_end().text_size(px(t::TYPE_CONTROL)).font_family(MONO).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(monitor::fmt_bytes(v as f64)))
+            .child(div().w(px(64.0)).flex_shrink_0().flex().justify_end().text_size(px(t::TYPE_CONTROL)).font_family(MONO).font_weight(FontWeight::SEMIBOLD).text_color(c::text()).child(monitor::fmt_bytes(v)))
             .child(div().w(px(36.0)).flex_shrink_0().flex().justify_end().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::muted()).child(format!("{:.0}%", f * 100.0)))
     };
     tile("hud-mem2", tone)
@@ -423,11 +427,72 @@ fn disks_tile(m: &MonSnapshot) -> Stateful<Div> {
     let total: u64 = n.disks.iter().map(|d| d.total).sum();
     let p = pct_of(used, total);
     let col = alert(tone, p);
+    let p = tw("disks", p as f64) as f32;
     let t0 = tile("hud-disks", col).child(tag("VOLUMES", "磁盘空间", col, format!("{} 个挂载点", n.disks.len())));
     if n.disks.is_empty() {
         return t0.child(note("读不到磁盘用量".into()));
     }
     t0.child(body().child(big(format!("{p:.0}"), "%", col)).child(segbar(8.0, vec![(p, col), (100.0 - p, c::field_border())])).child(note(format!("已用 {} · 可用 {} · 共 {}", monitor::fmt_bytes(used as f64), monitor::fmt_bytes(total.saturating_sub(used) as f64), monitor::fmt_bytes(total as f64)))))
+}
+
+/// 数值缓动:采样每 2 秒来一次,数字和条不是跳变,而是在 `DATA_ANIM_MS` 内从旧值滑到新值(缓出)。
+/// 状态放在线程局部表里,按 key 记「起点、终点、开始时刻」;渲染时调 `tw` 取当前值,换服务器时 `tw_reset`。
+const DATA_ANIM_MS: u64 = 350;
+
+struct Tween {
+    from: f64,
+    to: f64,
+    at: std::time::Instant,
+}
+
+thread_local! {
+    static TWEENS: std::cell::RefCell<std::collections::HashMap<String, Tween>> = Default::default();
+}
+
+fn tween_at(tw: &Tween) -> f64 {
+    let t = (tw.at.elapsed().as_millis() as f64 / DATA_ANIM_MS as f64).min(1.0);
+    tw.from + (tw.to - tw.from) * (1.0 - (1.0 - t).powi(3))
+}
+
+/// 目标值 `target` 的当前显示值;目标变了就从此刻显示的值重新出发
+pub(crate) fn tw(key: &str, target: f64) -> f64 {
+    TWEENS.with(|m| {
+        let mut m = m.borrow_mut();
+        match m.get_mut(key) {
+            None => {
+                m.insert(key.to_string(), Tween { from: target, to: target, at: std::time::Instant::now() });
+                target
+            }
+            Some(e) => {
+                if (e.to - target).abs() > f64::EPSILON {
+                    *e = Tween { from: tween_at(e), to: target, at: std::time::Instant::now() };
+                }
+                tween_at(e)
+            }
+        }
+    })
+}
+
+/// 还有数值在滑动:定时器据此加快重绘
+pub(crate) fn tw_active() -> bool {
+    TWEENS.with(|m| m.borrow().values().any(|e| e.at.elapsed().as_millis() < DATA_ANIM_MS as u128))
+}
+
+pub(crate) fn tw_reset() {
+    TWEENS.with(|m| m.borrow_mut().clear());
+}
+
+/// LIVE 点的不透明度:按墙上时钟 2.4 秒一个周期,0.35 ~ 1.0 平滑起伏
+/// 呼吸开关:关掉后点常亮,dock 的定时器只在数值滑动时重绘
+pub(crate) const LIVE_BREATH: bool = false;
+
+fn live_pulse() -> f32 {
+    if !LIVE_BREATH {
+        return 1.0;
+    }
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() % 2400).unwrap_or(0) as f32;
+    let phase = ms / 2400.0 * std::f32::consts::TAU;
+    0.675 + 0.325 * phase.cos()
 }
 
 impl Home {
@@ -452,8 +517,8 @@ impl Home {
                         .font_family(MONO)
                         .font_weight(FontWeight::BOLD)
                         .text_color(c::online())
-                                                // 不用循环动画:动画会让窗口每帧(60/120Hz)整页重绘,CPU 白白占 20%;改成跟着 2 秒一次的采样明暗交替
-                        .child(div().size(px(6.0)).rounded_full().bg(c::online()).opacity(if (m.now.uptime as u64 / 2) % 2 == 0 { 1.0 } else { 0.35 }))
+                        // 呼吸:2.4 秒一个周期的正弦明暗,由 dock 的 250ms 定时重绘驱动(不用逐帧动画)
+                        .child(div().size(px(6.0)).rounded_full().bg(c::online()).opacity(live_pulse()))
                         .child("LIVE · 2s"),
                 )
                 .child(div().min_w_0().truncate().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::secondary()).child(who))

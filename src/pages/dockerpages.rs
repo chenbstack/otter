@@ -203,6 +203,17 @@ impl Home {
                 }
             })
             .detach();
+            // 概览页 LIVE 点的呼吸:不用逐帧动画(整页每帧重绘,占 20% CPU),只在概览页可见且窗口在前台时低频重绘
+            cx.spawn(async move |this, cx| {
+                loop {
+                    // 整窗每重绘一次约占 1% CPU:数值滑动时 20fps,平时只为呼吸灯 4fps
+                    cx.background_executor().timer(Duration::from_millis(if super::monitorpage::tw_active() { 50 } else { 250 })).await;
+                    if this.update(cx, |this, cx| if this.page == Page::Overview && this.dock_visible() && this.dock.win_active && this.dock.mon.is_some() && (super::monitorpage::LIVE_BREATH || super::monitorpage::tw_active()) { cx.notify() }).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
         }
         let Some(id) = self.workspace.tabs[a].node() else { return };
         if self.dock.key != Some((a, id)) {
@@ -211,6 +222,7 @@ impl Home {
             self.dock.mon = None;
             self.dock.mon_err = None;
             self.dock.seen = 0;
+            super::monitorpage::tw_reset();
             // 运维页(进程、服务、存储、计划任务、网站)的数据属于某一台服务器,换标签要清掉,否则会显示上一台的
             self.sys_clear();
         }
