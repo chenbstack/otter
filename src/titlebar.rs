@@ -72,7 +72,7 @@ impl Home {
     fn titlebar_inner(&self, window: &mut Window, cx: &mut Context<Self>, spotlight: bool) -> Div {
         let active = self.workspace.active;
 
-        let tab = |ix: usize, cx: &mut Context<Self>| {
+        let tab = |ix: usize, window: &mut Window, cx: &mut Context<Self>| {
             let tab = &self.workspace.tabs[ix];
             let on = active == Some(ix);
             let (title, kind_icon): (String, IconName) = match tab.node() {
@@ -108,7 +108,8 @@ impl Home {
             let asking = self.takeover_prompts.front().is_some_and(|p| p.tab_id == tab.id) || self.sudo_prompt.as_ref().is_some_and(|p| p.tab_id == tab.id);
             let taken_by = tab.takeover.as_ref().map(|t| t.client_name.clone());
             let dim = spotlight && !asking;
-            let busy = tab.busy_elapsed_ms();
+            // 忙碌亮光放进自己的小视图:它逐帧动画只重建这一个视图,整窗其余部分沿用上一帧(GPUI Fast 的保留子树)
+            let busy = tab.busy_elapsed_ms().map(|ms| busy_border(window, cx, tab.id, t::RADIUS_MD, c::accent(), ms));
             let group: SharedString = format!("tab-{ix}").into();
             div()
                 .id(("tab", ix))
@@ -143,7 +144,7 @@ impl Home {
                 .child(icon(kind_icon, 14.0, icon_color))
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 // 正在执行任务:一小段亮光沿标签边框绕圈,带渐隐的尾巴;后台标签也看得见
-                .when_some(busy, |d, ms| d.child(busy_border(t::RADIUS_MD, c::accent(), ms)))
+                .children(busy)
                 .when(asking, |d| {
                     d.child(
                         div()
@@ -172,12 +173,7 @@ impl Home {
                             .justify_center()
                             .rounded(px(t::RADIUS_XS))
                             .bg(c::accent().opacity(0.2))
-                            .child(icon(IconName::Bot, 12.0, c::accent()))
-                            .with_animation(
-                                ("tab-takeover", ix),
-                                Animation::new(Duration::from_millis(2200)).repeat().with_easing(ease_in_out),
-                                |d, t| d.opacity(0.6 + 0.4 * (1.0 - (2.0 * t - 1.0).abs())),
-                            ),
+                            .child(icon(IconName::Bot, 12.0, c::accent())),
                     )
                 })
                 .when(!pinned, |d| {
@@ -217,8 +213,8 @@ impl Home {
         };
 
         // 节点页固定在最左,其余标签在可横向滚动的区域里
-        let pinned = tab(0, cx);
-        let rest: Vec<_> = (1..self.workspace.tabs.len()).map(|ix| tab(ix, cx)).collect();
+        let pinned = tab(0, window, cx);
+        let rest: Vec<_> = (1..self.workspace.tabs.len()).map(|ix| tab(ix, window, cx)).collect();
 
         // 最左侧:logo + 名称(不可点;Windows 上也算拖动区域)
         let brand = div()
@@ -435,12 +431,10 @@ fn rrect_point(b: Bounds<Pixels>, r: f32, d: f32) -> Point<Pixels> {
 }
 
 /// 标签「正在执行」的边框跑马灯:一段亮光绕边框一圈,尾巴渐隐。
-fn busy_border(radius: f32, color: Rgba, elapsed_ms: u64) -> impl IntoElement {
-    // 相位随这一轮忙碌的开始计时,所以每次都从头转起;之后每帧按实际流逝时间推进
-    let began = std::time::Instant::now() - std::time::Duration::from_millis(elapsed_ms);
+fn busy_canvas(began: std::time::Instant, radius: f32, color: Rgba) -> impl IntoElement {
     gpui::canvas(
         |_, _, _| (),
-        move |b, _, window, _| {
+        move |b, _, window, cx| {
             const TAIL: usize = 14;
             const SEG: f32 = 7.0;
             let t = began.elapsed().as_secs_f32();
@@ -461,9 +455,37 @@ fn busy_border(radius: f32, color: Rgba, elapsed_ms: u64) -> impl IntoElement {
                     window.paint_path(path, color.opacity(0.9 * fade * fade));
                 }
             }
-            window.request_animation_frame();
+            // 不逐帧请求:每帧都要提交 GPU、光栅化路径,实测全帧率约 27% CPU;限到约 15fps。此处的当前视图就是 BusyBorder,只通知它
+            let view = window.current_view();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(BUSY_FRAME_MS)).await;
+                cx.update(|cx| cx.notify(view));
+            })
+            .detach();
         },
     )
     .absolute()
     .inset_0()
 }
+
+/// 标签边框「忙」亮光:自己是一个视图,逐帧请求重绘只重建它(`request_animation_frame` 通知的是当前视图)。
+/// 状态随元素存在:忙碌结束不再渲染它就被丢弃,下次忙碌从头转起;相位按这一轮忙碌的开始计时。
+struct BusyBorder {
+    began: std::time::Instant,
+    radius: f32,
+    color: Rgba,
+}
+
+impl Render for BusyBorder {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        busy_canvas(self.began, self.radius, self.color)
+    }
+}
+
+fn busy_border(window: &mut Window, cx: &mut App, tab_id: u64, radius: f32, color: Rgba, elapsed_ms: u64) -> AnyElement {
+    let view = window.use_keyed_state(("tab-busy", tab_id), cx, |_, _| BusyBorder { began: std::time::Instant::now() - std::time::Duration::from_millis(elapsed_ms), radius, color });
+    div().absolute().inset_0().child(view).into_any_element()
+}
+
+/// 标签边框「忙」亮光的重绘间隔(ms),约 15fps;实测刷屏场景:全帧率 ~27%,30fps ~21%,15fps ~16%,1fps ~4%
+const BUSY_FRAME_MS: u64 = 66;

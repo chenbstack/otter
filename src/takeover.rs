@@ -56,6 +56,9 @@ pub fn restore_prefs(st: &crate::store::Store) {
     }
 }
 /// `send_input` 单次最多字节
+/// 接管遮罩中间内容的最大宽度(状态行超出截断),token `layout.takeover.w`
+const TAKEOVER_CARD_W: f32 = 360.0;
+
 pub const INPUT_MAX: usize = 8 * 1024;
 /// 单次返回给 agent 的文本最多字节
 pub const OUTPUT_MAX: usize = 64 * 1024;
@@ -910,7 +913,7 @@ impl Home {
         let Some(a) = self.workspace.active else { return false };
         let Some(id) = self.workspace.tabs[a].takeover.as_ref().map(|_| self.workspace.tabs[a].id) else { return false };
         let m = &ev.keystroke.modifiers;
-        if crate::platform::accel(m) && ev.keystroke.key == "." {
+        if ev.keystroke.key == "escape" || (crate::platform::accel(m) && ev.keystroke.key == ".") {
             self.end_takeover(id, Some("user_stopped"), window, cx);
             return true;
         }
@@ -949,50 +952,46 @@ impl Home {
         let k = tab.takeover.as_ref()?;
         let id = tab.id;
         let fh = self.takeover_focus.clone()?;
+        // 停止按钮:危险操作不做红底,红色描边 + 红字,悬停才出浅红底
         let stop = div()
             .id("takeover-stop")
-            .h(px(38.0))
-            .px(px(18.0))
+            .h(px(32.0))
+            .px(px(12.0))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.0))
-            .rounded(px(t::RADIUS_MD))
-            .bg(c::danger())
-            .text_color(c::on_accent())
+            .gap(px(6.0))
+            .rounded(px(t::RADIUS_XS))
+            .border_1()
+            .border_color(c::danger().opacity(0.45))
+            .text_color(c::danger())
             .text_size(px(t::TYPE_CONTROL))
             .font_weight(FontWeight::SEMIBOLD)
             .cursor_pointer()
-            .hover(|s| s.opacity(0.88))
-            .child(icon(IconName::OctagonX, 14.0, c::on_accent()))
+            .hover(|s| s.bg(c::danger().opacity(0.14)).border_color(c::danger()))
+            .child(icon(IconName::OctagonX, 14.0, c::danger()))
             .child("停止接管")
             .on_click(cx.listener(move |this, _, window, cx| this.end_takeover(id, Some("user_stopped"), window, cx)));
-        let glyph = div()
-            .size(px(68.0))
+        // HUD 风格的卡片,全部静态:不做循环动画(接管可能持续很久,逐帧动画会让整窗每帧重绘,白占 CPU)
+        // 中间内容不加底板,保持透明,靠柔和暗影托住可读性。全部静态,不做循环动画(接管可能持续很久,逐帧动画会让整窗每帧重绘,白占 CPU)
+        let hue = gpui::Hsla::from(c::accent());
+        let mono = |size: f32| div().text_size(px(size)).font_family(crate::MONO).font_weight(FontWeight::BOLD);
+        let mark = div()
+            .size(px(52.0))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(t::RADIUS_2XL))
-            .bg(c::accent().opacity(0.10))
+            .rounded(px(t::RADIUS_LG))
+            .bg(c::accent().opacity(0.14))
             .border_1()
-            .border_color(c::accent().opacity(0.24))
-            .child(
-                div()
-                    .size(px(48.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(t::RADIUS_XL))
-                    .bg(c::accent().opacity(0.18))
-                    .border_1()
-                    .border_color(c::accent().opacity(0.4))
-                    .child(icon(IconName::Bot, 24.0, c::accent())),
-            )
-            .with_animation(
-                "takeover-breathe",
-                Animation::new(Duration::from_millis(2200)).repeat().with_easing(ease_in_out),
-                |d, t| d.opacity(0.62 + 0.38 * (1.0 - (2.0 * t - 1.0).abs())),
-            );
+            .border_color(c::accent().opacity(0.45))
+            .shadow(vec![gpui::BoxShadow { color: gpui::hsla(hue.h, 0.9, 0.65, 0.28), offset: point(px(0.0), px(0.0)), blur_radius: px(22.0), spread_radius: px(0.0), inset: false }])
+            .child(icon(IconName::Bot, 26.0, c::accent()));
+        // 状态行:等宽小字,像终端提示符
+        let state = div().max_w(px(TAKEOVER_CARD_W)).truncate().text_size(px(t::TYPE_CAPTION)).font_family(crate::MONO).text_color(c::secondary()).child(format!("› {}", k.last_action));
+        // 提醒条:黄色软底
+        let warn_bar = |ic: IconName, kids: Div| div().flex().flex_row().items_center().gap(px(8.0)).px(px(10.0)).py(px(7.0)).bg(c::warn_soft()).text_size(px(t::TYPE_MICRO)).text_color(c::warn()).child(icon(ic, 12.0, c::warn())).child(kids);
+        let hint = div().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child("Esc 也可以停止 · 停止不会中断正在运行的命令");
         Some(
             div()
                 .id("takeover-overlay")
@@ -1018,43 +1017,32 @@ impl Home {
                         .flex()
                         .flex_col()
                         .items_center()
-                        .gap(px(6.0))
-                        .rounded(px(t::RADIUS_2XL))
+                        .px(px(24.0))
+                        .py(px(8.0))
+                        .max_w(relative(0.92))
                         .shadow(crate::ui::shadow_overlay_content())
-                        .child(glyph)
-                        .child(div().mt(px(10.0)).text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).text_color(c::text()).child("Agent 接管中"))
-                        .child(div().text_size(px(t::TYPE_CONTROL)).text_color(c::muted()).child(k.client_name.clone()))
-                        .child(div().max_w(px(360.0)).truncate().text_size(px(t::TYPE_MICRO)).font_family(crate::MONO).text_color(c::ghost()).child(k.last_action.clone()))
-                        .children(k.root_shell.then(|| {
-                            div()
-                                .id("takeover-root-shell")
-                                .mt(px(10.0))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .text_size(px(t::TYPE_MICRO))
-                                .text_color(c::warn())
-                                .child(icon(IconName::TriangleAlert, 12.0, c::warn()))
-                                .child("终端当前是 root shell,agent 的命令以 root 运行")
-                        }))
+                        .child(mark)
+                        // 身份:标题和 agent 名字紧挨着,是一组
+                        .child(div().mt(px(14.0)).text_size(px(t::TYPE_TITLE_LG)).font_weight(FontWeight::BOLD).text_color(c::text()).child("Agent 接管中"))
+                        .child(mono(t::TYPE_CONTROL).mt(px(4.0)).text_color(gpui::hsla(hue.h, 0.85, 0.78, 1.0)).child(k.client_name.clone()))
+                        // 它正在做什么:和身份隔开一段
+                        .child(div().mt(px(12.0)).child(state))
+                        .children(k.root_shell.then(|| div().id("takeover-root-shell").mt(px(14.0)).child(warn_bar(IconName::TriangleAlert, div().child("终端当前是 root shell,agent 的命令以 root 运行")))))
                         .children(k.sudo.as_ref().map(|g| {
                             let mins = g.until.saturating_duration_since(Instant::now()).as_secs().div_ceil(60);
-                            div()
-                                .id("takeover-sudo")
-                                .mt(px(10.0))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .text_size(px(t::TYPE_MICRO))
-                                .text_color(c::warn())
-                                .child(icon(IconName::KeyRound, 12.0, c::warn()))
-                                .child(format!("已授权提权,剩余约 {mins} 分钟"))
-                                .child(div().id("takeover-sudo-revoke").cursor_pointer().text_color(c::muted()).hover(|s| s.text_color(c::text())).child("撤销").on_click(cx.listener(move |this, _, _, cx| this.revoke_sudo(id, cx))))
+                            div().id("takeover-sudo").mt(px(14.0)).child(warn_bar(
+                                IconName::KeyRound,
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(8.0))
+                                    .child(format!("已授权提权,剩余约 {mins} 分钟"))
+                                    .child(div().id("takeover-sudo-revoke").cursor_pointer().text_color(c::muted()).hover(|s| s.text_color(c::text())).child("撤销").on_click(cx.listener(move |this, _, _, cx| this.revoke_sudo(id, cx)))),
+                            ))
                         }))
-                        .child(div().mt(px(14.0)).child(stop))
-                        .child(div().mt(px(8.0)).text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(format!("{}. 也可以停止 · 停止不会中断正在运行的命令", crate::platform::accel_name()))),
+                        // 操作:按钮和提示是一组,离上面的信息再远一点
+                        .child(div().mt(px(20.0)).child(stop))
+                        .child(div().mt(px(10.0)).child(hint)),
                 )
                 .into_any_element(),
         )
@@ -1080,7 +1068,7 @@ impl Home {
         }
         rows.push((IconName::Keyboard, c::warn(), "能在终端里输入命令、读取屏幕".into()));
         rows.push((IconName::ScanEye, c::warn(), "能看到终端里已有的历史内容".into()));
-        rows.push((IconName::OctagonX, c::online(), format!("随时点「停止接管」或按 {}. 中止", crate::platform::accel_name())));
+        rows.push((IconName::OctagonX, c::online(), "随时点「停止接管」或按 Esc 中止".to_string()));
         let points = crate::ui::alert_rows(rows);
         // 两排:上面三个允许选项等宽(「允许一次」是默认项,主色,回车也触发;「24 小时」「总是允许」是更重的决定,不抢眼),下面整行宽的「拒绝」
         let btn_w = crate::ui::alert_btn_w(3);
