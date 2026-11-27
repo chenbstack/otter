@@ -134,7 +134,9 @@ impl Vm {
         let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let vm = {
             let mut m = SHARED.get_or_init(Default::default).lock().unwrap();
-            m.entry(d.key.to_string()).or_insert_with(|| Arc::new(Vm::acquire(d))).clone()
+            // 防火墙用例会改网络规则(开启 ufw 默认拒绝、切换前端、等回滚),会拖累别的用例的网络访问:单独用一台机器
+            let group = if area == "firewall" { "fw" } else { "main" };
+            m.entry(format!("{}/{group}", d.key)).or_insert_with(|| Arc::new(Vm::acquire(d))).clone()
         };
         let (c, o) = vm.run(reset);
         assert_eq!(c, 0, "复位 {area} 失败:{o}");
@@ -195,6 +197,20 @@ impl Vm {
     /// 执行,只要输出
     pub fn sh(&self, cmd: &str) -> String {
         self.run(cmd).1
+    }
+
+    /// 拉镜像,网络抖动时重试(Docker Hub 偶尔超时);镜像已在本机就是瞬间的事
+    pub fn pull(&self, image: &str) {
+        for i in 0..5 {
+            let (c, o) = self.run(&format!("docker image inspect {image} >/dev/null 2>&1 || docker pull {image} 2>&1 | tail -3"));
+            let (c2, _) = self.run(&format!("docker image inspect {image} >/dev/null 2>&1"));
+            if c == 0 && c2 == 0 {
+                return;
+            }
+            println!("拉取 {image} 失败(第 {} 次),重试:{}", i + 1, o.trim());
+            std::thread::sleep(Duration::from_secs(5));
+        }
+        panic!("{} 上拉不下来 {image}", self.name);
     }
 
     /// 虚拟机的 IPv4 地址(宿主机能直接访问)

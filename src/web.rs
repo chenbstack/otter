@@ -2003,6 +2003,8 @@ pub fn parse_state(out: &str) -> WebState {
             "SITES" => {
                 for blk in text.split("@@F ").skip(1) {
                     let (file, content) = blk.split_once('\n').unwrap_or((blk, ""));
+                    // 读取脚本在每个文件后面多 echo 了一个换行:文件本身以换行结尾时会多出一个空行,会让正文哈希对不上、误判成手改过
+                    let content = content.strip_suffix('\n').filter(|c| c.ends_with('\n')).unwrap_or(content);
                     let file = file.trim().to_string();
                     if content.contains("# otter:default") {
                         st.default_conf = Some(content.to_string());
@@ -3486,6 +3488,15 @@ mod tests {
         assert!(acme_account_delete_script(&a.id, &[a.clone()], &[used]).is_err());
         let d = acme_account_delete_script(&a.id, &[a.clone()], &[]).unwrap();
         assert!(d.contains("rm -rf") && d.contains(&format!("secrets/acme/{}", a.id)));
+    }
+
+    /// 真机上读取脚本在每个文件后多输出一个换行:文件以换行结尾时正文后面会多一个空行,不能因此判成手改过
+    #[test]
+    fn state_with_extra_newline_after_file_is_not_modified() {
+        let site = render_site(&proxy("a.example.com"), &Target::own());
+        assert!(site.ends_with('\n'));
+        let st = parse_state(&STATE.replace("__SITE__", &site));
+        assert!(!st.sites[0].modified, "多出的空行让站点被误判为手改过");
     }
 
     #[test]

@@ -18,7 +18,7 @@ for _i in 1 2 3; do iptables -w -D DOCKER-USER -m comment --comment otter:if -j 
 iptables -w -F OTTER-DOCKER 2>/dev/null; iptables -w -X OTTER-DOCKER 2>/dev/null
 nft delete table inet otter 2>/dev/null; nft delete table inet otter_docker 2>/dev/null
 rm -rf /opt/otter/firewall
-ids=$(docker ps -aq 2>/dev/null); [ -n "$ids" ] && docker rm -f $ids >/dev/null 2>&1
+docker rm -f otter-orbtest-ct >/dev/null 2>&1
 true
 "#;
 
@@ -188,31 +188,16 @@ fn docker_traffic(vm: &Vm) {
 
 // ---- Ubuntu:ufw / iptables / nftables ----
 
-#[test]
-#[ignore]
-fn ubuntu_iptables_rules() {
-    if !gate() {
-        return;
-    }
-    iptables_front(&fw(Distro::UBUNTU));
+fn ufw_iptables_rules(d: Distro) {
+    iptables_front(&fw(d));
 }
 
-#[test]
-#[ignore]
-fn ubuntu_nftables_rules() {
-    if !gate() {
-        return;
-    }
-    nftables_front(&fw(Distro::UBUNTU));
+fn ufw_nftables_rules(d: Distro) {
+    nftables_front(&fw(d));
 }
 
-#[test]
-#[ignore]
-fn ubuntu_ufw_rules() {
-    if !gate() {
-        return;
-    }
-    let vm = fw(Distro::UBUNTU);
+fn ufw_ufw_rules(d: Distro) {
+    let vm = fw(d);
     let f = F { vm: &vm };
     f.exec("ufw 加规则", &ufw_add(&nr(Action::Allow, "8080", Proto::Tcp, "")).unwrap());
     f.exec("ufw 启用", &ufw_enable(&SSH).unwrap());
@@ -230,13 +215,8 @@ fn ubuntu_ufw_rules() {
     assert!(!f.info().ufw_active);
 }
 
-#[test]
-#[ignore]
-fn ubuntu_switch() {
-    if !gate() {
-        return;
-    }
-    let vm = fw(Distro::UBUNTU);
+fn ufw_switch(d: Distro) {
+    let vm = fw(d);
     let f = F { vm: &vm };
     f.exec("ufw 加规则", &ufw_add(&nr(Action::Allow, "8080", Proto::Tcp, "")).unwrap());
     f.exec("ufw 启用", &ufw_enable(&SSH).unwrap());
@@ -251,32 +231,17 @@ fn ubuntu_switch() {
     refuse_missing(&f, Front::Ufw, Front::Firewalld);
 }
 
-#[test]
-#[ignore]
-fn ubuntu_docker_ports() {
-    if !gate() {
-        return;
-    }
-    docker_ports(&fw(Distro::UBUNTU));
+fn ufw_docker_ports(d: Distro) {
+    docker_ports(&fw(d));
 }
 
-#[test]
-#[ignore]
-fn ubuntu_docker_traffic() {
-    if !gate() {
-        return;
-    }
-    docker_traffic(&fw(Distro::UBUNTU));
+fn ufw_docker_traffic(d: Distro) {
+    docker_traffic(&fw(d));
 }
 
 /// 慢:等 120 秒的回滚
-#[test]
-#[ignore]
-fn ubuntu_rollback() {
-    if !gate_slow() {
-        return;
-    }
-    let vm = fw(Distro::UBUNTU);
+fn ufw_rollback(d: Distro) {
+    let vm = fw(d);
     let f = F { vm: &vm };
     f.exec("ufw 启用", &ufw_enable(&SSH).unwrap());
     vm.run(&guard_cancel());
@@ -286,13 +251,8 @@ fn ubuntu_rollback() {
 
 // ---- Rocky:firewalld(systemd 252) ----
 
-#[test]
-#[ignore]
-fn rocky_firewalld_rules() {
-    if !gate() {
-        return;
-    }
-    let vm = fw(Distro::ROCKY);
+fn fwd_firewalld_rules(d: Distro) {
+    let vm = fw(d);
     let f = F { vm: &vm };
     let i = f.info();
     assert!(i.firewalld_installed && !i.firewalld_active && i.manage() == Some(Front::Firewalld));
@@ -300,7 +260,7 @@ fn rocky_firewalld_rules() {
     let i = f.show("启用后");
     assert!(i.firewalld_active && i.rules.iter().any(|r| r.to == "22/tcp"));
     let z = i.default_zone.clone();
-    assert_eq!(z, "public");
+    assert!(!z.is_empty(), "没有默认区域");
     for n in [nr(Action::Allow, "80", Proto::Tcp, ""), nr(Action::Allow, "8000-8100", Proto::Udp, ""), nr(Action::Deny, "3306", Proto::Tcp, "1.2.3.4"), nr(Action::Allow, "9000", Proto::Both, "10.0.0.0/8"), nr(Action::Reject, "5432", Proto::Tcp, "")] {
         f.exec(&format!("加 {}", n.port), &fwd_add(&z, &n).unwrap());
     }
@@ -319,13 +279,8 @@ fn rocky_firewalld_rules() {
     assert!(!f.info().firewalld_active);
 }
 
-#[test]
-#[ignore]
-fn rocky_switch() {
-    if !gate() {
-        return;
-    }
-    let vm = fw(Distro::ROCKY);
+fn fwd_switch(d: Distro) {
+    let vm = fw(d);
     let f = F { vm: &vm };
     f.exec("firewalld 启用", &fwd_enable(&SSH).unwrap());
     vm.run(&guard_cancel());
@@ -340,43 +295,23 @@ fn rocky_switch() {
     refuse_missing(&f, Front::Firewalld, Front::Ufw);
 }
 
-#[test]
-#[ignore]
-fn rocky_iptables_nftables_rules() {
-    if !gate() {
-        return;
-    }
-    let vm = fw(Distro::ROCKY);
+fn fwd_iptables_nftables_rules(d: Distro) {
+    let vm = fw(d);
     iptables_front(&vm);
     nftables_front(&vm);
 }
 
-#[test]
-#[ignore]
-fn rocky_docker_ports() {
-    if !gate() {
-        return;
-    }
-    docker_ports(&fw(Distro::ROCKY));
+fn fwd_docker_ports(d: Distro) {
+    docker_ports(&fw(d));
 }
 
-#[test]
-#[ignore]
-fn rocky_docker_traffic() {
-    if !gate() {
-        return;
-    }
-    docker_traffic(&fw(Distro::ROCKY));
+fn fwd_docker_traffic(d: Distro) {
+    docker_traffic(&fw(d));
 }
 
 /// 慢:systemd 252 下的回滚(命令行带分号的临时单元会被重载杀掉,这个用例专门防它)
-#[test]
-#[ignore]
-fn rocky_rollback() {
-    if !gate_slow() {
-        return;
-    }
-    let vm = fw(Distro::ROCKY);
+fn fwd_rollback(d: Distro) {
+    let vm = fw(d);
     let f = F { vm: &vm };
     f.exec("firewalld 启用", &fwd_enable(&SSH).unwrap());
     vm.run(&guard_cancel());
@@ -386,26 +321,16 @@ fn rocky_rollback() {
 
 // ---- Debian:没有 ufw / firewalld,默认走 iptables / nftables ----
 
-#[test]
-#[ignore]
-fn debian_iptables_nftables() {
-    if !gate() {
-        return;
-    }
-    let vm = fw(Distro::DEBIAN);
+fn plain_iptables_nftables(d: Distro) {
+    let vm = fw(d);
     let i = F { vm: &vm }.info();
     assert!(!i.ufw_installed && !i.firewalld_installed && i.iptables && i.nft, "debian 上应只有 iptables / nft");
     iptables_front(&vm);
     nftables_front(&vm);
 }
 
-#[test]
-#[ignore]
-fn debian_switch() {
-    if !gate() {
-        return;
-    }
-    let vm = fw(Distro::DEBIAN);
+fn plain_switch(d: Distro) {
+    let vm = fw(d);
     let f = F { vm: &vm };
     f.exec("iptables 加规则", &ipt_add_many(&[nr(Action::Allow, "22", Proto::Tcp, ""), nr(Action::Allow, "8080", Proto::Tcp, "")], &[]).unwrap());
     f.exec("iptables 绑定", &ipt_enable(&f.info().rules));
@@ -417,11 +342,25 @@ fn debian_switch() {
     refuse_missing(&f, Front::Iptables, Front::Ufw);
 }
 
-#[test]
-#[ignore]
-fn debian_docker_ports() {
-    if !gate() {
-        return;
-    }
-    docker_ports(&fw(Distro::DEBIAN));
+fn plain_docker_ports(d: Distro) {
+    docker_ports(&fw(d));
 }
+
+// ---- 注册:同一族的用例在这一族的所有发行版上各跑一遍 ----
+
+distros!(ufw_iptables_rules, ufw_iptables_rules, gate, UFW);
+distros!(ufw_nftables_rules, ufw_nftables_rules, gate, UFW);
+distros!(ufw_ufw_rules, ufw_ufw_rules, gate, UFW);
+distros!(ufw_switch, ufw_switch, gate, UFW);
+distros!(ufw_docker_ports, ufw_docker_ports, gate, UFW);
+distros!(ufw_docker_traffic, ufw_docker_traffic, gate, UFW);
+distros!(ufw_rollback, ufw_rollback, gate_slow, UFW);
+distros!(fwd_firewalld_rules, fwd_firewalld_rules, gate, FWD);
+distros!(fwd_switch, fwd_switch, gate, FWD);
+distros!(fwd_iptables_nftables_rules, fwd_iptables_nftables_rules, gate, FWD);
+distros!(fwd_docker_ports, fwd_docker_ports, gate, FWD);
+distros!(fwd_docker_traffic, fwd_docker_traffic, gate, FWD);
+distros!(fwd_rollback, fwd_rollback, gate_slow, FWD);
+distros!(plain_iptables_nftables, plain_iptables_nftables, gate, PLAIN);
+distros!(plain_switch, plain_switch, gate, PLAIN);
+distros!(plain_docker_ports, plain_docker_ports, gate, PLAIN);
