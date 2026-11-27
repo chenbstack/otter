@@ -91,4 +91,4 @@ claude mcp add otter -- otter mcp
 
 ## 许可证
 
-MIT
+AGPL-3.0
