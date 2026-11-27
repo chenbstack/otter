@@ -68,6 +68,8 @@ fn graph_box(id: &'static str, tips: Vec<String>, h: f32, canvas: impl IntoEleme
     for (i, text) in tips.into_iter().enumerate() {
         let ago = (n - 1 - i) * 2;
         let when = if ago == 0 { "现在".to_string() } else { format!("{ago} 秒前") };
+        // 按这一格在整幅图里的真实横向位置决定提示朝哪边展开(历史不满时图靠右)
+        let left_half = (POINTS - n.min(POINTS) + i) * 2 < POINTS;
         let g: SharedString = format!("{id}-{i}").into();
         let label = div()
             .absolute()
@@ -76,8 +78,8 @@ fn graph_box(id: &'static str, tips: Vec<String>, h: f32, canvas: impl IntoEleme
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .when(i * 2 < n, |d| d.left_0())
-            .when(i * 2 >= n, |d| d.right_0())
+            .when(left_half, |d| d.left_0())
+            .when(!left_half, |d| d.right_0())
             .px(px(8.0))
             .py(px(4.0))
             .rounded(px(t::RADIUS_SM))
@@ -204,7 +206,6 @@ fn tile(id: impl Into<SharedString>, tone: Rgba) -> Stateful<Div> {
         .flex_col()
         .gap(px(8.0))
         .p(px(14.0))
-        .rounded(px(t::RADIUS_LG))
         .border_1()
         .border_color(gpui::hsla(g.h, 0.72, 0.70, HUD_BORDER))
         .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(gpui::hsla(g.h, 0.7, 0.58, HUD_TILE_TOP), 0.0), gpui::linear_color_stop(gpui::hsla(g.h, 0.6, 0.46, HUD_TILE_BOTTOM), 1.0)))
@@ -254,7 +255,7 @@ fn pct_of(a: u64, b: u64) -> f32 {
 /// 按占比切分的横条:每段 (权重, 颜色),高 `h`
 fn segbar(h: f32, segs: Vec<(f32, Rgba)>) -> Div {
     let sum: f32 = segs.iter().map(|(w, _)| w.max(0.0)).sum::<f32>().max(f32::EPSILON);
-    div().w_full().h(px(h)).flex().flex_row().gap(px(2.0)).rounded(px(2.0)).overflow_hidden().children(segs.into_iter().filter(|(w, _)| *w > 0.0).map(|(w, col)| div().h_full().w(relative(w / sum)).min_w(px(2.0)).bg(col)))
+    div().w_full().h(px(h)).flex().flex_row().gap(px(2.0)).overflow_hidden().children(segs.into_iter().filter(|(w, _)| *w > 0.0).map(|(w, col)| div().h_full().w(relative(w / sum)).min_w(px(2.0)).bg(col)))
 }
 
 /// 内存三段的颜色:已用 / 缓存 / 空闲
@@ -262,14 +263,27 @@ fn mem_colors(tone: Rgba) -> [Rgba; 3] {
     [tone, tone.opacity(0.4), c::field_border()]
 }
 
+/// 四张指标卡统一的内容分区:头部数字区、图、单行脚注(各自固定高度,不换行)
+const CARD_HEAD_H: f32 = 52.0;
+const CARD_GRAPH_H: f32 = 65.0;
+const CARD_FOOT_H: f32 = 18.0;
+
+fn head(el: impl IntoElement) -> Div {
+    div().h(px(CARD_HEAD_H)).flex_shrink_0().flex().items_center().child(el)
+}
+
+fn foot(el: impl IntoElement) -> Div {
+    div().h(px(CARD_FOOT_H)).flex_shrink_0().min_w_0().overflow_hidden().whitespace_nowrap().flex().items_center().child(el)
+}
+
 fn cpu_card(m: &MonSnapshot) -> Stateful<Div> {
     let n = &m.now;
     let tone = alert(c::cpu(), n.cpu);
     tile("hud-cpu", tone)
         .child(tag("CPU", "处理器", tone, n.host.cpu_model.clone()))
-        .child(big(format!("{:.0}", n.cpu), "%", tone))
-        .child(block_graph(m.cpu_h.clone(), ("cpu-g", "CPU", pct), Some(100.0), 100.0, 64.0, Palette::fixed(tone), false))
-        .child(div().flex().flex_row().flex_wrap().gap_x(px(16.0)).child(kv("用户", format!("{:.0}%", n.cpu_user), c::text())).child(kv("系统", format!("{:.0}%", n.cpu_sys), c::text())).child(kv("等待", format!("{:.0}%", n.cpu_wait), c::text())).children(n.temp_c.map(|t| kv("温度", format!("{t:.0}°C"), alert(c::text(), t)))))
+        .child(head(big(format!("{:.0}", n.cpu), "%", tone)))
+        .child(block_graph(m.cpu_h.clone(), ("cpu-g", "CPU", pct), Some(100.0), 100.0, CARD_GRAPH_H, Palette::fixed(tone), false))
+        .child(foot(div().flex().flex_row().gap_x(px(16.0)).child(kv("用户", format!("{:.0}%", n.cpu_user), c::text())).child(kv("系统", format!("{:.0}%", n.cpu_sys), c::text())).child(kv("等待", format!("{:.0}%", n.cpu_wait), c::text())).children(n.temp_c.map(|t| kv("温度", format!("{t:.0}°C"), alert(c::text(), t))))))
 }
 
 fn mem_card(m: &MonSnapshot) -> Stateful<Div> {
@@ -278,9 +292,9 @@ fn mem_card(m: &MonSnapshot) -> Stateful<Div> {
     let tone = alert(c::mem(), p);
     tile("hud-mem", tone)
         .child(tag("MEM", "内存", tone, format!("共 {}", monitor::fmt_bytes(n.mem_total as f64))))
-        .child(big(format!("{p:.0}"), "%", tone))
-        .child(mem_graph(m.mem_s.clone(), n.mem_total.max(1) as f32, 64.0, tone))
-        .child(div().flex().flex_row().flex_wrap().gap_x(px(16.0)).child(kv("已用", monitor::fmt_bytes(n.mem_used as f64), c::text())).child(kv("可用", monitor::fmt_bytes(n.mem_total.saturating_sub(n.mem_used) as f64), c::text())).when(n.swap_total > 0, |d| d.child(kv("Swap", monitor::fmt_bytes(n.swap_used as f64), c::text()))))
+        .child(head(big(format!("{p:.0}"), "%", tone)))
+        .child(mem_graph(m.mem_s.clone(), n.mem_total.max(1) as f32, CARD_GRAPH_H, tone))
+        .child(foot(div().flex().flex_row().gap_x(px(16.0)).child(kv("已用", monitor::fmt_bytes(n.mem_used as f64), c::text())).child(kv("可用", monitor::fmt_bytes(n.mem_total.saturating_sub(n.mem_used) as f64), c::text()))))
 }
 
 fn disk_card(m: &MonSnapshot) -> Stateful<Div> {
@@ -291,9 +305,9 @@ fn disk_card(m: &MonSnapshot) -> Stateful<Div> {
     let top = pr.max(pw).max(1_048_576.0);
     tile("hud-disk", tone)
         .child(tag("DISK·IO", "磁盘读写", tone, format!("繁忙 {:.0}%", n.disk_util)))
-        .child(div().flex().flex_row().gap(px(18.0)).child(kv("↑ 读", monitor::fmt_rate(n.disk_r), c::disk())).child(kv("↓ 写", monitor::fmt_rate(n.disk_w), c::cpu())))
-        .child(mirror_graph("io-g", ("↑ 读", &m.rd_h, c::disk()), ("↓ 写", &m.wr_h, c::cpu()), top, 30.0))
-        .child(note(format!("{:.0} / {:.0} IOPS · 峰值 读 {} 写 {}", n.disk_riops, n.disk_wiops, monitor::fmt_rate(pr), monitor::fmt_rate(pw))))
+        .child(head(div().flex().flex_row().gap(px(18.0)).child(kv("↑ 读", monitor::fmt_rate(n.disk_r), c::disk())).child(kv("↓ 写", monitor::fmt_rate(n.disk_w), c::cpu()))))
+        .child(mirror_graph("io-g", ("↑ 读", &m.rd_h, c::disk()), ("↓ 写", &m.wr_h, c::cpu()), top, (CARD_GRAPH_H - 1.0) / 2.0))
+        .child(foot(note(format!("IOPS 读 {:.0} · 写 {:.0}", n.disk_riops, n.disk_wiops))))
 }
 
 fn net_card(m: &MonSnapshot) -> Stateful<Div> {
@@ -304,9 +318,9 @@ fn net_card(m: &MonSnapshot) -> Stateful<Div> {
     let top = peak_rx.max(peak_tx).max(10_240.0);
     tile("hud-net", tone)
         .child(tag("NET", "网络", tone, format!("峰值 ↓{} ↑{}", monitor::fmt_rate(peak_rx), monitor::fmt_rate(peak_tx))))
-        .child(div().flex().flex_row().gap(px(18.0)).child(kv("↓ 下载", monitor::fmt_rate(n.net_rx), c::net())).child(kv("↑ 上传", monitor::fmt_rate(n.net_tx), c::mem())))
-        .child(mirror_graph("net-g", ("↓ 下载", &m.rx_h, c::net()), ("↑ 上传", &m.tx_h, c::mem()), top, 30.0))
-        .child(note(format!("负载 {:.2}  {:.2}  {:.2}", n.load[0], n.load[1], n.load[2])))
+        .child(head(div().flex().flex_row().gap(px(18.0)).child(kv("↓ 下载", monitor::fmt_rate(n.net_rx), c::net())).child(kv("↑ 上传", monitor::fmt_rate(n.net_tx), c::mem()))))
+        .child(mirror_graph("net-g", ("↓ 下载", &m.rx_h, c::net()), ("↑ 上传", &m.tx_h, c::mem()), top, (CARD_GRAPH_H - 1.0) / 2.0))
+        .child(foot(note(format!("负载 {:.2}  {:.2}  {:.2}", n.load[0], n.load[1], n.load[2]))))
 }
 
 /// 明细行三张卡的内容区:统一最小高度,内容在里面上下均匀分布
@@ -353,8 +367,7 @@ fn cores_tile(m: &MonSnapshot) -> Stateful<Div> {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(if cell > 16.0 { t::RADIUS_XS } else { 2.0 }))
-                .border_1()
+                                .border_1()
                 .border_color(col.opacity(0.25 + 0.5 * f))
                 .bg(col.opacity(0.08 + 0.7 * f))
                 .text_size(px(t::TYPE_MICRO))
@@ -420,43 +433,45 @@ fn disks_tile(m: &MonSnapshot) -> Stateful<Div> {
 }
 
 impl Home {
+    /// 页头副标题行:LIVE 点、主机名 · 系统 · 架构、运行时长
+    pub(crate) fn overview_header_info(&self) -> Option<Div> {
+        let m = self.dock.mon.as_ref()?;
+        let h = &m.now.host;
+        let who = [h.name.as_str(), h.os.as_str(), h.arch.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(px(t::TYPE_MICRO))
+                        .font_family(MONO)
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(c::online())
+                        .child(div().size(px(6.0)).rounded_full().bg(c::online()).with_animation("live-dot", Animation::new(Duration::from_millis(1400)).repeat().with_easing(ease_in_out), |d, t| d.opacity(0.35 + 0.65 * (1.0 - (2.0 * t - 1.0).abs()))))
+                        .child("LIVE · 2s"),
+                )
+                .child(div().min_w_0().truncate().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::secondary()).child(who))
+                .child(note(format!("运行 {}", monitor::fmt_uptime(m.now.uptime)))),
+        )
+    }
+
     pub(crate) fn overview_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(m) = self.dock.mon.clone() else {
             let Some(msg) = self.dock.mon_err.clone() else { return crate::ui::loading("正在读取系统信息…").into_any_element() };
             return div().flex_1().flex().items_center().justify_center().text_size(px(t::TYPE_CONTROL)).text_color(c::ghost()).child(msg).into_any_element();
         };
-        let h = &m.now.host;
-        let who = [h.name.as_str(), h.os.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
-        let header = div()
-            .h(px(28.0))
-            .flex_shrink_0()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .child(div().text_size(px(t::TYPE_MICRO)).font_family(MONO).font_weight(FontWeight::BOLD).text_color(c::accent()).child("SYSTEM·SCAN"))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(px(t::TYPE_MICRO))
-                    .font_family(MONO)
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(c::online())
-                    .child(div().size(px(6.0)).rounded_full().bg(c::online()).with_animation("live-dot", Animation::new(Duration::from_millis(1400)).repeat().with_easing(ease_in_out), |d, t| d.opacity(0.35 + 0.65 * (1.0 - (2.0 * t - 1.0).abs()))))
-                    .child("LIVE · 2s"),
-            )
-            .child(div().min_w_0().truncate().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::secondary()).child(who))
-            .child(div().flex_1())
-            .child(note(format!("运行 {}", monitor::fmt_uptime(m.now.uptime))));
-
         // 卡片行:窄了自动换行,每张至少 260 宽
         let row = |kids: Vec<AnyElement>| div().flex().flex_row().flex_wrap().gap(px(10.0)).children(kids.into_iter().map(|k| div().flex_1().min_w(px(260.0)).flex().flex_col().child(k)));
         let cards = row(vec![cpu_card(&m).flex_1().into_any_element(), mem_card(&m).flex_1().into_any_element(), disk_card(&m).flex_1().into_any_element(), net_card(&m).flex_1().into_any_element()]);
         let details = row(vec![cores_tile(&m).flex_1().into_any_element(), mem_tile(&m).flex_1().into_any_element(), disks_tile(&m).flex_1().into_any_element()]);
-        let body = div().relative().flex().flex_col().gap(px(10.0)).pb(px(24.0)).child(header).child(cards).child(details).child(self.proc_card(&m, cx));
+        let body = div().relative().flex().flex_col().gap(px(10.0)).pb(px(24.0)).child(cards).child(details).child(self.proc_card(&m, cx));
         div()
             .relative()
             .child(
@@ -552,7 +567,6 @@ impl Home {
                 div()
                     .relative()
                     .h(px(22.0))
-                    .rounded(px(t::RADIUS_XS))
                     .overflow_hidden()
                     .child(div().absolute().left_0().top_0().bottom_0().w(relative(frac.clamp(0.0, 1.0))).bg(gpui::linear_gradient(90.0, gpui::linear_color_stop(hsl(tone, 0.7, 0.62, 0.0), 0.0), gpui::linear_color_stop(hsl(tone, 0.7, 0.62, 0.22), 1.0))))
                     .child(

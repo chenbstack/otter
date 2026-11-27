@@ -14,7 +14,7 @@ pub const INTERVAL: Duration = Duration::from_secs(2);
 /// 采样命令。用 `awk` 把每个进程的 `/proc/<pid>/stat` 压成「pid、名字、cpu 时间、rss 页数」。
 pub const SAMPLE_CMD: &str = r#"export LC_ALL=C
 [ -r /proc/stat ] || { echo '##unsupported'; exit 0; }
-echo '##host'; hostname 2>/dev/null; uname -sr 2>/dev/null; (. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"); grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2
+echo '##host'; hostname 2>/dev/null; uname -sr 2>/dev/null; uname -m 2>/dev/null; (. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"); grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2
 echo '##stat'; grep '^cpu' /proc/stat
 echo '##mem'; grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|SwapTotal|SwapFree):' /proc/meminfo
 echo '##net'; cat /proc/net/dev
@@ -50,6 +50,7 @@ pub struct DiskUse {
 pub struct Host {
     pub name: String,
     pub kernel: String,
+    pub arch: String,
     pub os: String,
     pub cpu_model: String,
 }
@@ -230,7 +231,7 @@ pub fn parse_sample(text: &str) -> Result<Raw, String> {
     let mut raw = Raw::default();
 
     let h = get("host");
-    raw.host = Host { name: h.first().unwrap_or(&"").trim().into(), kernel: h.get(1).unwrap_or(&"").trim().into(), os: h.get(2).unwrap_or(&"").trim().into(), cpu_model: h.get(3).unwrap_or(&"").trim().into() };
+    raw.host = Host { name: h.first().unwrap_or(&"").trim().into(), kernel: h.get(1).unwrap_or(&"").trim().into(), arch: h.get(2).unwrap_or(&"").trim().into(), os: h.get(3).unwrap_or(&"").trim().into(), cpu_model: h.get(4).unwrap_or(&"").trim().into() };
 
     for line in get("stat") {
         let mut it = line.split_whitespace();
@@ -454,7 +455,7 @@ pub fn demo_snapshot() -> MonSnapshot {
     let cpu_h = wave(38.0, 22.0, 0.0);
     let mem_h = wave(62.0, 4.0, 1.0);
     let now = Metrics {
-        host: Host { name: "dev-mac".into(), kernel: "Linux 6.1.0".into(), os: "Debian GNU/Linux 12".into(), cpu_model: "Intel Xeon Platinum 8369B".into() },
+        host: Host { name: "dev-mac".into(), kernel: "Linux 6.1.0".into(), arch: "x86_64".into(), os: "Debian GNU/Linux 12".into(), cpu_model: "Intel Xeon Platinum 8369B".into() },
         cpu: *cpu_h.last().unwrap(),
         cpu_user: 24.0,
         cpu_sys: 9.0,
@@ -520,7 +521,7 @@ pub fn demo_snapshot() -> MonSnapshot {
 mod tests {
     use super::*;
 
-    const A: &str = "##host\nweb-1\nLinux 6.1.0\nDebian GNU/Linux 12\n Intel Xeon\n##stat\ncpu  100 0 50 800 50 0 0 0 0 0\ncpu0 50 0 25 400 25 0 0 0 0 0\ncpu1 50 0 25 400 25 0 0 0 0 0\n##mem\nMemTotal: 8000000 kB\nMemFree: 1000000 kB\nMemAvailable: 4000000 kB\nBuffers: 100000 kB\nCached: 2000000 kB\nSwapTotal: 1000000 kB\nSwapFree: 900000 kB\n##net\nInter-|   Receive\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets\n    lo: 999 1 0 0 0 0 0 0 999 1 0 0 0 0 0 0\n  eth0: 1000 10 0 0 0 0 0 0 500 5 0 0 0 0 0 0\n##disk\n   8 0 sda 1 0 100 0 1 0 200 0 0 0 0\n   8 1 sda1 1 0 999 0 1 0 999 0 0 0 0\n##load\n0.50 0.40 0.30 1/200 999\n86400.5 1000.0\n##df\nFilesystem 1-blocks Used Available Capacity Mounted on\n/dev/sda1 1000 600 400 60% /\n/dev/sda1 1000 600 400 60% /var/lib/docker\n##temp\n45000\n##pinfo\n   42 www-data       4 nginx: worker process\n##ps\n1\tsystemd\t10\t100\n42\tweb (x)\t20\t200\n";
+    const A: &str = "##host\nweb-1\nLinux 6.1.0\nx86_64\nDebian GNU/Linux 12\n Intel Xeon\n##stat\ncpu  100 0 50 800 50 0 0 0 0 0\ncpu0 50 0 25 400 25 0 0 0 0 0\ncpu1 50 0 25 400 25 0 0 0 0 0\n##mem\nMemTotal: 8000000 kB\nMemFree: 1000000 kB\nMemAvailable: 4000000 kB\nBuffers: 100000 kB\nCached: 2000000 kB\nSwapTotal: 1000000 kB\nSwapFree: 900000 kB\n##net\nInter-|   Receive\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets\n    lo: 999 1 0 0 0 0 0 0 999 1 0 0 0 0 0 0\n  eth0: 1000 10 0 0 0 0 0 0 500 5 0 0 0 0 0 0\n##disk\n   8 0 sda 1 0 100 0 1 0 200 0 0 0 0\n   8 1 sda1 1 0 999 0 1 0 999 0 0 0 0\n##load\n0.50 0.40 0.30 1/200 999\n86400.5 1000.0\n##df\nFilesystem 1-blocks Used Available Capacity Mounted on\n/dev/sda1 1000 600 400 60% /\n/dev/sda1 1000 600 400 60% /var/lib/docker\n##temp\n45000\n##pinfo\n   42 www-data       4 nginx: worker process\n##ps\n1\tsystemd\t10\t100\n42\tweb (x)\t20\t200\n";
 
     fn b(extra_cpu: u64) -> String {
         A.replace("cpu  100 0 50 800 50 0 0 0 0 0", &format!("cpu  {} 0 50 {} 50 0 0 0 0 0", 100 + extra_cpu, 800 + 100 - extra_cpu))
@@ -534,6 +535,7 @@ mod tests {
         let r = parse_sample(A).unwrap();
         assert_eq!(r.host.name, "web-1");
         assert_eq!(r.host.cpu_model, "Intel Xeon");
+        assert_eq!(r.host.arch, "x86_64");
         assert_eq!(r.cpu.len(), 3);
         assert_eq!(r.mem_total, 8_000_000 * 1024);
         assert_eq!(r.mem_avail, 4_000_000 * 1024);
