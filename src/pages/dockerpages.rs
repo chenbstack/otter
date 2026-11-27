@@ -755,18 +755,29 @@ impl Home {
         v
     }
 
+    /// Docker 相关页面固定的副标题:引擎版本、架构、容器数
+    fn docker_info_line(&self) -> String {
+        let s = &self.dock.snap;
+        let mut parts = vec![if s.version.is_empty() { "Docker".to_string() } else { format!("Docker {}", s.version) }];
+        if !s.arch.is_empty() {
+            parts.push(s.arch.clone());
+        }
+        parts.push(format!("{} 个容器,{} 个运行中", s.containers.len(), s.running()));
+        parts.join(" · ")
+    }
+
     pub(crate) fn dock_subtitle(&self) -> String {
         let n = &self.node().name;
         match self.page {
             Page::Overview => format!("{n} 的系统资源"),
-            Page::Containers => format!("{n} 上的全部容器"),
+            Page::Containers => self.docker_info_line(),
             Page::Database => format!("{n} 上的数据库容器"),
             Page::Store => "一键安装常用应用;列表来自 GitHub 上的应用目录".to_string(),
-            Page::Stacks => format!("{n} 上的 Compose 项目"),
-            Page::Images => format!("{n} 上的本地镜像"),
-            Page::Volumes => format!("{n} 上的存储卷"),
-            Page::Registry => format!("{n} 上登录的镜像仓库"),
-            Page::Config => format!("{n} 上的 Docker 守护进程配置"),
+            Page::Stacks => self.docker_info_line(),
+            Page::Images => self.docker_info_line(),
+            Page::Volumes => self.docker_info_line(),
+            Page::Registry => self.docker_info_line(),
+            Page::Config => self.docker_info_line(),
             Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites => self.sys_subtitle().unwrap_or_default(),
         }
     }

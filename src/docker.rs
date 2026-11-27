@@ -149,6 +149,8 @@ pub struct Snapshot {
     pub fetched_ms: u64,
     /// 服务器 CPU 架构(`docker version` 的 Server.Arch,已归一为 amd64/arm64…),没取到是空
     pub arch: String,
+    /// Docker 引擎版本(`docker version` 的 Server.Version),没取到是空
+    pub version: String,
 }
 
 impl Snapshot {
@@ -2101,10 +2103,12 @@ async fn refresh_ps(r: &Runner, sh: &Shared) -> Result<(), String> {
     let vols = r.docker(&["volume".into(), "ls".into(), "--format".into(), VOLUMES_FORMAT.into()], t).await?;
     let mut snap = sh.snapshot.lock().unwrap().as_deref().cloned().unwrap_or_default();
     snap.containers = parse_ps(&ps.stdout);
-    if snap.arch.is_empty() {
-        if let Ok(o) = r.docker(&["version".into(), "--format".into(), "{{.Server.Arch}}".into()], t).await {
+    if snap.arch.is_empty() || snap.version.is_empty() {
+        if let Ok(o) = r.docker(&["version".into(), "--format".into(), "{{.Server.Version}}|{{.Server.Arch}}".into()], t).await {
             if o.code == 0 {
-                snap.arch = crate::appstore::norm_arch(&o.stdout);
+                let (v, a) = o.stdout.trim().split_once('|').unwrap_or(("", ""));
+                snap.version = v.trim().to_string();
+                snap.arch = crate::appstore::norm_arch(a);
             }
         }
     }
