@@ -13,6 +13,10 @@ macro_rules! distros {
     (@gen $f:ident, $gate:ident, ALL) => {
         distros!(@t $f, $gate, [ubuntu = UBUNTU, debian = DEBIAN, rocky = ROCKY]);
     };
+    // 工具箱:新旧两代都跑
+    (@gen $f:ident, $gate:ident, TOOLS) => {
+        distros!(@t $f, $gate, [ubuntu = UBUNTU, debian = DEBIAN, rocky = ROCKY, ubuntu22 = UBUNTU22, rocky8 = ROCKY8, debian11 = DEBIAN11]);
+    };
     // 防火墙前端不同的三族
     (@gen $f:ident, $gate:ident, UFW) => {
         distros!(@t $f, $gate, [ubuntu = UBUNTU]);
@@ -39,6 +43,13 @@ macro_rules! distros {
 macro_rules! per_distro {
     ($name:ident, $f:ident) => {
         distros!($name, $f, gate, ALL);
+    };
+}
+
+/// 工具箱用例:`per_distro_tools!(名字, 函数)`,六个发行版
+macro_rules! per_distro_tools {
+    ($name:ident, $f:ident) => {
+        distros!($name, $f, gate, TOOLS);
     };
 }
 

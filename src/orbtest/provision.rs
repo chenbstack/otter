@@ -10,6 +10,9 @@ fn script_of(d: Distro) -> &'static str {
         "ubuntu" => include_str!("provision/ubuntu.sh"),
         "rocky" => include_str!("provision/rocky.sh"),
         "debian" => include_str!("provision/debian.sh"),
+        "ubuntu22" => include_str!("provision/ubuntu22.sh"),
+        "rocky8" => include_str!("provision/rocky8.sh"),
+        "debian11" => include_str!("provision/debian11.sh"),
         _ => unreachable!(),
     }
 }
@@ -114,7 +117,7 @@ pub fn build(d: Distro) {
 /// 命令行里指定的发行版(`OTTER_ORBTEST_DISTROS=ubuntu,rocky`),没指定是全部
 fn wanted() -> Vec<Distro> {
     match std::env::var("OTTER_ORBTEST_DISTROS") {
-        Ok(s) if !s.trim().is_empty() => s.split(',').map(|k| Distro::by_key(k.trim()).unwrap_or_else(|| panic!("没有这个发行版:{k}(可选:ubuntu、rocky、debian)"))).collect(),
+        Ok(s) if !s.trim().is_empty() => s.split(',').map(|k| Distro::by_key(k.trim()).unwrap_or_else(|| panic!("没有这个发行版:{k}(可选:ubuntu、rocky、debian、ubuntu22、rocky8、debian11)"))).collect(),
         _ => Distro::ALL.to_vec(),
     }
 }

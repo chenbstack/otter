@@ -25,7 +25,11 @@ impl Distro {
     pub const UBUNTU: Distro = Distro { key: "ubuntu", image: "ubuntu:noble" };
     pub const ROCKY: Distro = Distro { key: "rocky", image: "rocky:9" };
     pub const DEBIAN: Distro = Distro { key: "debian", image: "debian:bookworm" };
-    pub const ALL: [Distro; 3] = [Self::UBUNTU, Self::ROCKY, Self::DEBIAN];
+    /// 旧一代:工具箱脚本要在 systemd、OpenSSH、NetworkManager 版本更老的系统上也能用(只装最少的软件,不测防火墙和 Docker)
+    pub const UBUNTU22: Distro = Distro { key: "ubuntu22", image: "ubuntu:jammy" };
+    pub const ROCKY8: Distro = Distro { key: "rocky8", image: "rocky:8" };
+    pub const DEBIAN11: Distro = Distro { key: "debian11", image: "debian:bullseye" };
+    pub const ALL: [Distro; 6] = [Self::UBUNTU, Self::ROCKY, Self::DEBIAN, Self::UBUNTU22, Self::ROCKY8, Self::DEBIAN11];
 
     pub fn base_name(&self) -> String {
         format!("{BASE_PREFIX}{}", self.key)

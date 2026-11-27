@@ -36,8 +36,13 @@ fn net(vm: &Vm, t: &NetTool, host: &str) -> NetResult {
 
 fn ports(d: Distro) {
     let vm = tb(d);
-    vm.pull("openresty/openresty:alpine");
-    vm.exec("起监听", &format!("{}{}sleep 1; docker run -d --name orbtest-tb -p 18073:80 openresty/openresty:alpine >/dev/null; sleep 2", listen_cmd("127.0.0.1", 18071), listen_cmd("0.0.0.0", 18072)));
+    // 旧一代的精简模板机没装 Docker:只测端口监听和诊断,不测容器端口归属
+    let docker = vm.run("command -v docker").0 == 0;
+    if docker {
+        vm.pull("openresty/openresty:alpine");
+    }
+    let ct = if docker { "docker run -d --name orbtest-tb -p 18073:80 openresty/openresty:alpine >/dev/null; sleep 2" } else { "" };
+    vm.exec("起监听", &format!("{}{}sleep 1; {ct}", listen_cmd("127.0.0.1", 18071), listen_cmd("0.0.0.0", 18072)));
     let l = listens(&vm);
     let g = group_listens(&l);
     let local = g.iter().find(|x| x.port == 18071).expect("18071");
@@ -46,19 +51,21 @@ fn ports(d: Distro) {
     assert!(!any.local_only(), "{any:?}");
 
     let fw = crate::firewall::parse(&vm.sh(crate::firewall::READ_SCRIPT));
-    let cs = crate::docker::parse_ps(&vm.sh(&format!("docker ps -a --format '{}'", crate::docker::PS_FORMAT)));
+    let cs = if docker { crate::docker::parse_ps(&vm.sh(&format!("docker ps -a --format '{}'", crate::docker::PS_FORMAT))) } else { Vec::new() };
     let d71 = diagnose(18071, "tcp", &l, &cs, Some(&fw));
     assert_eq!(d71[0].level, Level::Bad, "{d71:?}");
     assert!(d71.iter().any(|x| x.text.contains("只监听在 127.0.0.1")), "{d71:?}");
     let d72 = diagnose(18072, "tcp", &l, &cs, Some(&fw));
     assert_eq!(d72[0].level, Level::Good, "{d72:?}");
-    let d73 = diagnose(18073, "tcp", &l, &cs, Some(&fw));
-    assert!(d73.iter().any(|x| x.text.contains("容器 orbtest-tb")), "{d73:?}");
+    if docker {
+        let d73 = diagnose(18073, "tcp", &l, &cs, Some(&fw));
+        assert!(d73.iter().any(|x| x.text.contains("容器 orbtest-tb")), "{d73:?}");
+    }
     let d9 = diagnose(18079, "tcp", &l, &cs, Some(&fw));
     assert!(d9[0].text.contains("没有程序监听"), "{d9:?}");
-    vm.sh("pkill -f 'http.server 1807'; pkill -f 'nc -lk'; docker rm -f orbtest-tb");
+    vm.sh("pkill -f 'http.server 1807'; pkill -f 'nc -lk'; docker rm -f orbtest-tb 2>/dev/null; true");
 }
-per_distro!(ports, ports);
+per_distro_tools!(ports, ports);
 
 fn network(d: Distro) {
     let vm = tb(d);
@@ -81,11 +88,17 @@ fn network(d: Distro) {
     let r = net(&vm, &NetTool::Dns("A".into(), "1.1.1.1".into()), "example.com");
     assert!(r.code == 0 || r.missing.is_some(), "{r:?}");
     // 出口 IP
-    let r = net(&vm, &NetTool::PublicIp, "");
-    assert!(r.code == 0 && r.text.trim().chars().any(|c| c == '.' || c == ':'), "{r:?}");
+    // 虚拟机自己连不上 HTTPS(OrbStack 网络加 Rocky 8 的 OpenSSL 1.1.1 就是这样)时跳过:那是环境问题,不是脚本问题
+    let (https_ok, _) = vm.run("curl -fsS -m 8 -o /dev/null https://example.com");
+    if https_ok == 0 {
+        let r = net(&vm, &NetTool::PublicIp, "");
+        assert!(r.code == 0 && r.text.trim().chars().any(|c| c == '.' || c == ':'), "{r:?}");
+    } else {
+        println!("这台虚拟机连不上 HTTPS,跳过出口 IP");
+    }
     vm.sh("pkill -f 'http.server 1807'; pkill -f 'nc -lk'");
 }
-per_distro!(network, network);
+per_distro_tools!(network, network);
 
 fn time(d: Distro) {
     let vm = tb(d);
@@ -136,7 +149,7 @@ fn time(d: Distro) {
         }
     }
 }
-per_distro!(time, time);
+per_distro_tools!(time, time);
 
 /// OrbStack 的机器共用一个内核:swap(/proc/swaps、SwapTotal)和 vm.swappiness 是整个内核的,
 /// 不同发行版的 swap 用例不能同时跑,否则互相占着路径、改着总量
@@ -244,4 +257,4 @@ fn swap(d: Distro) {
     vm.sh(&format!("sysctl -w vm.swappiness={sw0}"));
     assert_eq!(read().swap_total_kb, base.swap_total_kb, "还原后 swap 总量应回到原来");
 }
-per_distro!(swap, swap);
+per_distro_tools!(swap, swap);

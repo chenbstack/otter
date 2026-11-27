@@ -133,7 +133,7 @@ fn host_tool(d: Distro) {
         }
     }
 }
-per_distro!(host_tool, host_tool);
+per_distro_tools!(host_tool, host_tool);
 
 // ================= 内核参数 =================
 
@@ -191,7 +191,7 @@ fn sysctl_tool(d: Distro) {
     }
     vm.sh("rm -f /etc/sysctl.d/99-otter.conf");
 }
-per_distro!(sysctl_tool, sysctl_tool);
+per_distro_tools!(sysctl_tool, sysctl_tool);
 
 // ================= SSH 设置与公钥 =================
 
@@ -261,7 +261,11 @@ fn ssh_tool(d: Distro) {
     // 校验失败:写坏的 sshd_config 不会被重载,会还原
     vm.sh("rm -f /etc/ssh/sshd_config.d/50-orbtest.conf");
     let before = vm.sh("cat /etc/ssh/sshd_config.d/00-otter.conf");
-    let (c, o) = vm.run(&ssh::set_script("MaxAuthTries", "3").unwrap().replace("echo \"$K $V\" >> $F.tmp", "echo \"$K $V bogus-extra\" >> $F.tmp"));
+    // 主配置没有 Include(RHEL 8 的 OpenSSH 8.0)时,脚本直接写主配置,写入点不一样
+    let (from, to) = if i0.include { ("echo \"$K $V\" >> $F.tmp", "echo \"$K $V bogus-extra\" >> $F.tmp") } else { ("echo \"$K $V # otter\";", "echo \"$K $V bogus-extra # otter\";") };
+    let bad = ssh::set_script("MaxAuthTries", "3").unwrap();
+    assert!(bad.contains(from), "没找到要注入错误的位置");
+    let (c, o) = vm.run(&bad.replace(from, to));
     assert_ne!(c, 0, "{o}");
     assert!(o.contains("校验失败") || o.contains("没有生效"), "{o}");
     assert_eq!(vm.sh("cat /etc/ssh/sshd_config.d/00-otter.conf"), before, "失败后文件要还原");
@@ -323,7 +327,7 @@ fn ssh_tool(d: Distro) {
     vm.exec("删 root 公钥", &ssh::delete_key_script("root", PUB1).unwrap());
     vm.sh("rm -f /etc/ssh/sshd_config.d/00-otter.conf");
 }
-per_distro!(ssh_tool, ssh_tool);
+per_distro_tools!(ssh_tool, ssh_tool);
 
 // ================= 用户与 sudo =================
 
@@ -407,7 +411,7 @@ fn users_tool(d: Distro) {
     assert_ne!(c, 0);
     assert!(o.contains("不存在"), "{o}");
 }
-per_distro!(users_tool, users_tool);
+per_distro_tools!(users_tool, users_tool);
 
 // ================= fail2ban =================
 
@@ -474,4 +478,4 @@ fn fail2ban_tool(d: Distro) {
     vm.exec("启动", &f2b::service_script(true));
     assert!(read_f2b(&vm).active);
 }
-per_distro!(fail2ban_tool, fail2ban_tool);
+per_distro_tools!(fail2ban_tool, fail2ban_tool);

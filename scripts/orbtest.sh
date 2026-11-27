@@ -5,7 +5,7 @@
 #   scripts/orbtest.sh firewall            只跑一个模块;也可以更细:firewall::rocky、firewall::ubuntu_switch
 #   scripts/orbtest.sh --slow [模块]        连等回滚定时器的慢用例一起跑
 #   scripts/orbtest.sh -v ...              打印每个用例的详细输出(默认只在失败时显示)
-#   scripts/orbtest.sh init [发行版…]       建模板机(ubuntu rocky debian,不写就全建);已是最新的跳过
+#   scripts/orbtest.sh init [发行版…]       建模板机(ubuntu rocky debian ubuntu22 rocky8 debian11,不写就全建);已是最新的跳过
 #   scripts/orbtest.sh rebuild [发行版…]    强制重建模板机
 #   scripts/orbtest.sh status              列出模板机和残留的临时机器
 #   scripts/orbtest.sh clean               删掉所有 otter-orbtest-* 机器(含模板机)
