@@ -3,7 +3,8 @@
 //! - 主机名:`hostnamectl set-hostname`,并同步 /etc/hosts 里的 `127.0.1.1` 行(Debian/Ubuntu 惯例)。
 //! - hosts:整个文件的每一条记录都能改(按行号 + 原文核对,文件在你打开之后被改过就拒绝)。
 //! - DNS:systemd-resolved 在跑时写 drop-in `99-otter.conf`;resolv.conf 是普通文件时直接改 nameserver 行;
-//!   符号链接或网络管理器生成时只读(改了会被覆盖)。
+//!   NetworkManager 在跑(且没有 systemd-resolved)时改默认路由所在连接的 ipv4.dns / ipv6.dns 并 reapply;
+//!   符号链接或其它网络管理器生成时只读(改了会被覆盖)。
 
 use super::common::{first, sections, valid_hostname, valid_ip};
 use super::PATH_FIX;
@@ -14,12 +15,18 @@ echo '@@HOSTNAME'; hostname 2>/dev/null
 echo '@@STATIC'; { hostnamectl --static 2>/dev/null || cat /etc/hostname 2>/dev/null; } | head -1
 echo '@@HOSTS'; cat /etc/hosts 2>/dev/null
 echo '@@MODE'
+NMU=
 if systemctl is-active systemd-resolved >/dev/null 2>&1; then echo resolved
+elif systemctl is-active NetworkManager >/dev/null 2>&1 && command -v nmcli >/dev/null 2>&1; then
+  NMDEV=$(ip route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1);exit}}')
+  NMU=$(nmcli -g GENERAL.CON-UUID device show "$NMDEV" 2>/dev/null)
+  if [ -n "$NMU" ]; then echo "nm $NMU $(nmcli -g GENERAL.CONNECTION device show "$NMDEV" 2>/dev/null)"; else echo "readonly NetworkManager 管理着 DNS,但没找到默认路由所在的连接"; fi
 elif [ -L /etc/resolv.conf ]; then echo "readonly /etc/resolv.conf 是符号链接(指向 $(readlink -f /etc/resolv.conf)),由其它服务管理"
 elif grep -qiE 'NetworkManager|resolvconf|systemd-resolved|dhclient|netconfig' /etc/resolv.conf 2>/dev/null; then echo "readonly /etc/resolv.conf 由网络管理器自动生成,直接改会被覆盖"
 else echo file; fi
 echo '@@DNS'; resolvectl dns 2>/dev/null
 echo '@@RESOLV'; grep '^nameserver' /etc/resolv.conf 2>/dev/null
+echo '@@NMDNS'; [ -n "$NMU" ] && nmcli --escape no -g ipv4.dns,ipv6.dns con show "$NMU" 2>/dev/null
 echo '@@CONF'; cat /etc/systemd/resolved.conf.d/99-otter.conf 2>/dev/null
 true
 "#;
@@ -30,6 +37,8 @@ pub enum DnsMode {
     Resolved,
     /// resolv.conf 是普通文件:直接改
     File,
+    /// NetworkManager 管理:改默认路由所在连接(UUID、显示名)的 DNS
+    NetworkManager { uuid: String, name: String },
     /// 改不了,附原因
     Readonly(String),
 }
@@ -87,6 +96,9 @@ pub fn parse_host(out: &str) -> Result<HostInfo, String> {
         DnsMode::Resolved
     } else if mode_line == "file" {
         DnsMode::File
+    } else if let Some(rest) = mode_line.strip_prefix("nm ") {
+        let (uuid, name) = rest.split_once(' ').unwrap_or((rest, ""));
+        DnsMode::NetworkManager { uuid: uuid.to_string(), name: name.to_string() }
     } else if let Some(why) = mode_line.strip_prefix("readonly ") {
         DnsMode::Readonly(why.to_string())
     } else {
@@ -113,12 +125,12 @@ pub fn parse_host(out: &str) -> Result<HostInfo, String> {
             }
         }
     }
-    let dns_otter = m
-        .get("CONF")
-        .into_iter()
-        .flatten()
-        .find_map(|l| l.trim().strip_prefix("DNS=").map(|v| v.split_whitespace().map(str::to_string).collect::<Vec<_>>()))
-        .unwrap_or_default();
+    let dns_otter = if matches!(mode, DnsMode::NetworkManager { .. }) {
+        // 连接上手动设置的 DNS(nmcli -g 多字段时每个字段一行,地址之间用逗号)
+        m.get("NMDNS").into_iter().flatten().flat_map(|l| l.split(|c: char| c == ',' || c.is_whitespace())).filter(|s| valid_ip(s)).map(str::to_string).collect()
+    } else {
+        m.get("CONF").into_iter().flatten().find_map(|l| l.trim().strip_prefix("DNS=").map(|v| v.split_whitespace().map(str::to_string).collect::<Vec<_>>())).unwrap_or_default()
+    };
     Ok(HostInfo { hostname, static_name: first(&m, "STATIC"), entries: parse_hosts(&m.get("HOSTS").map(|v| v.join("\n")).unwrap_or_default()), mode, dns, dns_otter })
 }
 
@@ -204,13 +216,42 @@ pub fn dns_set_script(mode: &DnsMode, servers: &[String]) -> Result<String, Stri
         DnsMode::File => Ok(format!(
             "{PATH_FIX}set -e\ncp -p /etc/resolv.conf /etc/resolv.conf.otter-bak\n{{ for s in {list}; do echo \"nameserver $s\"; done; grep -v '^nameserver' /etc/resolv.conf.otter-bak || true; }} > /etc/resolv.conf.otter-new\ncat /etc/resolv.conf.otter-new > /etc/resolv.conf; rm -f /etc/resolv.conf.otter-new\ngrep -q '^nameserver' /etc/resolv.conf\n"
         )),
+        DnsMode::NetworkManager { uuid, .. } => {
+            let (v4, v6): (Vec<&str>, Vec<&str>) = servers.iter().map(String::as_str).partition(|s| !s.contains(':'));
+            Ok(nm_script(uuid, &v4.join(" "), &v6.join(" "), servers[0].as_str()))
+        }
         DnsMode::Readonly(why) => Err(why.clone()),
     }
 }
 
-/// 去掉 Otter 设置的 DNS(只对 systemd-resolved 模式有意义)
-pub fn dns_reset_script() -> String {
-    format!("{PATH_FIX}set -e\nrm -f {RESOLVED_DIR}/99-otter.conf\nsystemctl restart systemd-resolved\n")
+/// NetworkManager:改连接的 ipv4.dns / ipv6.dns(不动 ignore-auto-dns,和 DHCP 下发的并存),`reapply` 不断网;
+/// 读回 resolv.conf 确认第一个地址出现,没生效就还原。`first` 为空表示清空(恢复默认),不校验。
+fn nm_script(uuid: &str, v4: &str, v6: &str, first: &str) -> String {
+    let verify = if first.is_empty() {
+        String::new()
+    } else {
+        format!("ok=0; for i in 1 2 3 4 5 6; do grep -qF {} /etc/resolv.conf && ok=1 && break; sleep 1; done\n[ $ok = 1 ] || {{ back; echo 'DNS 没有生效,已还原' >&2; exit 1; }}\n", quote(first))
+    };
+    format!(
+        "{PATH_FIX}set -e\nU={u}\nold4=$(nmcli --escape no -g ipv4.dns con show \"$U\"); old6=$(nmcli --escape no -g ipv6.dns con show \"$U\")\n\
+         dev=$(nmcli -g GENERAL.DEVICES con show \"$U\" | head -1)\n\
+         apply() {{ if [ -n \"$dev\" ]; then nmcli device reapply \"$dev\" >/dev/null 2>&1 || nmcli con up \"$U\" >/dev/null 2>&1 || true; fi; }}\n\
+         back() {{ nmcli con mod \"$U\" ipv4.dns \"$(echo $old4 | tr , ' ')\" ipv6.dns \"$(echo $old6 | tr , ' ')\" >/dev/null 2>&1 || true; apply; }}\n\
+         nmcli con mod \"$U\" ipv4.dns {v4q}\n\
+         if [ -n {v6q} ] || [ -n \"$old6\" ]; then nmcli con mod \"$U\" ipv6.dns {v6q} || {{ back; echo 'IPv6 DNS 设置失败,已还原' >&2; exit 1; }}; fi\n\
+         apply\n{verify}",
+        u = quote(uuid),
+        v4q = quote(v4),
+        v6q = quote(v6),
+    )
+}
+
+/// 去掉 Otter 设置的 DNS(systemd-resolved:删 drop-in;NetworkManager:清空连接上的手动 DNS)
+pub fn dns_reset_script(mode: &DnsMode) -> String {
+    match mode {
+        DnsMode::NetworkManager { uuid, .. } => nm_script(uuid, "", "", ""),
+        _ => format!("{PATH_FIX}set -e\nrm -f {RESOLVED_DIR}/99-otter.conf\nsystemctl restart systemd-resolved\n"),
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +280,25 @@ mod tests {
         let f = parse_host("@@HOSTNAME\nx\n@@MODE\nfile\n@@RESOLV\nnameserver 8.8.4.4\n").unwrap();
         assert_eq!(f.mode, DnsMode::File);
         assert!(parse_host("").is_err());
+    }
+
+    #[test]
+    fn parse_nm() {
+        let h = parse_host("@@HOSTNAME\nx\n@@MODE\nnm 1b2c-uuid Wired connection 1\n@@RESOLV\nnameserver 10.0.0.2\n@@NMDNS\n9.9.9.9,149.112.112.112\n2001:4860:4860::8888\n").unwrap();
+        assert_eq!(h.mode, DnsMode::NetworkManager { uuid: "1b2c-uuid".into(), name: "Wired connection 1".into() });
+        assert_eq!(h.dns, vec!["10.0.0.2"]);
+        assert_eq!(h.dns_otter, vec!["9.9.9.9", "149.112.112.112", "2001:4860:4860::8888"]);
+    }
+
+    #[test]
+    fn nm_scripts() {
+        let m = DnsMode::NetworkManager { uuid: "u-1".into(), name: "eth".into() };
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let sc = dns_set_script(&m, &s(&["1.1.1.1", "2606:4700::1111"])).unwrap();
+        assert!(sc.contains("ipv4.dns '1.1.1.1'") && sc.contains("ipv6.dns '2606:4700::1111'"), "{sc}");
+        assert!(dns_set_script(&m, &s(&["1.1.1.1; reboot"])).is_err());
+        let r = dns_reset_script(&m);
+        assert!(r.contains("ipv4.dns ''") && !r.contains("grep -qF"), "{r}");
     }
 
     #[test]

@@ -86,7 +86,7 @@ fn host_tool(d: Distro) {
             vm.exec("DNS 设置", &host::dns_set_script(&host::DnsMode::Resolved, &servers).unwrap());
             let i = read_host(&vm);
             assert!(i.dns.contains(&"9.9.9.9".to_string()) && i.dns_otter == servers, "{i:?}");
-            vm.exec("DNS 恢复默认", &host::dns_reset_script());
+            vm.exec("DNS 恢复默认", &host::dns_reset_script(&host::DnsMode::Resolved));
             let i = read_host(&vm);
             assert!(i.dns_otter.is_empty(), "{i:?}");
         }
@@ -95,6 +95,26 @@ fn host_tool(d: Distro) {
             let i = read_host(&vm);
             assert_eq!(i.dns[..2], servers[..], "{i:?}");
             vm.sh("cat /tmp/orbtest-resolv > /etc/resolv.conf");
+        }
+        host::DnsMode::NetworkManager { .. } => {
+            // OrbStack 把 resolv.conf 做成指向宿主机 DNS 的符号链接,NetworkManager 不写它;换成普通文件让 NM 接管,和真实 RHEL 系服务器一致
+            vm.sh("[ -L /tmp/orbtest-resolv-link ] || cp -P /etc/resolv.conf /tmp/orbtest-resolv-link; if [ -L /etc/resolv.conf ]; then rm -f /etc/resolv.conf; nmcli general reload dns-rc; sleep 1; fi");
+            let i = read_host(&vm);
+            assert!(i.dns_otter.is_empty(), "{i:?}");
+            let mode = i.mode.clone();
+            vm.exec("DNS 设置(NM)", &host::dns_set_script(&mode, &servers).unwrap());
+            let i = read_host(&vm);
+            assert_eq!(i.dns[..2], servers[..], "{i:?}");
+            assert_eq!(i.dns_otter, servers, "{i:?}");
+            // 加一个 IPv6 地址:进 ipv6.dns,三个都在
+            let mixed = vec!["9.9.9.9".to_string(), "2620:fe::fe".to_string()];
+            vm.exec("DNS 设置(NM,v4+v6)", &host::dns_set_script(&mode, &mixed).unwrap());
+            let i = read_host(&vm);
+            assert_eq!(i.dns_otter, mixed, "{i:?}");
+            vm.exec("DNS 恢复默认(NM)", &host::dns_reset_script(&mode));
+            let i = read_host(&vm);
+            assert!(i.dns_otter.is_empty() && !i.dns.contains(&"9.9.9.9".to_string()), "{i:?}");
+            vm.sh("rm -f /etc/resolv.conf; cp -P /tmp/orbtest-resolv-link /etc/resolv.conf");
         }
         host::DnsMode::Readonly(why) => {
             println!("DNS 只读:{why}");

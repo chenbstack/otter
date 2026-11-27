@@ -294,19 +294,23 @@ impl Home {
             }
             mode => {
                 let mode_c = mode.clone();
+                let nm_c = if let DnsMode::NetworkManager { name, .. } = mode { Some(name.clone()) } else { None };
                 let resolved = *mode == DnsMode::Resolved;
+                let nm_name = if let DnsMode::NetworkManager { name, .. } = mode { Some(name.clone()) } else { None };
+                let managed = resolved || nm_name.is_some();
                 let mut form = div().flex().flex_row().items_end().gap(px(12.0)).child(div().flex_1().min_w_0().child(labeled("主 DNS", "", input_box(&dns1)))).child(div().flex_1().min_w_0().child(labeled("备用 DNS", "", input_box(&dns2)))).child(button("dns-set", IconName::Check, "应用").on_click(cx.listener(move |this, _, _, cx| {
                     let list: Vec<String> = [this.mtext(I_DNS1, cx), this.mtext(I_DNS2, cx)].into_iter().filter(|s| !s.is_empty()).collect();
                     let body = format!("DNS 服务器改成 {}", list.join("、"));
-                    let note = if resolved { "写入 /etc/systemd/resolved.conf.d/99-otter.conf 并重启 systemd-resolved;和 DHCP 下发的 DNS 并存".to_string() } else { "改写 /etc/resolv.conf 的 nameserver 行(原文件备份为 resolv.conf.otter-bak);网络服务重启后可能被还原".to_string() };
+                    let note = if resolved { "写入 /etc/systemd/resolved.conf.d/99-otter.conf 并重启 systemd-resolved;和 DHCP 下发的 DNS 并存".to_string() } else if let Some(n) = &nm_c { format!("改 NetworkManager 连接「{n}」的 DNS 并立即应用(不断网);和 DHCP 下发的 DNS 并存") } else { "改写 /etc/resolv.conf 的 nameserver 行(原文件备份为 resolv.conf.otter-bak);网络服务重启后可能被还原".to_string() };
                     this.more_ask(Tool::Host, "修改 DNS", body, "修改 DNS", list.join(" "), host::dns_set_script(&mode_c, &list), None, true, 0, None, vec![note, "改完会读回确认生效,没生效自动还原".into()], cx);
                 })));
-                if resolved && !info.dns_otter.is_empty() {
-                    form = form.child(button("dns-reset", IconName::RefreshCw, "恢复默认").on_click(cx.listener(|this, _, _, cx| {
-                        this.more_ask(Tool::Host, "恢复默认 DNS", "删除 Otter 设置的 DNS,恢复成网络下发的默认值".into(), "恢复默认 DNS", "DNS".into(), Ok(host::dns_reset_script()), None, true, 0, None, Vec::new(), cx);
+                if managed && !info.dns_otter.is_empty() {
+                    let mode_r = mode.clone();
+                    form = form.child(button("dns-reset", IconName::RefreshCw, "恢复默认").on_click(cx.listener(move |this, _, _, cx| {
+                        this.more_ask(Tool::Host, "恢复默认 DNS", "删除手动设置的 DNS,恢复成网络下发的默认值".into(), "恢复默认 DNS", "DNS".into(), Ok(host::dns_reset_script(&mode_r)), None, true, 0, None, Vec::new(), cx);
                     })));
                 }
-                dns = dns.child(form).child(small(if resolved { "由 systemd-resolved 管理" } else { "直接改 /etc/resolv.conf" }, c::ghost()));
+                dns = dns.child(form).child(small(if resolved { "由 systemd-resolved 管理".to_string() } else if let Some(n) = &nm_name { format!("由 NetworkManager 管理,改的是连接「{n}」") } else { "直接改 /etc/resolv.conf".to_string() }, c::ghost()));
             }
         }
         col = col.child(dns);
