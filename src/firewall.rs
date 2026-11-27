@@ -56,7 +56,7 @@ echo "@@DBE $dbe"
 command -v nft >/dev/null 2>&1 && nft list table ip docker-bridges >/dev/null 2>&1 && echo "@@DNFT"
 echo "@@DUL"
 if [ "$dbe" = nftables ]; then command -v nft >/dev/null 2>&1 && nft list table inet otter_docker 2>/dev/null | grep 'otter:dp'
-else command -v iptables >/dev/null 2>&1 && iptables -w -S DOCKER-USER 2>/dev/null | grep 'otter:dp'; fi
+else command -v iptables >/dev/null 2>&1 && iptables -w -S OTTER-DOCKER 2>/dev/null | grep 'otter:dp'; fi
 exit 0
 "#;
 
@@ -648,7 +648,7 @@ pub fn guard_cancel() -> String {
 /// 排一个 `GUARD_SECS` 秒后执行 `rollback` 的临时 systemd 定时器;没有 systemd-run 就不排(操作照常做)
 fn guard_arm(rollback: &str) -> String {
     format!(
-        "{GUARD_MARK}\nsystemctl stop {GUARD_UNIT}.timer {GUARD_UNIT}.service >/dev/null 2>&1 || true\ncommand -v systemd-run >/dev/null 2>&1 && systemd-run --quiet --unit={GUARD_UNIT} --on-active={GUARD_SECS} /bin/sh -c {} || true\n",
+        "{GUARD_MARK}\nsystemctl stop {GUARD_UNIT}.timer {GUARD_UNIT}.service >/dev/null 2>&1 || true\ncommand -v systemd-run >/dev/null 2>&1 && systemd-run --quiet --unit={GUARD_UNIT} --on-active={GUARD_SECS} --timer-property=AccuracySec=1s /bin/sh -c {} || true\n",
         quote(rollback)
     )
 }
@@ -726,7 +726,7 @@ pub fn ufw_delete(n: u32, key: &str) -> Result<String, String> {
         return Err("规则里有不支持的字符,请到终端里处理".into());
     }
     Ok(format!(
-        "PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH\ncur=$(ufw status numbered | grep -E '^\\[ *{n}\\]' | sed -E 's/^\\[ *[0-9]+\\] *//; s/ +# .*$//; s/ {{2,}}/|/g')\n[ \"$cur\" = {} ] || {{ echo '规则列表已经变了,请刷新后再删' >&2; exit 1; }}\nufw --force delete {n}\n",
+        "PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH\ncur=$(ufw status numbered | grep -E '^\\[ *{n}\\]' | sed -E 's/^\\[ *[0-9]+\\] *//; s/ +# .*$//; s/ +$//; s/ {{2,}}/|/g')\n[ \"$cur\" = {} ] || {{ echo '规则列表已经变了,请刷新后再删' >&2; exit 1; }}\nufw --force delete {n}\n",
         quote(&key.split('|').map(|p| p.trim()).collect::<Vec<_>>().join("|"))
     ))
 }
@@ -1335,8 +1335,9 @@ pub fn valid_du_source(s: &str) -> bool {
     valid_source(s) && !s.contains(':')
 }
 
+/// 端口规则的匹配条件(写在 `OTTER-DOCKER` 链里;来自 docker0/网桥的流量由链首的两条 RETURN 放过,因为 iptables 不允许一条规则写两个 -i)
 fn du_match(proto: &str, port: u16) -> String {
-    format!("-p {proto} -m conntrack --ctorigdstport {port} --ctdir ORIGINAL ! -i docker0 ! -i br-+ -m comment --comment {DU_TAG}")
+    format!("-p {proto} -m conntrack --ctorigdstport {port} --ctdir ORIGINAL -m comment --comment {DU_TAG}")
 }
 
 /// 给用户看的预览:最终会写进 DOCKER-USER 的 iptables 规则
@@ -1346,20 +1347,20 @@ pub fn du_preview(proto: &str, port: u16, mode: &PortMode, nft: bool) -> Vec<Str
         let mut v = Vec::new();
         if let PortMode::Only(src) = mode {
             for s in src {
-                v.push(format!("add rule inet otter_docker forward {m} ip saddr {s} return"));
+                v.push(format!("add rule inet otter_docker forward {m} ip saddr {s} return comment \"{DU_TAG}\""));
             }
         }
-        v.push(format!("add rule inet otter_docker forward {m} drop"));
+        v.push(format!("add rule inet otter_docker forward {m} drop comment \"{DU_TAG}\""));
         return v;
     }
     let m = du_match(proto, port);
-    let mut v = Vec::new();
+    let mut v = vec!["iptables -N OTTER-DOCKER(DOCKER-USER 第一条跳到它;链首放过 docker0 和 br-* 来的流量)".to_string()];
     if let PortMode::Only(src) = mode {
         for s in src {
-            v.push(format!("iptables -I DOCKER-USER {m} -s {s} -j RETURN"));
+            v.push(format!("iptables -A OTTER-DOCKER {m} -s {s} -j RETURN"));
         }
     }
-    v.push(format!("iptables -I DOCKER-USER {m} -j DROP"));
+    v.push(format!("iptables -A OTTER-DOCKER {m} -j DROP"));
     v
 }
 
@@ -1370,6 +1371,9 @@ fn du_apply_script(conf: &str, nft: bool) -> String {
         format!(
             r#"if command -v iptables >/dev/null 2>&1; then
   iptables -w -S DOCKER-USER 2>/dev/null | grep -- 'comment {DU_TAG}' | sed 's/^-A /-D /' | while read -r l; do iptables -w $l; done
+  for _i in 1 2 3; do iptables -w -D DOCKER-USER -m comment --comment otter:if -j OTTER-DOCKER 2>/dev/null || break; done
+  iptables -w -F OTTER-DOCKER 2>/dev/null
+  iptables -w -X OTTER-DOCKER 2>/dev/null
 fi
 {{
   echo "table inet otter_docker"
@@ -1381,14 +1385,14 @@ fi
     while read -r proto port mode srcs; do
       case "$proto" in tcp|udp) ;; *) continue;; esac
       case "$port" in ''|*[!0-9]*) continue;; esac
-      m="meta l4proto $proto ct original proto-dst $port iifname != \"docker0\" iifname != \"br-*\" comment \"{DU_TAG}\""
+      m="meta l4proto $proto ct original proto-dst $port iifname != \"docker0\" iifname != \"br-*\""
       case "$mode" in
-        deny) echo "    $m drop";;
+        deny) echo "    $m drop comment \"{DU_TAG}\"";;
         only) for s in $(echo "$srcs" | tr ',' ' '); do
                 case "$s" in *[!0-9./]*) continue;; esac
-                echo "    $m ip saddr $s return"
+                echo "    $m ip saddr $s return comment \"{DU_TAG}\""
               done
-              echo "    $m drop";;
+              echo "    $m drop comment \"{DU_TAG}\"";;
       esac
     done <"$CONF"
   fi
@@ -1402,18 +1406,27 @@ exit 0
         format!(
             r#"command -v nft >/dev/null 2>&1 && nft delete table inet otter_docker >/dev/null 2>&1
 iptables -w -n -L DOCKER-USER >/dev/null 2>&1 || iptables -w -N DOCKER-USER || exit 1
+# 先清掉旧的:老版本直接写在 DOCKER-USER 里的规则、跳转和 OTTER-DOCKER 链
 iptables -w -S DOCKER-USER | grep -- 'comment {DU_TAG}' | sed 's/^-A /-D /' | while read -r l; do iptables -w $l; done
-[ -f "$CONF" ] || exit 0
+for _i in 1 2 3; do iptables -w -D DOCKER-USER -m comment --comment otter:if -j OTTER-DOCKER 2>/dev/null || break; done
+iptables -w -F OTTER-DOCKER 2>/dev/null
+iptables -w -X OTTER-DOCKER 2>/dev/null
+grep -qE '^(tcp|udp) ' "$CONF" 2>/dev/null || exit 0
+iptables -w -N OTTER-DOCKER || exit 1
+# 容器自己(docker0、自定义网桥)出来的流量不受限制:一条规则里不能写两个 -i,所以在链首各放一条 RETURN
+iptables -w -A OTTER-DOCKER -i docker0 -m comment --comment otter:if -j RETURN || exit 1
+iptables -w -A OTTER-DOCKER -i br-+ -m comment --comment otter:if -j RETURN || exit 1
 while read -r proto port mode srcs; do
   case "$proto" in tcp|udp) ;; *) continue;; esac
   case "$port" in ''|*[!0-9]*) continue;; esac
-  m="-p $proto -m conntrack --ctorigdstport $port --ctdir ORIGINAL ! -i docker0 ! -i br-+ -m comment --comment {DU_TAG}"
+  m="-p $proto -m conntrack --ctorigdstport $port --ctdir ORIGINAL -m comment --comment {DU_TAG}"
   case "$mode" in
-    deny) iptables -w -I DOCKER-USER $m -j DROP;;
-    only) iptables -w -I DOCKER-USER $m -j DROP
-          for s in $(echo "$srcs" | tr ',' ' '); do iptables -w -I DOCKER-USER $m -s "$s" -j RETURN; done;;
+    deny) iptables -w -A OTTER-DOCKER $m -j DROP || exit 1;;
+    only) for s in $(echo "$srcs" | tr ',' ' '); do iptables -w -A OTTER-DOCKER $m -s "$s" -j RETURN || exit 1; done
+          iptables -w -A OTTER-DOCKER $m -j DROP || exit 1;;
   esac
 done <"$CONF"
+iptables -w -I DOCKER-USER 1 -m comment --comment otter:if -j OTTER-DOCKER || exit 1
 exit 0
 "#
         )
@@ -1424,7 +1437,7 @@ exit 0
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH
 CONF={conf}
 {body}"#,
-        target = if nft { " nftables 的 inet otter_docker 表" } else { " DOCKER-USER 链" }
+        target = if nft { " nftables 的 inet otter_docker 表" } else { " DOCKER-USER 链(跳到 OTTER-DOCKER 链)" }
     )
 }
 
@@ -1794,7 +1807,7 @@ mod tests {
         assert!(du_set("tcp", 80, Some(&PortMode::Only(vec!["2001:db8::1".into()])), &[], &[22], false).is_err());
         assert!(du_set("tcp", 80, Some(&PortMode::Only(vec![])), &[], &[22], false).is_err());
         assert!(du_set("tcp", 80, Some(&PortMode::Only(vec!["1.2.3.4; id".into()])), &[], &[22], false).is_err());
-        assert_eq!(du_preview("tcp", 80, &only, false).len(), 2);
+        assert_eq!(du_preview("tcp", 80, &only, false).len(), 3);
     }
 
     /// 用假的 iptables 跑一遍套用脚本:先清掉旧的 Otter 规则,再按 conf 写,允许来源在 DROP 之前
@@ -1814,9 +1827,11 @@ mod tests {
         let log = std::fs::read_to_string(&log).unwrap();
         let lines: Vec<&str> = log.lines().collect();
         assert!(lines.iter().any(|l| l.starts_with("-w -D DOCKER-USER") && l.contains("--ctorigdstport 9 ")), "{log}");
-        let at = |needle: &str| lines.iter().position(|l| l.starts_with("-w -I DOCKER-USER") && l.contains(needle)).unwrap_or_else(|| panic!("{needle}\n{log}"));
-        let (drop, ret1, ret2) = (at("--ctorigdstport 3306 --ctdir ORIGINAL ! -i docker0 ! -i br-+ -m comment --comment otter:dp -j DROP"), at("-s 1.2.3.4 -j RETURN"), at("-s 10.0.0.0/8 -j RETURN"));
-        assert!(drop < ret1 && drop < ret2);
+        let at = |needle: &str| lines.iter().position(|l| l.starts_with("-w -A OTTER-DOCKER") && l.contains(needle)).unwrap_or_else(|| panic!("{needle}\n{log}"));
+        let (drop, ret1, ret2) = (at("--ctorigdstport 3306 --ctdir ORIGINAL -m comment --comment otter:dp -j DROP"), at("-s 1.2.3.4 -j RETURN"), at("-s 10.0.0.0/8 -j RETURN"));
+        assert!(ret1 < drop && ret2 < drop);
+        assert!(lines.iter().any(|l| l.contains("-A OTTER-DOCKER -i docker0")) && lines.iter().any(|l| l.contains("-A OTTER-DOCKER -i br-+")), "{log}");
+        assert!(lines.iter().any(|l| l.starts_with("-w -I DOCKER-USER 1") && l.ends_with("-j OTTER-DOCKER")), "{log}");
         assert!(lines.iter().any(|l| l.contains("--ctorigdstport 8080") && l.ends_with("-j DROP")));
         assert!(!log.contains("xx"));
         std::fs::remove_dir_all(&dir).ok();
@@ -1856,8 +1871,8 @@ mod tests {
         let log = std::fs::read_to_string(&log).unwrap();
         assert!(log.contains("iptables -w -D DOCKER-USER") && log.contains("--ctorigdstport 9 "), "{log}");
         assert!(log.contains("delete table inet otter_docker") && log.contains("type filter hook forward priority -1; policy accept;"), "{log}");
-        assert!(log.contains("meta l4proto tcp ct original proto-dst 8080 iifname != \"docker0\" iifname != \"br-*\" comment \"otter:dp\" drop"), "{log}");
-        let (r1, r2, dr) = (log.find("proto-dst 3306 iifname != \"docker0\" iifname != \"br-*\" comment \"otter:dp\" ip saddr 1.2.3.4 return"), log.find("ip saddr 10.0.0.0/8 return"), log.rfind("proto-dst 3306"));
+        assert!(log.contains("meta l4proto tcp ct original proto-dst 8080 iifname != \"docker0\" iifname != \"br-*\" drop comment \"otter:dp\""), "{log}");
+        let (r1, r2, dr) = (log.find("proto-dst 3306 iifname != \"docker0\" iifname != \"br-*\" ip saddr 1.2.3.4 return comment \"otter:dp\""), log.find("ip saddr 10.0.0.0/8 return"), log.rfind("proto-dst 3306"));
         assert!(r1.is_some() && r2.is_some() && r1 < r2 && r2 < dr, "{log}");
         assert!(!log.contains("2001:db8") && !log.contains(" xx "), "{log}");
         std::fs::remove_dir_all(&dir).ok();
