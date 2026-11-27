@@ -456,9 +456,9 @@ impl Render for Home {
                 }
                 Some(workspace::NodeMode::Files) => div().flex_1().min_h_0().flex().flex_col().child(self.files_tab(window, cx)),
                 _ => {
-                    let menu = self.menu(cx);
                     let content = self.content(window, cx);
-                    div().flex_1().min_h_0().flex().flex_row().child(menu).child(content)
+                    let menu = (!self.dock.gate_full.get()).then(|| self.menu(cx));
+                    div().flex_1().min_h_0().flex().flex_row().children(menu).child(content)
                 }
             },
             Some(workspace::TabKind::Nodes) | None => div().flex_1().min_h_0().flex().flex_col().child(self.nodes_page(window, cx)),

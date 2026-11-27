@@ -149,6 +149,7 @@ impl Home {
             self.page_scroll_key = key;
             self.page_scroll.set_offset(point(px(0.0), px(0.0)));
         }
+        // 菜单会在连接页时隐藏,但宽度只影响列数,连接页用不上,照常算
         let width = f32::from(window.viewport_size().width) - MENU_W - CONTENT_PAD * 2.0;
         let inner = width - 2.0 - STACK_BODY_PAD * 2.0;
         self.cols = (((inner + SVC_GAP) / (SVC_MIN_W + SVC_GAP)).floor() as usize).max(1);
@@ -187,6 +188,7 @@ impl Home {
                 .into_any_element()
         };
 
+        let full = self.dock.gate_full.get();
         let header = self.dock_head(gated, cx);
         let head_in_list = self.page == Page::Stacks && !gated && !self.node().stacks.is_empty();
         let scroll_header = !gated && (self.page == Page::Overview || self.page.scrolls_whole() || self.conf_scrolls_whole());
@@ -202,7 +204,7 @@ impl Home {
             v.extend(pinned);
             v
         } else {
-            vec![header.into_any_element(), tabs.unwrap_or_else(|| div().into_any_element()), body]
+            if full { vec![body] } else { vec![header.into_any_element(), tabs.unwrap_or_else(|| div().into_any_element()), body] }
         };
         div()
             .flex_1()

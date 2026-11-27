@@ -43,6 +43,8 @@ pub(crate) struct DockUi {
     /// 窗口当前是否在前台、是否失去过焦点:只有前台才轮询服务器,重新获得焦点时刷新一次
     win_active: bool,
     win_blurred: bool,
+    /// 本帧的状态页是「连接中 / 连接失败」:盖住整个标签内容区(含左侧菜单和页头)
+    pub(crate) gate_full: std::cell::Cell<bool>,
     /// 调试:截图时等数据库实例出现后再打开的弹层(见 `debug_dbm`)
     pub dbm_dbg: Option<String>,
     search: Option<Entity<InputState>>,
@@ -88,7 +90,7 @@ const PENDING_MAX_SECS: u64 = 60;
 
 impl DockUi {
     pub fn new() -> Self {
-        Self { snap: Arc::new(Snapshot::default()), win_active: false, win_blurred: false, dbm_dbg: None, search: None, pull: None, pull_open: false, pull_reg: None, pull_reg_open: false, inst_src: None, inst_src_open: false, inst_accel: false, inst_log_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), comp: Default::default(), api: Default::default(), dbm: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, pending: Vec::new(), polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
+        Self { snap: Arc::new(Snapshot::default()), win_active: false, win_blurred: false, gate_full: Default::default(), dbm_dbg: None, search: None, pull: None, pull_open: false, pull_reg: None, pull_reg_open: false, inst_src: None, inst_src_open: false, inst_accel: false, inst_log_open: false, conf: Default::default(), reg: Default::default(), sys: Default::default(), ct: Default::default(), comp: Default::default(), api: Default::default(), dbm: Default::default(), sort: (SortKey::Name, true), confirm: None, notice: None, pending: Vec::new(), polling: false, seen: 0, key: None, mon: None, mon_err: None, proc_by_mem: false, view_w: 1200.0 }
     }
 }
 
@@ -229,7 +231,7 @@ impl Home {
         }
         // 这个标签的终端已连上就复用它的连接;没连上等它(连接页显示终端的进度);没有终端才自己连。
         let term = self.workspace.tabs[a].term.as_ref().map(|t| (t.handle.ever_connected(), t.handle.session(), t.handle.generation()));
-        let stale = self.workspace.tabs[a].docker.as_ref().and_then(|d| d.epoch()).zip(term.as_ref().map(|t| t.2)).is_some_and(|(e, g)| e != g);
+        let stale = self.workspace.tabs[a].docker.as_ref().and_then(|d| d.epoch()).zip(term.as_ref().map(|t| t.2)).is_some_and(|(e, g)| e != g) || self.workspace.tabs[a].docker.as_ref().is_some_and(|d| d.is_dead());
         if stale {
             self.workspace.tabs[a].docker = None;
         }
@@ -361,19 +363,30 @@ impl Home {
 
     /// 连接中 / 失败 / 没装 Docker / 权限不足 / 读取中:返回整页的状态页;可以正常显示数据时返回 None。
     pub(crate) fn docker_gate(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.dock.gate_full.set(false);
         if self.demo {
             return None;
         }
         let a = self.workspace.active?;
         let tab = &self.workspace.tabs[a];
         if let Some(t) = tab.term.as_ref().filter(|t| !t.handle.ever_connected()) {
+            self.dock.gate_full.set(true);
             return Some(self.connecting_page(ConnTarget::Terminal(a), t.handle.steps(), t.handle.host_prompt(), crate::terminal::ssh::STEP_LABELS, cx).into_any_element());
         }
         let Some(d) = tab.docker.as_ref() else { return Some(loading("正在连接…").into_any_element()) };
         match d.status() {
-            docker::Status::HostPrompt(p) => Some(self.connecting_page(ConnTarget::Docker, d.steps(), Some(p), DOCKER_STEP_LABELS, cx).into_any_element()),
-            docker::Status::Failed(_) => Some(self.connecting_page(ConnTarget::Docker, d.steps(), None, DOCKER_STEP_LABELS, cx).into_any_element()),
-            docker::Status::Connecting if d.epoch().is_none() => Some(self.connecting_page(ConnTarget::Docker, d.steps(), None, DOCKER_STEP_LABELS, cx).into_any_element()),
+            docker::Status::HostPrompt(p) => {
+                self.dock.gate_full.set(true);
+                Some(self.connecting_page(ConnTarget::Docker, d.steps(), Some(p), DOCKER_STEP_LABELS, cx).into_any_element())
+            }
+            docker::Status::Failed(_) => {
+                self.dock.gate_full.set(true);
+                Some(self.connecting_page(ConnTarget::Docker, d.steps(), None, DOCKER_STEP_LABELS, cx).into_any_element())
+            }
+            docker::Status::Connecting if d.epoch().is_none() => {
+                self.dock.gate_full.set(true);
+                Some(self.connecting_page(ConnTarget::Docker, d.steps(), None, DOCKER_STEP_LABELS, cx).into_any_element())
+            }
             docker::Status::Connecting => Some(loading("正在检测 Docker…").into_any_element()),
             docker::Status::Ready => {
                 // 运维页读的是 SSH 命令的输出,Docker 有没有装都能用

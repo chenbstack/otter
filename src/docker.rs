@@ -697,6 +697,8 @@ struct Shared {
     closed: AtomicBool,
     /// 探测出的 docker 调用方式(容器终端照它拼命令);探测完成前是 None
     sudo: Mutex<Option<Sudo>>,
+    /// 本 Docker 用的 SSH 连接,用来判断是否已断开
+    session: Mutex<Option<Arc<SshHandle<Client>>>>,
 }
 
 impl Shared {
@@ -762,6 +764,7 @@ impl Docker {
             want_volume_sizes: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             sudo: Mutex::new(None),
+            session: Mutex::new(None),
         });
         let sh2 = sh.clone();
         let join = runtime().spawn(async move {
@@ -782,6 +785,11 @@ impl Docker {
 
     pub fn epoch(&self) -> Option<u32> {
         self.epoch
+    }
+
+    /// 底层 SSH 连接已经断了(电脑睡眠、网络切换后常见):所有命令都会报「打开通道失败」,界面应丢掉这个 Docker 重新连
+    pub fn is_dead(&self) -> bool {
+        self.sh.session.lock().unwrap().as_ref().is_some_and(|s| s.is_closed())
     }
 
     /// 这个容器里的文件管理:用 SFTP 同一套界面状态,命令通过本连接的 docker exec / cp 执行
@@ -2186,6 +2194,7 @@ async fn session_task(conn: &Conn, label: &str, io: &Io, sh: Arc<Shared>, mut rx
             s
         }
     };
+    *sh.session.lock().unwrap() = Some(session.clone());
     // 资源监控和 Docker 互不依赖:没装 Docker 的服务器也能看到 CPU、内存、磁盘
     tokio::spawn(monitor_task(session.clone(), sh.clone()));
     // 运维页(进程、服务、存储、计划任务)和 Docker 也互不依赖;要 root 的操作走 sudo(免密,或用节点保存的密码)
