@@ -1714,6 +1714,7 @@ async fn sys_load(r: &Runner, sh: &Shared, kind: crate::sysops::Kind, script: &s
     let t = match kind {
         crate::sysops::Kind::Remove => Duration::from_secs(1800),
         crate::sysops::Kind::WebOp => Duration::from_secs(180),
+        crate::sysops::Kind::ToolNet => Duration::from_secs(90),
         _ => Duration::from_secs(30),
     };
     let t0 = Instant::now();
@@ -1740,7 +1741,7 @@ async fn sys_job(r: &Runner, sh: &Shared, job: crate::sysops::Job) {
     let key = format!("{}:{}", job.label, job.target);
     sh.busy.lock().unwrap().insert(key.clone());
     sh.bump();
-    let secs = 60;
+    let secs = if job.secs > 0 { job.secs } else { 60 };
     let track = job.script.contains(crate::firewall::PROGRESS_MARK);
     if track {
         set_progress(sh, Some(format!("正在{}", job.label)));

@@ -48,8 +48,10 @@ mod database;
 mod docker;
 mod firewall;
 mod harness;
+mod mounts;
 mod provision;
 mod system;
+mod toolbox;
 mod web;
 
 pub use harness::{gate, gate_slow, Distro, Lease, Vm};

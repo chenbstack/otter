@@ -21,6 +21,11 @@ pub enum Kind {
     WebOp,
     /// 网站页:后台长任务(安装、申请证书)的进度轮询
     WebPoll,
+    /// 工具箱:端口检查、网络诊断(一次一个命令)、时间与时区、Swap 的读取
+    ToolPorts,
+    ToolNet,
+    ToolTime,
+    ToolSwap,
     /// 堆栈的 compose 文件内容
     ComposeFile,
     /// 堆栈的 env 文件内容
@@ -53,13 +58,17 @@ pub struct Job {
     pub reload: Option<(Kind, String, bool)>,
     /// 高风险操作的自动回滚保险
     pub guard: Option<Guard>,
+    /// 最长等多少秒;0 是默认的 60 秒(创建大的 swap 文件这类要更久)
+    pub secs: u64,
+    /// 确认框用普通样式(可以再改回来的操作:改时区、启用 swap),不是红色的「此操作无法撤销」
+    pub calm: bool,
 }
 
 pub const PROCS_SCRIPT: &str = "ps -eo pid=,user:20=,pcpu=,pmem=,rss=,etime=,args= --sort=-pcpu 2>&1 | head -400";
 
 pub const SERVICES_SCRIPT: &str = "systemctl list-units --type=service --all --no-pager --no-legend --plain 2>&1; echo '@@FILES'; systemctl list-unit-files --type=service --no-pager --no-legend --plain 2>/dev/null";
 
-pub const STORAGE_SCRIPT: &str = "X='-x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs'; df -PT $X 2>&1; echo '@@INODES'; df -Pi $X 2>/dev/null";
+pub const STORAGE_SCRIPT: &str = "X='-x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs'; df -PT $X 2>&1; echo '@@INODES'; df -Pi $X 2>/dev/null; echo '@@FSTAB'; cat /etc/fstab 2>/dev/null";
 
 pub const CRON_SCRIPT: &str = "echo '@@USER'; crontab -l 2>/dev/null; for f in /etc/crontab /etc/cron.d/*; do [ -f \"$f\" ] && { echo \"@@FILE $f\"; cat \"$f\" 2>/dev/null; }; done; echo '@@TIMERS'; systemctl list-timers --all --no-pager --no-legend --plain 2>/dev/null";
 
@@ -302,6 +311,10 @@ pub struct Mount {
     pub mount: String,
     /// inode 使用率;文件系统不统计 inode(btrfs 等)时是 None
     pub inode_pct: Option<u8>,
+    /// `/etc/fstab` 里这个挂载点的那一行(编辑时预填;没有说明是手动临时挂的)
+    pub fstab: Option<crate::mounts::FstabEntry>,
+    /// 是不是 Otter 能管的挂载(能编辑、卸载),见 `mounts::managed`
+    pub managed: bool,
 }
 
 fn pct_of(s: &str) -> Option<u8> {
@@ -309,6 +322,8 @@ fn pct_of(s: &str) -> Option<u8> {
 }
 
 pub fn parse_storage(text: &str) -> Result<Vec<Mount>, String> {
+    let (text, fstab_text) = text.split_once(crate::mounts::FSTAB_MARK).unwrap_or((text, ""));
+    let fstab = crate::mounts::parse_fstab(fstab_text);
     let (space, inodes) = text.split_once("@@INODES").unwrap_or((text, ""));
     let mut ino = std::collections::HashMap::new();
     for l in inodes.lines().skip(1) {
@@ -333,7 +348,9 @@ pub fn parse_storage(text: &str) -> Result<Vec<Mount>, String> {
             continue;
         }
         let inode_pct = ino.get(&mount).copied().flatten();
-        out.push(Mount { dev: f[0].to_string(), fstype: f[1].to_string(), total_kb: total, used_kb: used, avail_kb: avail, pct: pct_of(f[5]).unwrap_or(0), mount, inode_pct });
+        let managed = crate::mounts::managed(&mount, &fstab);
+        let entry = fstab.iter().find(|e| e.mount == mount).cloned();
+        out.push(Mount { dev: f[0].to_string(), fstype: f[1].to_string(), total_kb: total, used_kb: used, avail_kb: avail, pct: pct_of(f[5]).unwrap_or(0), mount, inode_pct, fstab: entry, managed });
     }
     if out.is_empty() {
         let msg = space.trim().lines().next().unwrap_or("没有读到磁盘信息");
@@ -789,6 +806,17 @@ mod tests {
         assert!(matches!(parse_remove("ERR:rm: cannot remove 'x': Permission denied"), Removed::Denied(_)));
         assert_eq!(parse_remove("ERR:已经不存在"), Removed::Failed("已经不存在".into()));
         assert!(matches!(parse_remove(""), Removed::Failed(_)));
+    }
+
+    #[test]
+    fn storage_reads_fstab_and_marks_managed() {
+        let t = "Filesystem     Type 1024-blocks     Used Available Capacity Mounted on\n/dev/sda1      ext4    103081248 41234567  56000000      43% /\n/dev/sdb1      xfs     515396075 98304000 417092075      20% /data\n10.0.0.5:/e    nfs4    1048576 314572 734003 30% /mnt/nas\n/dev/sdc1      ext4    1000000 1000 999000 1% /scratch\n@@INODES\nFilesystem Inodes IUsed IFree IUse% Mounted on\n@@FSTAB\n# c\nUUID=x / ext4 defaults 0 1\n/dev/sdb1 /data xfs defaults 0 2\n";
+        let v = parse_storage(t).unwrap();
+        let by = |m: &str| v.iter().find(|x| x.mount == m).unwrap();
+        assert!(!by("/").managed);
+        assert!(by("/data").managed && by("/data").fstab.as_ref().unwrap().fstype == "xfs");
+        assert!(by("/mnt/nas").managed && by("/mnt/nas").fstab.is_none());
+        assert!(!by("/scratch").managed);
     }
 
     #[test]

@@ -47,11 +47,12 @@ fn page_code(p: Page) -> &'static str {
         Page::Cron => "cr",
         Page::Websites => "ws",
         Page::Store => "ap",
+        Page::Toolbox => "tb",
     }
 }
 
 fn page_from(c: &str) -> Option<Page> {
-    [Page::Overview, Page::Containers, Page::Database, Page::Stacks, Page::Images, Page::Volumes, Page::Registry, Page::Config, Page::Processes, Page::Services, Page::Firewall, Page::Storage, Page::Cron, Page::Websites, Page::Store].into_iter().find(|p| page_code(*p) == c)
+    [Page::Overview, Page::Containers, Page::Database, Page::Stacks, Page::Images, Page::Volumes, Page::Registry, Page::Config, Page::Processes, Page::Services, Page::Firewall, Page::Storage, Page::Cron, Page::Websites, Page::Store, Page::Toolbox].into_iter().find(|p| page_code(*p) == c)
 }
 
 impl Home {

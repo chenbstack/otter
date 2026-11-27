@@ -243,7 +243,7 @@ impl Home {
                 let Some((h, m)) = sched.split_whitespace().collect::<Vec<_>>().get(..2).and_then(|v| Some((v[1].parse::<u32>().ok()?, v[0].parse::<u32>().ok()?))) else {
                     return self.cron_notice("续期只能设成每天固定时间", cx);
                 };
-                let job = Job { label: "修改证书续期时间".into(), target: "crontab".into(), script: crate::web::cron_script(m, h), root: true, input: None, reload, guard: None };
+                let job = Job { label: "修改证书续期时间".into(), target: "crontab".into(), script: crate::web::cron_script(m, h), root: true, input: None, reload, guard: None, secs: 0, calm: false };
                 self.dock.sys.cron_form = None;
                 return self.sys_run(job, cx);
             }
@@ -253,7 +253,7 @@ impl Home {
                 let script = crontasks::prune_script(&cf.prune).and_then(|body| crontasks::install(&format!("prune-{id}.sh"), &body, &crontasks::prune_crond(&id), &sched, &crontasks::prune_cmd("@@BIN@@", &id, &cf.prune)));
                 match script {
                     Ok(script) => {
-                        let job = Job { label: "保存计划任务".into(), target: "crontab".into(), script, root: true, input: None, reload, guard: None };
+                        let job = Job { label: "保存计划任务".into(), target: "crontab".into(), script, root: true, input: None, reload, guard: None, secs: 0, calm: false };
                         self.dock.sys.cron_form = None;
                         self.dock.sys.cron_row = None;
                         self.sys_run(job, cx);
@@ -301,7 +301,7 @@ impl Home {
         if let Some(old) = cf.file.as_ref().filter(|f| **f != dbinst::sched_crond_file(&ctr, &id) && !f.contains(['\'', '\n'])) {
             script.push_str(&format!("rm -f '{old}'\n"));
         }
-        let job = Job { label: "保存备份任务".into(), target: "crontab".into(), script, root: true, input: None, reload, guard: None };
+        let job = Job { label: "保存备份任务".into(), target: "crontab".into(), script, root: true, input: None, reload, guard: None, secs: 0, calm: false };
         // 旧版本装在登录用户 crontab 里的任务:迁到 root 之后,把那一行从用户 crontab 里删掉
         let migrate = line.map(|l| sysops::crontab_replace(&info.user_text, Some(l), None));
         self.dock.sys.cron_form = None;
@@ -314,7 +314,7 @@ impl Home {
 
     pub(super) fn cron_write(&mut self, label: &str, text: String, cx: &mut Context<Self>) {
         self.dock.sys.cron_row = None;
-        let j = Job { label: label.into(), target: "crontab".into(), script: "crontab -".into(), root: false, input: Some(text), reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)), guard: None };
+        let j = Job { label: label.into(), target: "crontab".into(), script: "crontab -".into(), root: false, input: Some(text), reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)), guard: None, secs: 0, calm: false };
         self.sys_run(j, cx);
     }
 

@@ -288,7 +288,7 @@ impl Home {
         if !self.dock_visible() {
             return;
         }
-        let mut redraw = self.sys_due() || self.ct_due() || (self.page == Page::Database && self.dbm_retry_due());
+        let mut redraw = self.sys_due() || self.tool_clock_due() || self.ct_due() || (self.page == Page::Database && self.dbm_retry_due());
         // 点击后至少转 PENDING_MIN_MS,之后后台不再「进行中」就撤掉;兜底 PENDING_MAX_SECS
         if !self.dock.pending.is_empty() {
             let d = self.workspace.active.and_then(|a| self.workspace.tabs.get(a)).and_then(|t| t.docker.as_ref());
@@ -778,7 +778,7 @@ impl Home {
             Page::Volumes => self.docker_info_line(),
             Page::Registry => self.docker_info_line(),
             Page::Config => self.docker_info_line(),
-            Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites => self.sys_subtitle().unwrap_or_default(),
+            Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites | Page::Toolbox => self.sys_subtitle().unwrap_or_default(),
         }
     }
 
@@ -793,7 +793,7 @@ impl Home {
             Page::Registry => self.registry_page(cx),
             Page::Config => self.config_page(cx),
             Page::Stacks => div().into_any_element(),
-            Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites => self.sys_page(cx),
+            Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites | Page::Toolbox => self.sys_page(cx),
         }
     }
 
@@ -802,6 +802,9 @@ impl Home {
         let mut v: Vec<AnyElement> = Vec::new();
         v.extend(self.ct_drawer(window, cx));
         if let Some(m) = self.cron_dialog(cx) {
+            v.push(m.into_any_element());
+        }
+        if let Some(m) = self.mount_dialog(cx) {
             v.push(m.into_any_element());
         }
         if let Some(m) = self.fw_dialog(cx) {
@@ -830,6 +833,7 @@ impl Home {
         if let Some(cf) = &self.dock.confirm {
             let mut action = cf.action.clone();
             let install = matches!(action, Action::InstallDocker { .. });
+            let calm = matches!(&action, Action::Sys(j) if j.calm);
             if let Action::InstallDocker { accel, .. } = &mut action {
                 *accel = self.dock.inst_accel;
             }
@@ -846,13 +850,13 @@ impl Home {
                         (IconName::Globe, c::muted(), format!("安装源:{}{},失败会自动换用其他源", source.label(), spd.map_or(String::new(), |x| format!("(测速 {})", crate::docker_install::fmt_speed(x)))).into()),
                     ]
                 } else {
-                    std::iter::once((IconName::Trash, c::danger(), cf.body.into()))
+                    std::iter::once(if calm { (IconName::Check, c::accent(), cf.body.into()) } else { (IconName::Trash, c::danger(), cf.body.into()) })
                     .chain(cf.list.iter().take(8).map(|x| (cf.tile, c::muted(), x.clone().into())))
                     .chain((cf.list.len() > 8).then(|| (cf.tile, c::ghost(), format!("…还有 {} 个", cf.list.len() - 8).into())))
                     .collect()
                 },
                 ok_label: cf.label,
-                kind: if install { crate::confirm::ConfirmKind::Action } else { crate::confirm::ConfirmKind::Danger },
+                kind: if install || calm { crate::confirm::ConfirmKind::Action } else { crate::confirm::ConfirmKind::Danger },
                 extra: install.then(|| self.accel_check(cx).into_any_element()),
             };
             v.push(self.delete_confirm("dock-confirm", spec, |this| {

@@ -93,7 +93,7 @@ impl Home {
 
     fn fw_job(label: &str, target: &str, script: String) -> Job {
         let script = firewall::with_progress(&format!("正在{label}"), &script);
-        Job { label: label.into(), target: target.into(), script, root: true, input: None, reload: Some((Kind::Firewall, firewall::READ_SCRIPT.to_string(), true)), guard: None }
+        Job { label: label.into(), target: target.into(), script, root: true, input: None, reload: Some((Kind::Firewall, firewall::READ_SCRIPT.to_string(), true)), guard: None, secs: 0, calm: false }
     }
 
     fn fw_notice(&mut self, msg: impl Into<SharedString>, cx: &mut Context<Self>) {

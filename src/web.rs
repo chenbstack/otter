@@ -1678,6 +1678,7 @@ ext_one() {
   echo "@@EN $1 $2"
   echo "@@EB $B"
   [ -n "$X" ] && docker inspect -f '{{range .Mounts}}@@EM {{.Source}}|{{.Destination}}{{"\n"}}{{end}}' $1 2>/dev/null
+  if [ -n "$X" ]; then echo '@@EPK'; docker port $1 2>/dev/null | sed 's/^/@@EP /'; [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' $1 2>/dev/null)" = host ] && echo '@@EP host'; fi
   $X $B -T 2>&1 | head -c 200000
   echo '@@EC-BEGIN'
   for p in $($X $B -T 2>/dev/null | sed -n 's/^[[:space:]]*ssl_certificate[[:space:]][[:space:]]*\([^;]*\);.*/\1/p' | sort -u | head -n 30); do
@@ -1808,6 +1809,20 @@ pub struct ExtNginx {
     pub adopt: Result<Target, String>,
     pub sites: Vec<ExtSite>,
     pub certs: Vec<ExtCert>,
+    /// 容器发布到宿主机的端口 (宿主机端口, 容器端口),已去重
+    pub ports: Vec<(u16, u16)>,
+    /// 容器用 host 网络:直接占宿主机端口
+    pub host_net: bool,
+    /// 读到了容器的端口信息(host-nginx 或旧数据没有,按「占着」处理)
+    pub ports_known: bool,
+}
+
+impl ExtNginx {
+    /// 它是不是占着宿主机的 80/443(占着就装不了第二个 OpenResty)。
+    /// 例:`18080->80` 的测试容器没占 80,不算。
+    pub fn occupies(&self) -> bool {
+        !self.ports_known || self.host_net || self.ports.iter().any(|(h, _)| matches!(h, 80 | 443))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -1845,6 +1860,10 @@ impl WebState {
     pub fn installed(&self) -> bool {
         self.container.is_some()
     }
+    /// 有没有已有的 nginx/OpenResty 占着 80/443
+    pub fn ext_blocks(&self) -> bool {
+        self.ext.iter().any(|e| e.occupies())
+    }
     pub fn running(&self) -> bool {
         self.container.as_ref().is_some_and(|c| c.0 == "running")
     }
@@ -1862,7 +1881,7 @@ impl WebState {
         if self.installed() || self.too_new() || self.docker != "ok" {
             return None;
         }
-        let mut t = self.ext.first()?.adopt.clone().ok()?;
+        let mut t = self.ext.iter().find(|e| e.occupies())?.adopt.clone().ok()?;
         if self.panel.is_some() {
             t.certs = None;
             t.acme = None;
@@ -1883,7 +1902,7 @@ impl WebState {
         if self.too_new() {
             return Some("服务器上的数据目录比这个版本的 Otter 新,请先升级 Otter".into());
         }
-        if let Some(e) = self.ext.first() {
+        if let Some(e) = self.ext.iter().find(|e| e.occupies()) {
             return Some(format!("这台服务器上已有 {}({}),它占着 80/443。这里只读展示它的站点和证书;要改请到原来的管理方式里改", e.name, e.image));
         }
         if let Some((p, n)) = self.ports.first() {
@@ -2215,8 +2234,24 @@ fn parse_ext(text: &str) -> Vec<ExtNginx> {
         let mut bin = "nginx".to_string();
         let mut mounts: Vec<(String, String)> = Vec::new();
         let mut conf = String::new();
+        let (mut ports, mut host_net, mut ports_known): (Vec<(u16, u16)>, bool, bool) = (Vec::new(), false, false);
         for l in conf_all.lines() {
-            if let Some(b) = l.strip_prefix("@@EB ") {
+            if l.trim() == "@@EPK" {
+                ports_known = true;
+            } else if let Some(pm) = l.strip_prefix("@@EP ") {
+                // `docker port` 一行一个映射:`80/tcp -> 0.0.0.0:18080`、`80/tcp -> [::]:18080`;host 网络是我们补的 `host`
+                if pm.trim() == "host" {
+                    host_net = true;
+                } else if let Some((l, r)) = pm.split_once("->") {
+                    let cp = l.trim().split('/').next().and_then(|x| x.parse::<u16>().ok());
+                    let hp = r.trim().rsplit(':').next().and_then(|x| x.parse::<u16>().ok());
+                    if let (Some(cp), Some(hp)) = (cp, hp) {
+                        if !ports.contains(&(hp, cp)) {
+                            ports.push((hp, cp));
+                        }
+                    }
+                }
+            } else if let Some(b) = l.strip_prefix("@@EB ") {
                 bin = b.trim().to_string();
             } else if let Some(m) = l.strip_prefix("@@EM ") {
                 if let Some((src, dst)) = m.split_once('|') {
@@ -2227,7 +2262,7 @@ fn parse_ext(text: &str) -> Vec<ExtNginx> {
                 conf.push('\n');
             }
         }
-        let mut x = ExtNginx { name: name.to_string(), image: image.trim().to_string(), adopt: Err(String::new()), sites: parse_nginx_servers(&conf), certs: Vec::new() };
+        let mut x = ExtNginx { name: name.to_string(), image: image.trim().to_string(), adopt: Err(String::new()), sites: parse_nginx_servers(&conf), certs: Vec::new(), ports, host_net, ports_known };
         for cb in certs.split("@@EC ").skip(1) {
             let (path, body) = cb.split_once('\n').unwrap_or((cb, ""));
             let c = parse_cert(path.trim(), &format!("@@X\n{body}"));
@@ -3747,6 +3782,20 @@ mod tests {
     }
 
     #[test]
+    fn external_nginx_ports() {
+        let conf = "http { server { listen 80; server_name _; } }\n";
+        let out = format!("@@DOCKER\nok\n@@EXT\n@@EN test nginx:alpine\n@@EPK\n@@EP 80/tcp -> 0.0.0.0:18080\n@@EP 80/tcp -> [::]:18080\n{conf}@@EC-BEGIN\n@@ACME\n");
+        let st = parse_state(&out);
+        assert_eq!(st.ext[0].ports, vec![(18080, 80)]);
+        assert!(!st.ext[0].occupies() && !st.ext_blocks());
+        assert!(st.install_blocker().is_none(), "18080 映射的测试容器不挡安装");
+        let out = format!("@@DOCKER\nok\n@@EXT\n@@EN web nginx:alpine\n@@EPK\n@@EP 80/tcp -> 0.0.0.0:80\n{conf}@@EC-BEGIN\n@@ACME\n");
+        assert!(parse_state(&out).ext_blocks());
+        let out = format!("@@DOCKER\nok\n@@EXT\n@@EN web nginx:alpine\n@@EPK\n@@EP host\n{conf}@@EC-BEGIN\n@@ACME\n");
+        assert!(parse_state(&out).ext_blocks());
+    }
+
+    #[test]
     fn external_nginx_is_read() {
         let conf = "nginx: the configuration file /etc/nginx/nginx.conf syntax is ok\n# configuration file /etc/nginx/nginx.conf:\nhttp {\n  upstream u { server 10.0.0.1:80; }\n  server {\n    listen 80;\n    server_name a.com www.a.com;\n    return 301 https://$host$request_uri;\n  }\n  server {\n    listen 443 ssl;\n    server_name a.com;\n    ssl_certificate /certs/a/fullchain.pem; # x\n    location / { proxy_pass http://127.0.0.1:8080; }\n  }\n  server { listen 80 default_server; server_name _; root /usr/share/nginx/html; }\n}\n";
         let s = parse_nginx_servers(conf);
@@ -3853,7 +3902,7 @@ mod tests {
 
     #[test]
     fn detect_target_from_mounts() {
-        let x = ExtNginx { name: "fp-x".into(), image: "openresty".into(), adopt: Err(String::new()), sites: vec![], certs: vec![ExtCert { path: "/etc/openresty/certs/a/fullchain.pem".into(), domains: vec![], issuer: String::new(), not_after: None }] };
+        let x = ExtNginx { name: "fp-x".into(), image: "openresty".into(), adopt: Err(String::new()), sites: vec![], certs: vec![ExtCert { path: "/etc/openresty/certs/a/fullchain.pem".into(), domains: vec![], issuer: String::new(), not_after: None }], ports: vec![], host_net: false, ports_known: false };
         let m = |a: &str, b: &str| (a.to_string(), b.to_string());
         let mounts = vec![m("/srv/fp/conf.d", "/etc/nginx/conf.d"), m("/srv/fp/certs", "/etc/openresty/certs")];
         let t = detect_target("fp-x", "openresty", &mounts, &x, "").unwrap();

@@ -1046,7 +1046,7 @@ impl Home {
             "ext" => {
                 let ex = |p: &str, d: i64| web::ExtCert { path: p.into(), domains: vec![], issuer: "Let's Encrypt".into(), not_after: Some(now_secs() + d * 86400) };
                 let site = |n: &str, k: &str, t: &str, cert: Option<&str>| web::ExtSite { names: vec![n.into()], listen: if cert.is_some() { vec!["443 ssl".into()] } else { vec!["80".into()] }, cert: cert.map(Into::into), target: t.into(), kind: k.into() };
-                let x = web::ExtNginx { name: "fp-openresty-8703d5-openresty-1".into(), image: "openresty/openresty:1.27.1.1-alpine".into(), adopt: Ok(web::Target { container: "fp-openresty-8703d5-openresty-1".into(), bin: "openresty".into(), conf: "/opt/fleet-agent/openresty/conf.d".into(), certs: Some(("/opt/fleet-agent/acme/certs".into(), "/etc/openresty/certs".into())), acme: Some(("/opt/fleet-agent/acme/webroot".into(), "/var/www/acme".into())), sites: Some(("/opt/fleet-agent/openresty/www".into(), "/var/www/sites".into())), adopted: true, ports: (80, 443) }), sites: vec![site("blog.example.com", "静态站点", "/var/www/blog", Some("/c/blog.pem")), site("api.example.com", "反向代理", "http://127.0.0.1:8080", Some("/c/api.pem")), site("_", "其他", "", None)], certs: vec![ex("/c/blog.pem", 70), ex("/c/api.pem", 9)] };
+                let x = web::ExtNginx { name: "fp-openresty-8703d5-openresty-1".into(), image: "openresty/openresty:1.27.1.1-alpine".into(), adopt: Ok(web::Target { container: "fp-openresty-8703d5-openresty-1".into(), bin: "openresty".into(), conf: "/opt/fleet-agent/openresty/conf.d".into(), certs: Some(("/opt/fleet-agent/acme/certs".into(), "/etc/openresty/certs".into())), acme: Some(("/opt/fleet-agent/acme/webroot".into(), "/var/www/acme".into())), sites: Some(("/opt/fleet-agent/openresty/www".into(), "/var/www/sites".into())), adopted: true, ports: (80, 443) }), sites: vec![site("blog.example.com", "静态站点", "/var/www/blog", Some("/c/blog.pem")), site("api.example.com", "反向代理", "http://127.0.0.1:8080", Some("/c/api.pem")), site("_", "其他", "", None)], certs: vec![ex("/c/blog.pem", 70), ex("/c/api.pem", 9)], ports: vec![(80, 80), (443, 443)], host_net: false, ports_known: true };
                 w.st = Some(Ok(web::WebState { docker: "ok".into(), ext: vec![x], ..Default::default() }));
             }
             "panel" => w.st = Some(Ok(web::WebState { docker: "ok".into(), panel: Some("1panel".into()), ..Default::default() })),
@@ -1245,7 +1245,7 @@ impl Home {
             col = col.child(j);
         }
         if !st.installed() {
-            if !st.ext.is_empty() {
+            if st.ext_blocks() {
                 return col.child(self.web_external(&st, cx)).into_any_element();
             }
             return col.child(self.web_install_card(&st, cx)).into_any_element();
@@ -1307,37 +1307,57 @@ impl Home {
 
     fn web_external(&self, st: &WebState, cx: &mut Context<Self>) -> AnyElement {
         let now = now_secs();
-        let mut out = div().flex_shrink_0().flex().flex_col().gap(px(14.0));
+        let mut out = div().flex_shrink_0().flex().flex_col().gap(px(16.0));
+        out = out.child(self.web_banner(IconName::Lock, c::accent(), "这台服务器上已经有网站服务占用着 80/443,Otter 不会再装第二个 OpenResty。能接管的点「接管它」后用 Otter 管理;不能接管的只读查看。"));
         for (xi, x) in st.ext.iter().enumerate() {
-            out = out.child(self.web_banner(IconName::Lock, c::accent(), &format!("检测到已有的 {}({}),占用着 80/443,Otter 不会再装第二个 OpenResty。自动接入没成功时可以点「接管它」重试;不能接入的只能看下面读到的站点和证书。", x.name, x.image)));
-            out = out.child(match &x.adopt {
+            let busy = self.web_ui().busy.is_some();
+            let mut head_row = div()
+                .flex_shrink_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(10.0))
+                .child(icon(IconName::Server, 16.0, c::muted()))
+                .child(div().text_size(px(t::TYPE_BODY)).font_weight(FontWeight::SEMIBOLD).child(SharedString::from(x.name.clone())))
+                .child(div().min_w_0().truncate().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::ghost()).child(SharedString::from(x.image.clone())))
+                .child(div().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(SharedString::from(if x.host_net { "host 网络".to_string() } else if !x.ports_known { String::new() } else if x.ports.is_empty() { "没有发布端口".to_string() } else { format!("宿主机端口 {}", x.ports.iter().map(|(h, c)| if h == c { h.to_string() } else { format!("{h}→{c}") }).collect::<Vec<_>>().join("、")) })))
+                .children((x.ports_known && !x.occupies()).then(|| div().px(px(8.0)).py(px(2.0)).rounded(px(t::RADIUS_SM)).bg(c::field()).text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child("不占 80/443")))
+                .child(div().flex_1().min_w_0());
+            let mut note: Option<(IconName, Rgba, String)> = None;
+            match &x.adopt {
                 Ok(t) => {
                     let t = t.clone();
-                    let busy = self.web_ui().busy.is_some();
                     let mut notes: Vec<String> = vec![format!("站点配置写进 {}", t.conf)];
                     notes.push(match &t.certs { Some((h, _)) => format!("证书目录 {h}"), None => "没有证书目录挂载:不能管证书、配不了 HTTPS".into() });
                     notes.push(match &t.acme { Some((h, _)) => format!("HTTP 验证目录 {h}"), None => "没有验证目录挂载:申请证书只能用 DNS 验证".into() });
                     notes.push(match &t.sites { Some((h, _)) => format!("静态站点根目录 {h}"), None => "没有静态站点目录挂载:建不了静态站点".into() });
                     let name = t.container.clone();
                     let points: Vec<(IconName, Rgba, String)> = notes.into_iter().map(|n| (IconName::Folder, c::muted(), n)).chain([(IconName::TriangleAlert, c::warn(), "原来创建它的面板如果会重写 conf.d,可能覆盖 Otter 的改动".to_string()), (IconName::Check, c::online(), "容器不会被重建或重启,随时可以取消接管".to_string())]).collect();
-                    div().flex_shrink_0().flex().flex_row().child(button("web-adopt", IconName::Link, "接管它").when(busy, |d| d.opacity(0.5)).on_click(cx.listener(move |this, _, _, cx| {
+                    head_row = head_row.child(button("web-adopt", IconName::Link, "接管它").when(busy, |d| d.opacity(0.5)).on_click(cx.listener(move |this, _, _, cx| {
                         this.web_ask(WebConfirm { title: "接管 OpenResty", name: name.clone(), detail: "已有的 nginx/OpenResty 容器".into(), points: points.clone(), label: "接管", danger: false, act: Pending::Adopt(t.clone()) }, cx);
-                    }))).into_any_element()
+                    })));
                 }
-                Err(why) => small(&format!("不能接管:{why}"), c::warn()).into_any_element(),
-            });
+                Err(why) => {
+                    head_row = head_row.child(div().px(px(8.0)).py(px(2.0)).rounded(px(t::RADIUS_SM)).bg(c::warn().opacity(0.12)).text_size(px(t::TYPE_CAPTION)).text_color(c::warn()).child("只读"));
+                    note = Some((IconName::Info, c::muted(), format!("不能接管:{why}")));
+                }
+            }
+            let mut sec = div().flex_shrink_0().flex().flex_col().gap(px(8.0)).child(head_row);
+            if let Some((ic, color, text)) = note {
+                sec = sec.child(div().flex().flex_row().items_start().gap(px(6.0)).child(div().pt(px(2.0)).child(icon(ic, 12.0, color))).child(div().flex_1().min_w_0().text_size(px(t::TYPE_CAPTION)).text_color(c::muted()).child(SharedString::from(text))));
+            }
             let header = div().child(head("域名").w(px(COL_SITE_DOMAIN))).child(head("类型").w(px(COL_SITE_KIND))).child(head("监听 / 证书").flex_1().min_w_0());
             let mut rows = Vec::new();
             for (i, sv) in x.sites.iter().enumerate() {
                 let names = if sv.names.is_empty() { "(未写 server_name)".to_string() } else { sv.names.join(" ") };
                 let cert = sv.cert.as_ref().and_then(|p| x.certs.iter().find(|c| &c.path == p));
                 let (cert_text, cert_color) = match (&sv.cert, cert) {
-                    (None, _) => (sv.listen.join(" · "), c::muted()),
+                    (None, _) => (listen_summary(&sv.listen), c::muted()),
                     (Some(_), Some(ce)) => match ce.not_after.map(|t| (t - now).div_euclid(86400)) {
-                        Some(d) => (format!("{} · {}", sv.listen.join(" · "), fmt_days(d)), days_color(d)),
-                        None => (sv.listen.join(" · "), c::muted()),
+                        Some(d) => (format!("{} · {}", listen_summary(&sv.listen), fmt_days(d)), days_color(d)),
+                        None => (listen_summary(&sv.listen), c::muted()),
                     },
-                    (Some(_), None) => (format!("{} · 证书读取不了", sv.listen.join(" · ")), c::warn()),
+                    (Some(_), None) => (format!("{} · 证书读取不了", listen_summary(&sv.listen)), c::warn()),
                 };
                 rows.push(
                     row(("wx-row", xi * 1000 + i))
@@ -1346,7 +1366,8 @@ impl Home {
                         .child(div().flex_1().min_w_0().truncate().text_size(px(t::TYPE_CONTROL)).text_color(cert_color).child(SharedString::from(cert_text))),
                 );
             }
-            out = out.child(if rows.is_empty() { empty_state(IconName::Globe, "没有读到站点", "它的配置里没有 server 块").into_any_element() } else { table_flow(header, rows).into_any_element() });
+            sec = sec.child(if rows.is_empty() { empty_state(IconName::Globe, "没有读到站点", "它的配置里没有 server 块").into_any_element() } else { table_flow(header, rows).into_any_element() });
+            out = out.child(sec);
         }
         out.into_any_element()
     }
@@ -2663,5 +2684,35 @@ impl Home {
         // 日志窗口只有一个「关闭」,不走带保存按钮的页脚
         let _ = &self;
         self.web_modal("web-dlg-log", DLG_W_LOG, [self.web_title("日志", "最近 300 行").child(div().text_size(px(t::TYPE_MICRO)).text_color(c::ghost()).child(SharedString::from(title))).into_any_element(), body.into_any_element(), foot.into_any_element()], cx)
+    }
+}
+
+/// 把 nginx 的 listen 指令收成简短的端口列表:去掉地址、IPv6 重复和 default_server 之类的修饰,只留端口和 ssl / quic
+/// (`80 default_server`、`[::]:80 default_server`、`443 ssl default_server` → `80 · 443 ssl`)
+fn listen_summary(listen: &[String]) -> String {
+    let mut seen: Vec<String> = Vec::new();
+    for l in listen {
+        let mut it = l.split_whitespace();
+        let Some(addr) = it.next() else { continue };
+        let port = addr.rsplit(':').next().unwrap_or(addr);
+        let flags: Vec<&str> = it.filter(|f| matches!(*f, "ssl" | "quic")).collect();
+        let item = if flags.is_empty() { port.to_string() } else { format!("{port} {}", flags.join(" ")) };
+        if !seen.contains(&item) {
+            seen.push(item);
+        }
+    }
+    seen.join(" · ")
+}
+
+#[cfg(test)]
+mod listen_summary_tests {
+    use super::listen_summary;
+
+    #[test]
+    fn collapses_ipv6_and_modifiers() {
+        let l: Vec<String> = ["80 default_server", "[::]:80 default_server", "443 ssl default_server", "[::]:443 ssl default_server", "443 quic reuseport"].iter().map(|x| x.to_string()).collect();
+        assert_eq!(listen_summary(&l), "80 · 443 ssl · 443 quic");
+        assert_eq!(listen_summary(&["127.0.0.1:8080".to_string()]), "8080");
+        assert_eq!(listen_summary(&[]), "");
     }
 }

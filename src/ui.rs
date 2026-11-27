@@ -165,6 +165,32 @@ impl<T: Styled + StatefulInteractiveElement + Sized> GlassHover for T {}
 /// 弹窗尺寸过渡时长(毫秒),缓动 `ease_out_quint`
 pub const DIALOG_ANIM_MS: u64 = 200;
 
+type ModalKey = std::rc::Rc<dyn Fn(&KeyDownEvent, &mut Window, &mut App)>;
+
+thread_local! {
+    /// 当前帧最后构建的弹窗的按键处理。按键事件只会送到焦点所在元素的祖先链,弹窗打开时焦点常常不在弹窗里
+    /// (点开弹窗的按钮、后面的列表等),弹窗自己的监听就收不到 Esc;所以根元素统一转发到这里。
+    static TOP_MODAL_KEY: std::cell::RefCell<Option<ModalKey>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 每帧渲染开头调用,清掉上一帧的弹窗按键处理(弹窗关了就不再转发)
+pub fn modal_key_reset() {
+    TOP_MODAL_KEY.with(|k| *k.borrow_mut() = None);
+}
+
+/// 当前有没有弹窗在等按键
+pub fn modal_key_active() -> bool {
+    TOP_MODAL_KEY.with(|k| k.borrow().is_some())
+}
+
+/// 根元素的按键捕获调用:有弹窗就把按键交给它(弹窗的处理里 `stop_propagation` 即吞掉)
+pub fn modal_key_dispatch(ev: &KeyDownEvent, window: &mut Window, cx: &mut App) {
+    let f = TOP_MODAL_KEY.with(|k| k.borrow().clone());
+    if let Some(f) = f {
+        f(ev, window, cx);
+    }
+}
+
 pub fn modal(
     id: &'static str,
     width: f32,
@@ -331,6 +357,7 @@ fn modal_panel(
     key: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
     content: impl IntoIterator<Item = AnyElement>,
 ) -> Stateful<Div> {
+    TOP_MODAL_KEY.with(|k| *k.borrow_mut() = Some(std::rc::Rc::new(key)));
     let panel = div()
         .id((id, 1usize))
         .w(px(width))
@@ -373,7 +400,6 @@ fn modal_panel(
         .p(px(24.0))
         .bg(c::scrim_dialog())
         .occlude()
-        .capture_key_down(key)
         .child(panel)
 }
 

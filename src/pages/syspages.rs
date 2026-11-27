@@ -51,6 +51,8 @@ pub(crate) struct SysUi {
     /// 防火墙页的状态和新增规则表单
     pub(super) fw: Option<Result<crate::firewall::FwInfo, String>>,
     pub(super) fwf: super::firewallpage::FwForm,
+    /// 工具箱页的状态
+    pub(super) tool: super::toolboxpage::ToolUi,
     /// 存储页的空间透镜(点开的挂载点和扫描结果)
     pub(super) lens: Option<LensStore>,
     /// 透镜扫描的编号,每次扫描加一
@@ -63,6 +65,8 @@ pub(crate) struct SysUi {
     filter: SvcFilter,
     /// 计划任务的新增/编辑表单:None 是没打开,Some(None) 是新增,Some(Some(行号)) 是编辑 crontab 里的那一行
     pub(super) cron_form: Option<Option<usize>>,
+    /// 存储页的挂载表单
+    pub(super) mt: super::mountform::MountUi,
     /// 计划、命令两个输入框
     pub(super) cron_inputs: Option<Vec<Entity<InputState>>>,
     /// 表单里输入框以外的状态(任务类型、运行时间、备份的实例和库)
@@ -164,7 +168,7 @@ pub(super) fn reading(what: &'static str) -> AnyElement {
 }
 
 fn job(label: &str, target: &str, script: String, reload: (Kind, &str)) -> Job {
-    Job { label: label.into(), target: target.into(), script, root: true, input: None, reload: Some((reload.0, reload.1.to_string(), false)), guard: None }
+    Job { label: label.into(), target: target.into(), script, root: true, input: None, reload: Some((reload.0, reload.1.to_string(), false)), guard: None, secs: 0, calm: false }
 }
 
 fn svc_ask(title: &'static str, body: &'static str, verb: &'static str, cmd: &str, ic: IconName, name: String) -> DockAsk {
@@ -242,7 +246,7 @@ impl Home {
         self.dock_act(Action::Sys(job), cx);
     }
 
-    fn sys_store(&mut self, kind: Kind, res: Result<String, String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn sys_store(&mut self, kind: Kind, res: Result<String, String>, window: &mut Window, cx: &mut Context<Self>) {
         self.dock.sys.inflight.remove(&kind);
         let s = &mut self.dock.sys;
         match kind {
@@ -257,6 +261,7 @@ impl Home {
             Kind::Storage => keep_old(&mut s.storage, res.and_then(|t| sysops::parse_storage(&t))),
             Kind::Cron => keep_old(&mut s.cron, res.map(|t| sysops::parse_cron(&t))),
             Kind::Firewall => keep_old(&mut s.fw, res.map(|t| crate::firewall::parse(&t))),
+            Kind::ToolPorts | Kind::ToolNet | Kind::ToolTime | Kind::ToolSwap => self.tool_loaded(kind, res),
             Kind::Web => self.web_loaded(res, cx),
             Kind::WebOp => self.web_op_done(res, cx),
             Kind::WebPoll => self.web_polled(res, cx),
@@ -273,6 +278,10 @@ impl Home {
         if page != Page::Websites {
             self.web_page_left();
         }
+        if page == Page::Toolbox {
+            self.toolbox_sync(window, cx);
+            return;
+        }
         let Some((kind, script)) = spec(page) else { return };
         if self.dock.sys.search.is_none() {
             let s = cx.new(|cx| InputState::new(window, cx).placeholder("搜索"));
@@ -283,6 +292,7 @@ impl Home {
             self.dock.sys.shown = Some(page);
             self.dock.sys.asked.remove(&kind);
             self.dock.sys.cron_form = None;
+            self.dock.sys.mt.form = None;
             self.lens_close();
             if let Some(s) = self.dock.sys.search.clone() {
                 s.update(cx, |s, cx| s.set_value("", window, cx));
@@ -298,6 +308,24 @@ impl Home {
             }
             if page == Page::Firewall && !self.dock.sys.fwf.open && self.dock.sys.fwf.inputs.is_none() && std::env::var_os("OTTER_FW_FORM").is_some() {
                 self.fw_open(window, cx);
+            }
+            // 调试:截图时直接打开挂载表单(OTTER_MOUNT_FORM=new|edit|cifs)
+            if page == Page::Storage && self.dock.sys.mt.form.is_none() && std::env::var_os("OTTER_MOUNT_FORM").is_some() {
+                let nas = match &self.dock.sys.storage {
+                    Some(Ok(l)) => l.iter().position(|m| m.mount == "/mnt/nas"),
+                    _ => None,
+                };
+                match std::env::var("OTTER_MOUNT_FORM").as_deref() {
+                    Ok("edit") => self.mount_open(nas, window, cx),
+                    Ok("cifs") => {
+                        self.mount_open(None, window, cx);
+                        self.mount_set_kind(crate::mounts::MountKind::Cifs, window, cx);
+                    }
+                    _ => self.mount_open(None, window, cx),
+                }
+                if std::env::var_os("OTTER_MOUNT_ADV").is_some() {
+                    self.dock.sys.mt.adv = true;
+                }
             }
             // 调试:截图时直接打开编辑表单
             if page == Page::Cron && self.dock.sys.cron_form.is_none() && self.dock.sys.cron_inputs.is_none() && std::env::var_os("OTTER_CRON_FORM").is_some() {
@@ -416,6 +444,11 @@ impl Home {
             }
             Page::Websites => v.extend(self.web_header_actions(cx)),
             Page::Firewall => v.extend(self.fw_header_actions(cx)),
+            Page::Storage => {
+                if matches!(self.dock.sys.storage, Some(Ok(_))) {
+                    v.push(button("mt-add", IconName::Plus, "挂载").on_click(cx.listener(|this, _, window, cx| this.mount_open(None, window, cx))).into_any_element());
+                }
+            }
             Page::Cron => {
                 if matches!(self.dock.sys.cron, Some(Ok(_))) {
                     v.push(button("cron-add", IconName::Plus, "新增任务").on_click(cx.listener(|this, _, window, cx| this.cron_open(None, "", "", window, cx))).into_any_element());
@@ -435,6 +468,7 @@ impl Home {
             Page::Websites => Some(self.web_subtitle()),
             Page::Cron => Some(format!("{n} 上的 crontab 和 systemd 定时器;只能改自己的 crontab")),
             Page::Firewall => Some(self.fw_subtitle()),
+            Page::Toolbox => Some(format!("{n} 上的常用小工具:端口检查、网络诊断、时间与时区、Swap")),
             _ => None,
         }
     }
@@ -446,6 +480,7 @@ impl Home {
             Page::Storage => self.storage_page(cx),
             Page::Websites => self.web_page(cx),
             Page::Firewall => self.firewall_page(cx),
+            Page::Toolbox => self.toolbox_page(cx),
             _ => self.cron_page(cx),
         }
     }
@@ -632,9 +667,31 @@ impl Home {
             Some(Ok(l)) => l,
         };
         let picked = self.dock.sys.lens.as_ref().map(|l| l.root.clone());
-        let header = div().child(head("挂载点").flex_1().min_w_0()).child(head("设备").w(px(260.0))).child(head("类型").w(px(64.0))).child(head("用量").w(px(190.0))).child(head("已用 / 总量").w(px(150.0))).child(head("使用率").w(px(56.0))).child(head("inode").w(px(52.0)));
+        let header = div().child(head("挂载点").flex_1().min_w_0()).child(head("设备").w(px(260.0))).child(head("类型").w(px(64.0))).child(head("用量").w(px(190.0))).child(head("已用 / 总量").w(px(150.0))).child(head("使用率").w(px(56.0))).child(head("inode").w(px(52.0))).child(div().w(px(60.0)));
         let mut rows = Vec::new();
         for (i, m) in list.iter().enumerate() {
+            let mut act = div().w(px(60.0)).flex_shrink_0().flex().flex_row().justify_end().gap(px(2.0));
+            if m.managed {
+                if self.op_busy(&m.mount).is_some() {
+                    act = act.child(icon_btn_busy(("st-del", i), IconName::Unplug, c::danger(), true));
+                } else {
+                    act = act
+                        .child(tip(icon_btn(("st-edit", i), IconName::Pencil, c::secondary()), "编辑").on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.mount_open(Some(i), window, cx);
+                        })))
+                        .child(tip(icon_btn(("st-del", i), IconName::Unplug, c::danger()), "卸载").on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            let m = match &this.dock.sys.storage {
+                                Some(Ok(l)) => l.get(i).cloned(),
+                                _ => None,
+                            };
+                            if let Some(m) = m {
+                                this.mount_ask_remove(&m, cx);
+                            }
+                        })));
+                }
+            }
             let sel = picked.as_deref() == Some(m.mount.as_str());
             let path = m.mount.clone();
             let used_kb = m.used_kb;
@@ -651,6 +708,7 @@ impl Home {
                     .child(mono_cell(150.0, format!("{} / {}", sysops::fmt_kb(m.used_kb), sysops::fmt_kb(m.total_kb)), c::secondary()))
                     .child(mono_cell(56.0, format!("{}%", m.pct), usage_color(m.pct)))
                     .child(mono_cell(52.0, inode, inode_color))
+                    .child(act)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.lens_request(&path, used_kb, cx);
                     })),
@@ -713,7 +771,7 @@ impl Home {
                             let Some(Ok(info)) = &this.dock.sys.cron else { return };
                             this.dock.sys.cron_row = Some(line);
                             let text = sysops::crontab_replace(&info.user_text, Some(line), None);
-                            let j = Job { label: "删除任务".into(), target: "crontab".into(), script: "crontab -".into(), root: false, input: Some(text), reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)), guard: None };
+                            let j = Job { label: "删除任务".into(), target: "crontab".into(), script: "crontab -".into(), root: false, input: Some(text), reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)), guard: None, secs: 0, calm: false };
                             this.ask(DockAsk { title: "删除计划任务", tile: IconName::CalendarClock, name: cm.chars().take(40).collect(), detail: "我的 crontab", body: "从 crontab 里删除这一行,之后不会再自动执行", label: "删除任务", action: Action::Sys(j), list: Vec::new() }, cx);
                         })));
                     }
@@ -745,7 +803,7 @@ impl Home {
                             Some(_) => return,
                             None => crate::web::cron_remove_script(),
                         };
-                        let j = Job { label: "删除任务".into(), target: "crontab".into(), script: rm, root: true, input: None, reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)), guard: None };
+                        let j = Job { label: "删除任务".into(), target: "crontab".into(), script: rm, root: true, input: None, reload: Some((Kind::Cron, sysops::CRON_SCRIPT.to_string(), false)), guard: None, secs: 0, calm: false };
                         this.ask(DockAsk { title, tile: IconName::CalendarClock, name: name.clone(), detail: "/etc/cron.d", body, label: "删除任务", action: Action::Sys(j), list: Vec::new() }, cx);
                     })));
                 }
@@ -826,11 +884,17 @@ Filesystem     Type 1024-blocks      Used Available Capacity Mounted on\n\
 /dev/vda1      ext4    103081248  84651200  18430048      83% /\n\
 /dev/vdb1      xfs     515396075  98304000 417092075      20% /data\n\
 /dev/vdc1      ext4     20511312  19700000    811312      97% /backup\n\
+10.0.0.5:/export/media nfs4 1048576000 314572800 734003200 30% /mnt/nas\n\
 @@INODES\n\
 Filesystem      Inodes   IUsed    IFree IUse% Mounted on\n\
 /dev/vda1      6553600  845678  5707922   13% /\n\
 /dev/vdb1     51539607   12011 51527596    1% /data\n\
-/dev/vdc1      1310720 1250000    60720   96% /backup\n";
+/dev/vdc1      1310720 1250000    60720   96% /backup\n\
+@@FSTAB\n\
+# /etc/fstab\n\
+UUID=1a2b-3c4d / ext4 defaults 0 1\n\
+/dev/vdb1 /data xfs defaults,nofail 0 2\n\
+10.0.0.5:/export/media /mnt/nas nfs4 defaults,_netdev,nofail 0 0 # otter\n";
 
 const DEMO_CRON: &str = "\
 @@USER\n\

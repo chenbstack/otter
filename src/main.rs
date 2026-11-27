@@ -15,6 +15,7 @@ mod leave;
 mod takeover;
 mod daemon_conf;
 mod sysops;
+mod mounts;
 mod ctfiles;
 mod docker;
 mod docker_install;
@@ -23,6 +24,7 @@ mod web;
 mod dbinst;
 mod crontasks;
 mod firewall;
+mod toolbox;
 #[cfg(all(test, feature = "orbtest"))]
 mod orbtest;
 mod dbsecret;
@@ -86,10 +88,11 @@ enum Page {
     Cron,
     Websites,
     Store,
+    Toolbox,
 }
 
 impl Page {
-    const ALL: [Page; 15] = [
+    const ALL: [Page; 16] = [
         Page::Overview,
         Page::Containers,
         Page::Database,
@@ -105,6 +108,7 @@ impl Page {
         Page::Cron,
         Page::Websites,
         Page::Store,
+        Page::Toolbox,
     ];
     /// 容器相关的页(侧栏的「容器」项下面用页签切换)
     fn is_docker(self) -> bool {
@@ -112,11 +116,11 @@ impl Page {
     }
     /// 整页(页头 + 内容)一起滚动的列表页;配置页有定高的编辑器、堆栈页是虚拟列表,不在其中
     fn scrolls_whole(self) -> bool {
-        matches!(self, Page::Containers | Page::Images | Page::Volumes | Page::Registry | Page::Database | Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites | Page::Store)
+        matches!(self, Page::Containers | Page::Images | Page::Volumes | Page::Registry | Page::Database | Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites | Page::Store | Page::Toolbox)
     }
     /// 服务器运维页:读 SSH 命令的输出,不依赖 Docker
     fn is_sys(self) -> bool {
-        matches!(self, Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites)
+        matches!(self, Page::Processes | Page::Services | Page::Firewall | Page::Storage | Page::Cron | Page::Websites | Page::Toolbox)
     }
     fn label(self) -> &'static str {
         match self {
@@ -135,6 +139,7 @@ impl Page {
             Page::Cron => "计划任务",
             Page::Websites => "网站",
             Page::Store => "应用商店",
+            Page::Toolbox => "工具箱",
         }
     }
     fn icon(self) -> IconName {
@@ -154,6 +159,7 @@ impl Page {
             Page::Cron => IconName::CalendarClock,
             Page::Websites => IconName::Globe,
             Page::Store => IconName::Store,
+            Page::Toolbox => IconName::Wrench,
         }
     }
 }
@@ -415,6 +421,7 @@ impl Home {
 
 impl Render for Home {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        ui::modal_key_reset();
         self.track_window(window, cx);
         self.track_tabs();
         self.sync_conn_secret(window, cx);
@@ -472,6 +479,7 @@ impl Render for Home {
             .flex_col()
             .bg(c::bg())
             .text_color(c::text())
+            .capture_key_down(|ev, window, cx| ui::modal_key_dispatch(ev, window, cx))
             .child(crate::ui::blur_on_click(term_body))
             .child(backdrop())
             .child(titlebar)
@@ -543,8 +551,15 @@ fn main() {
                 h.logs_verbose = h.store.as_ref().is_some_and(|s| s.get_setting(settings_page::KEY_LOGS_VERBOSE).as_deref() == Some("on"));
                 // ⌘, 打开设置:用全局按键拦截,不依赖当前焦点在哪个元素里
                 let weak: WeakEntity<Home> = cx.entity().downgrade();
-                cx.intercept_keystrokes(move |ev, _, app| {
+                cx.intercept_keystrokes(move |ev, window, app| {
                     let m = &ev.keystroke.modifiers;
+                    // Esc 关弹窗:全局拦截,不管焦点在哪个元素里(焦点不在弹窗里时,弹窗自己的按键监听收不到)
+                    if ev.keystroke.key == "escape" && !m.platform && !m.control && !m.alt && !m.shift && ui::modal_key_active() {
+                        let down = KeyDownEvent { keystroke: ev.keystroke.clone(), is_held: false, prefer_character_input: false };
+                        ui::modal_key_dispatch(&down, window, app);
+                        app.stop_propagation();
+                        return;
+                    }
                     let accel = if cfg!(target_os = "macos") { m.platform && !m.control } else { m.control && !m.platform };
                     if ev.keystroke.key == "," && accel && !m.shift && !m.alt {
                         if let Some(me) = weak.upgrade() {
