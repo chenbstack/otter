@@ -748,7 +748,7 @@ async fn run(conn: &Conn, cols: u16, rows: u16, io: Io, resize: &mut tokio_mpsc:
 
 /// 保存的密码被服务器拒绝后,在「连接中」页最多问 3 次新密码。登录成功返回 true,用户勾选保存时 `save_pw` 交给界面写回节点。
 /// 没有界面的连接(sftp、docker 等后台连接)`ask_secret` 直接返回 None,这里就什么都不做。
-async fn retype_password(conn: &Conn, io: &Io, session: &mut client::Handle<Client>) -> Result<bool, String> {
+async fn retype_password(conn: &Conn, io: &Io, session: &mut client::Handle<Client>, allowed: &Allowed) -> Result<bool, String> {
     let target = format!("{}@{}", conn.user, conn.host);
     let mut error = Some("保存的密码被服务器拒绝了,可能已经修改".to_string());
     for _ in 0..3 {
@@ -756,8 +756,8 @@ async fn retype_password(conn: &Conn, io: &Io, session: &mut client::Handle<Clie
         if p.is_empty() {
             break;
         }
-        let r = session.authenticate_password(conn.user.clone(), p.as_str().to_string()).await.map_err(|e| e.to_string())?;
-        if !r.success() {
+        let r = password_login(session, conn, io, allowed, p.as_str()).await?;
+        if !r {
             error = Some("密码不对,请重试".into());
             continue;
         }
@@ -774,6 +774,83 @@ async fn retype_password(conn: &Conn, io: &Io, session: &mut client::Handle<Clie
     Ok(false)
 }
 
+/// 服务器声明允许的认证方式(先发一次 `none` 探测得到);探测不出来时为 None,表示都试一遍
+type Allowed = Option<Vec<russh::MethodKind>>;
+
+fn allows(a: &Allowed, k: russh::MethodKind) -> bool {
+    a.as_ref().map_or(true, |v| v.contains(&k))
+}
+
+async fn probe_methods(session: &mut client::Handle<Client>, user: &str) -> Result<Option<Allowed>, String> {
+    use russh::client::AuthResult;
+    Ok(match session.authenticate_none(user.to_string()).await {
+        Ok(AuthResult::Success) => None,
+        Ok(AuthResult::Failure { remaining_methods, .. }) if !remaining_methods.is_empty() => Some(Some(remaining_methods.iter().copied().collect())),
+        _ => Some(None),
+    })
+}
+
+fn method_names(a: &Allowed) -> String {
+    use russh::MethodKind as M;
+    let v: Vec<&str> = a
+        .iter()
+        .flatten()
+        .filter_map(|k| match k {
+            M::PublicKey => Some("私钥"),
+            M::Password => Some("密码"),
+            M::KeyboardInteractive => Some("键盘交互(验证码等)"),
+            _ => None,
+        })
+        .collect();
+    if v.is_empty() { "无".into() } else { v.join("、") }
+}
+
+/// 提示像是在要登录密码(而不是验证码、新密码)
+fn is_password_prompt(p: &str) -> bool {
+    let l = p.to_lowercase();
+    (l.contains("password") || l.contains("密码")) && !["new", "retype", "again", "confirm", "新", "再次", "确认", "current"].iter().any(|w| l.contains(w))
+}
+
+/// 密码登录:服务器允许 password 就先试它;被拒或只允许 keyboard-interactive(UniFi、PAM 服务器常见)就走问答:
+/// 像密码的提示用 `pw` 回答,其他提示(验证码、一次性口令)在连接页向用户要。
+async fn password_login(session: &mut client::Handle<Client>, conn: &Conn, io: &Io, allowed: &Allowed, pw: &str) -> Result<bool, String> {
+    use russh::MethodKind as M;
+    if allows(allowed, M::Password) && session.authenticate_password(conn.user.clone(), pw.to_string()).await.map_err(|e| e.to_string())?.success() {
+        return Ok(true);
+    }
+    if !allows(allowed, M::KeyboardInteractive) {
+        return Ok(false);
+    }
+    use client::KeyboardInteractiveAuthResponse as K;
+    let target = format!("{}@{}", conn.user, conn.host);
+    let mut r = session.authenticate_keyboard_interactive_start(conn.user.clone(), None).await.map_err(|e| e.to_string())?;
+    // 服务器反复要求回答时最多应付几轮,避免死循环
+    for _ in 0..6 {
+        match r {
+            K::Success => return Ok(true),
+            K::Failure { .. } => return Ok(false),
+            K::InfoRequest { name, instructions, prompts } => {
+                let mut answers = Vec::with_capacity(prompts.len());
+                for p in &prompts {
+                    if is_password_prompt(&p.prompt) {
+                        answers.push(pw.to_string());
+                        continue;
+                    }
+                    let text = p.prompt.trim().trim_end_matches([':', ':']).trim().to_string();
+                    let hint = [name.trim(), instructions.trim(), text.as_str()].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
+                    let title = format!("{target} 需要验证信息");
+                    let Some((v, _)) = io.ask_secret(title, if hint.is_empty() { "服务器要求输入验证信息".into() } else { hint }, None, false).await else {
+                        return Err(if io.interactive { "已取消".into() } else { "服务器要求输入验证码,请先在终端标签里连接一次".into() });
+                    };
+                    answers.push(v.as_str().to_string());
+                }
+                r = session.authenticate_keyboard_interactive_respond(answers).await.map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(false)
+}
+
 async fn authenticate(conn: &Conn, io: &Io, session: &mut client::Handle<Client>) -> Result<(), String> {
     if let Some(e) = &conn.auth_error {
         return Err(e.clone());
@@ -782,7 +859,17 @@ async fn authenticate(conn: &Conn, io: &Io, session: &mut client::Handle<Client>
     let auth = &conn.auth;
     let mut errors: Vec<String> = Vec::new();
 
-    if let Some(k) = &auth.key {
+    // 先问服务器允许哪些方式,不盲试(省往返,不浪费 MaxAuthTries,报错也能说准)
+    let allowed: Allowed = match probe_methods(session, &conn.user).await? {
+        None => return Ok(()),
+        Some(a) => a,
+    };
+    if let Some(a) = &allowed {
+        logs::push(logs::Level::Info, &label, format!("服务器允许的认证方式:{}", method_names(&Some(a.clone()))));
+    }
+    use russh::MethodKind as M;
+
+    if let Some(k) = auth.key.as_ref().filter(|_| allows(&allowed, M::PublicKey)) {
         match try_key(conn, io, session, k).await {
             Ok(true) => return Ok(()),
             Ok(false) => errors.push(format!("私钥 {} 被服务器拒绝", k.label)),
@@ -792,7 +879,7 @@ async fn authenticate(conn: &Conn, io: &Io, session: &mut client::Handle<Client>
             }
         }
     }
-    if auth.agent {
+    if auth.agent && allows(&allowed, M::PublicKey) {
         match try_agent(conn, session).await {
             Ok(true) => return Ok(()),
             Ok(false) => errors.push("SSH Agent 里的密钥都被服务器拒绝".into()),
@@ -801,6 +888,15 @@ async fn authenticate(conn: &Conn, io: &Io, session: &mut client::Handle<Client>
                 errors.push(e);
             }
         }
+    }
+    let pw_ok = allows(&allowed, M::Password) || allows(&allowed, M::KeyboardInteractive);
+    if !allows(&allowed, M::PublicKey) && (auth.key.is_some() || auth.agent) {
+        errors.push("服务器不允许私钥登录".into());
+    }
+    if !pw_ok {
+        // 服务器只认私钥等其他方式:不用密码去试,直接说清楚
+        errors.push(format!("服务器不允许密码登录(它允许的方式:{})", method_names(&allowed)));
+        return Err(errors.join(";"));
     }
     // 本次连接里用户现场输入过的新密码优先(自动重连时不用再问一遍)
     let overridden = io.pw_override.lock().ok().and_then(|g| g.clone());
@@ -812,13 +908,13 @@ async fn authenticate(conn: &Conn, io: &Io, session: &mut client::Handle<Client>
         None => None,
     };
     if let Some(pw) = password {
-        let r = session.authenticate_password(conn.user.clone(), pw.as_str().to_string()).await.map_err(|e| e.to_string())?;
-        if r.success() {
+        let r = password_login(session, conn, io, &allowed, pw.as_str()).await?;
+        if r {
             return Ok(());
         }
         errors.push("密码不对或服务器不允许密码登录".into());
         // 保存的密码被拒(多半服务器上改过):在终端里让用户输入新密码,成功后问要不要写回节点
-        if had_saved && retype_password(conn, io, session).await? {
+        if had_saved && retype_password(conn, io, session, &allowed).await? {
             return Ok(());
         }
     }
@@ -939,5 +1035,15 @@ mod tests {
         assert_eq!((c.user.as_str(), c.host.as_str(), c.port), ("deploy", "h.example.com", 2222));
         let c = Conn::parse("h.example.com");
         assert_eq!((c.user.as_str(), c.port), ("root", 22));
+    }
+
+    #[test]
+    fn password_prompt_vs_code_prompt() {
+        for p in ["Password: ", "root@h's password:", "[sudo] password for x:", "密码:"] {
+            assert!(super::is_password_prompt(p), "{p}");
+        }
+        for p in ["Verification code: ", "Enter OTP:", "New password:", "Retype new password:", "Current password:", "验证码:"] {
+            assert!(!super::is_password_prompt(p), "{p}");
+        }
     }
 }

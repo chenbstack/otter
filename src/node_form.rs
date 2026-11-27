@@ -859,6 +859,7 @@ impl Home {
             TestState::Ok(ms) => Some((IconName::CircleCheck, c::online(), format!("连接成功 · {ms}ms"))),
             TestState::Err(e) => Some((IconName::CircleX, c::danger(), e.to_string())),
         };
+        let no_result = test_result.is_none();
         let can_submit = !NodeForm::val(&f.name, cx).is_empty() && !NodeForm::val(&f.host, cx).is_empty();
 
         let footer = div()
@@ -874,17 +875,19 @@ impl Home {
             .when_some(test_result, |d, (ic, color, text)| {
                 d.child(
                     div()
+                        .flex_1()
+                        .min_w_0()
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap(px(5.0))
                         .text_size(px(t::TYPE_CONTROL))
                         .text_color(color)
-                        .child(icon(ic, 13.0, color))
-                        .child(text),
+                        .child(div().flex_shrink_0().child(icon(ic, 13.0, color)))
+                        .child(div().min_w_0().truncate().child(text)),
                 )
             })
-            .child(div().flex_1())
+            .when(no_result, |d| d.child(div().flex_1()))
             .child(ctl_btn("cancel", None, "取消", 34.0).on_click(cx.listener(|this, _, _, cx| this.close_form(cx))))
             .child(
                 div()
