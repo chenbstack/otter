@@ -29,7 +29,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-10-21
+      # 缓存按 ref 隔离,tag 读不到别的 tag 的缓存,只能读 main 的:由 cache-warm.yml 在 main 上保存,发版只读
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: scripts/package-dmg.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -52,15 +56,19 @@ jobs:
         with:
           toolchain: nightly-2026-10-21
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --release --bin otter-gui --bin otter
-      # 安装程序是自己写的(src/bin/setup.rs),把上面构建好的两个 exe 编进去
+      # 安装程序是自己写的(src/bin/setup.rs),把上面构建好的两个 exe 编进去。
+      # 必须用 release profile:自定义 profile 会另起 target/setup 目录,把所有依赖重编一遍(曾多花近 9 分钟)
       - name: Build installer
         shell: pwsh
         run: |
-          cargo build --profile setup --bin otter-setup --features payload
+          cargo build --release --bin otter-setup --features payload
           $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item target/setup/otter-setup.exe "dist/Otter-$ver-windows-x86_64-setup.exe"
+          Copy-Item target/release/otter-setup.exe "dist/Otter-$ver-windows-x86_64-setup.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: windows

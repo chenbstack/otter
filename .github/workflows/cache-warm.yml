@@ -1,0 +1,43 @@
+name: cache-warm
+
+# 发版是 tag 触发,tag 读不到别的 tag 存的缓存,只能读默认分支的。这里在 main 上构建并保存缓存,发版时依赖不用冷编译。
+# key 和环境变量必须与 release.yml 保持一致,否则缓存对不上。
+on:
+  push:
+    branches: [main]
+    paths: ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'vendor/**', '.github/workflows/cache-warm.yml', '.github/workflows/release.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: cache-warm
+  cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+
+jobs:
+  macos:
+    timeout-minutes: 40
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-21
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos
+      - run: cargo build --release
+
+  windows:
+    timeout-minutes: 40
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-21
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows
+      - run: cargo build --release --bin otter-gui --bin otter
