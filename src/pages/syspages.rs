@@ -89,6 +89,8 @@ pub(crate) struct SysUi {
     pub(super) lens_ask: Option<(String, u64, bool)>,
     /// 正在做访问检查的挂载点:(路径, 已用 KiB, 是不是网络存储, 这次是不是用 root 检查)
     pub(super) lens_probe: Option<(String, u64, bool, bool)>,
+    /// 登录用户能读之后,顺带试 root(sudo)的那次检查:拿不到 root 不算错,退回按登录用户统计
+    pub(super) lens_try_root: bool,
     /// 透镜画布的实际大小(像素,canvas 量出来的),色块按它排版
     pub(super) lens_size: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
     /// 右键菜单:(块的完整路径, 点击位置)

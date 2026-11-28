@@ -529,6 +529,7 @@ impl Home {
         }
         let network = matches!(&self.dock.sys.storage, Some(Ok(l)) if l.iter().any(|m| m.mount == path && crate::sysops::is_network_fs(&m.fstype)));
         self.lens_close();
+        self.dock.sys.lens_try_root = false;
         let mut st = LensStore::new(path, used_kb).network(network);
         st.probing = true;
         self.dock.sys.lens = Some(st);
@@ -537,7 +538,8 @@ impl Home {
         cx.notify();
     }
 
-    /// 访问检查的结果回来了。登录用户读不了就换 root(sudo)再查一次;root 能读就以 root 统计
+    /// 访问检查的结果回来了。登录用户读不了就换 root(sudo)再查一次;登录用户读得了的本地存储也试 root(否则 /root、
+    /// /var/lib/docker 这类目录会被悄悄漏掉,结果远小于已用量),root 可用就以 root 统计,不可用退回登录用户
     pub(crate) fn lens_probed(&mut self, res: Result<String, String>, cx: &mut Context<Self>) {
         use crate::sysops::{Probe, parse_probe};
         let Some((path, used_kb, network, by_root)) = self.dock.sys.lens_probe.take() else { return };
@@ -546,8 +548,22 @@ impl Home {
             return;
         }
         let probe = res.as_ref().ok().map(|t| parse_probe(t));
+        // 顺带试 root 的那次:能 root 就以 root 统计(整盘,不只登录用户读得到的部分);
+        // 提不了权就退回登录用户(之前已检查通过),结果会偏小
+        if by_root && std::mem::take(&mut self.dock.sys.lens_try_root) && probe != Some(Probe::Ok) {
+            self.lens_after_probe(path, used_kb, network, false, cx);
+            return;
+        }
         // 登录用户读不了:换 root 再查一次(没有 root 权限就明说)
         if !by_root && probe == Some(Probe::Denied) {
+            self.dock.sys.lens_probe = Some((path.clone(), used_kb, network, true));
+            self.sys_ask(crate::sysops::Kind::Probe, &crate::sysops::probe_script(&path), true);
+            cx.notify();
+            return;
+        }
+        // 登录用户能读:再试一次 root,本地存储才试(网络存储常有 root squash,且 sudo 遍历更慢)
+        if !by_root && probe == Some(Probe::Ok) && !network {
+            self.dock.sys.lens_try_root = true;
             self.dock.sys.lens_probe = Some((path.clone(), used_kb, network, true));
             self.sys_ask(crate::sysops::Kind::Probe, &crate::sysops::probe_script(&path), true);
             cx.notify();
@@ -568,6 +584,11 @@ impl Home {
             cx.notify();
             return;
         }
+        self.lens_after_probe(path, used_kb, network, by_root, cx);
+    }
+
+    /// 检查通过:大存储先确认,否则直接扫
+    fn lens_after_probe(&mut self, path: String, used_kb: u64, network: bool, by_root: bool, cx: &mut Context<Self>) {
         if network || used_kb >= BIG_KB {
             if let Some(st) = self.dock.sys.lens.as_mut() {
                 st.as_root = by_root;
@@ -963,7 +984,7 @@ impl Home {
                     .when(zoomed, |d| d.child(icon_btn(("lens-back", 0), IconName::ArrowLeft, c::muted()).on_click(cx.listener(|this, _, _, cx| this.lens_zoom_out(cx)))))
                     .child(div().text_size(px(t::TYPE_CONTROL)).font_weight(FontWeight::SEMIBOLD).child("空间透镜"))
                     .child(div().text_size(px(t::TYPE_MICRO)).font_family(MONO).text_color(c::accent()).child("SPACE·LENS"))
-                    .child(small(if as_root { "以 root(sudo)统计,只读" } else if network { "网络存储:要遍历整个共享,可能很慢,可随时停止" } else { "只统计登录用户能读到的部分" }, if as_root || network { c::warn() } else { c::ghost() }))
+                    .child(small(if as_root { "以 root(sudo)统计,只读" } else if network { "网络存储:要遍历整个共享,可能很慢,可随时停止" } else { "只统计登录用户能读到的部分(没有 root 权限,结果可能偏小)" }, if network && !as_root { c::warn() } else { c::ghost() }))
                     .when(scanning, |d| d.child(crate::ui::dot_spinner(("lens-scan", 0), c::accent())))
                     .child(div().flex_1())
                     .child(div().text_size(px(t::TYPE_CAPTION)).font_family(MONO).text_color(c::muted()).child(SharedString::from(info)))
